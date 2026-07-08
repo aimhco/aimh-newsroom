@@ -1,0 +1,38 @@
+{
+  "name": "aimh-newsroom",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Autonomous AIMH AI newsroom pipeline for verified, video-native daily AI news packages.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "newsroom:collect": "tsx src/cli/index.ts collect",
+    "newsroom:rank": "tsx src/cli/index.ts rank",
+    "newsroom:plan": "tsx src/cli/index.ts plan",
+    "newsroom:capture": "tsx src/cli/index.ts capture",
+    "newsroom:voice": "tsx src/cli/index.ts voice",
+    "newsroom:render": "tsx src/cli/index.ts render",
+    "newsroom:qa": "tsx src/cli/index.ts qa",
+    "newsroom:upload": "tsx src/cli/index.ts upload",
+    "newsroom:overnight": "tsx src/cli/index.ts overnight",
+    "newsroom:resume": "tsx src/cli/index.ts resume",
+    "newsroom:dry-run": "tsx src/cli/index.ts overnight --dry-run --fixtures --date 2026-07-09 --no-upload"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "@resvg/resvg-js-darwin-x64": "2.6.2"
+  },
+  "devDependencies": {
+    "@rollup/rollup-darwin-x64": "4.62.2",
+    "@types/node": "^24.0.10",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "packageManager": "pnpm@11.7.0"
+}
