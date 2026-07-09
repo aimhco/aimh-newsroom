@@ -75,6 +75,7 @@ None in fixture dry-run mode.
 - PASS private_upload_policy: privacyStatus=private
 - PASS metadata_valid: title and description present
 - PASS secret_scan: no secret-like text in package JSON
+- PASS source_capture: captured 3 of 4 attempted source screenshots; 1 used fallback visuals
 - PASS local_render: rendered /Users/dennywii/Documents/dev/aimh-newsroom-pipeline/episodes/2026-07-09-daily-ai-briefing/render/final.mp4
 
 ## Next recommended command

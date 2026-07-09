@@ -13,6 +13,7 @@ async function main(): Promise<void> {
   const date = flagValue(args, "--date") ?? "2026-07-09";
   const fixtures = args.includes("--fixtures") || command === "overnight" || command === "resume";
   const dryRun = args.includes("--dry-run") || command === "overnight" || command === "resume";
+  const captureSources = args.includes("--capture") || command === "capture";
   const renderVideo = args.includes("--render") || command === "render";
   const noUpload = args.includes("--no-upload") || dryRun || command !== "upload";
   const videoEnginePath = flagValue(args, "--video-engine-path") ?? process.env.AIMH_VIDEO_ENGINE_PATH;
@@ -26,6 +27,7 @@ async function main(): Promise<void> {
       fixtures,
       dryRun,
       noUpload,
+      captureSources,
       renderVideo,
       videoEnginePath
     });

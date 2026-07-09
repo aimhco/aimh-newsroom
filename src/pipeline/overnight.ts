@@ -2,6 +2,7 @@ import { join, relative } from "node:path";
 import { fixtureRawItems } from "../collectors/fixtures";
 import { loadEnvSnapshotFromFiles } from "../config/env";
 import { generateFallbackCardPng } from "../capture/generateFallbackCard";
+import { captureSourceScreenshots, type CaptureSummary } from "../capture/sourceScreenshotCapture";
 import { detectVideoEngine } from "../integrations/video-engine/detectVideoEngine";
 import { normalizeRawItems } from "../normalize/normalize";
 import { buildEpisodePackage } from "../plan/episodeBuilder";
@@ -20,8 +21,14 @@ export interface RunOvernightOptions {
   fixtures: boolean;
   dryRun: boolean;
   noUpload: boolean;
+  captureSources?: boolean;
   renderVideo?: boolean;
   videoEnginePath?: string;
+  captureAdapter?: (options: {
+    episodeDir: string;
+    package: EpisodePackage;
+    headless: boolean;
+  }) => Promise<CaptureSummary>;
   renderer?: (options: {
     episodeDir: string;
     package: EpisodePackage;
@@ -35,6 +42,7 @@ export interface RunOvernightResult {
   episodeDir: string;
   qa: QaReport;
   package: EpisodePackage;
+  capture?: CaptureSummary;
   render?: LocalRenderResult;
 }
 
@@ -187,6 +195,16 @@ export async function runOvernight(options: RunOvernightOptions): Promise<RunOve
   });
 
   await attachFallbackCards(episodeDir, pkg);
+  let captureSummary: CaptureSummary | undefined;
+  if (options.captureSources) {
+    const captureAdapter = options.captureAdapter ?? captureSourceScreenshots;
+    captureSummary = await captureAdapter({
+      episodeDir,
+      package: pkg,
+      headless: env.values.PLAYWRIGHT_MCP_HEADLESS !== "false"
+    });
+  }
+
   let renderResult: LocalRenderResult | undefined;
   if (options.renderVideo) {
     const renderer = options.renderer ?? renderLocalFallbackVideo;
@@ -213,6 +231,16 @@ export async function runOvernight(options: RunOvernightOptions): Promise<RunOve
   }
 
   const qa = runPackageQa(pkg);
+  if (captureSummary) {
+    qa.checks.push({
+      name: "source_capture",
+      pass: captureSummary.captured > 0,
+      detail:
+        captureSummary.failed > 0
+          ? `captured ${captureSummary.captured} of ${captureSummary.attempted} attempted source screenshots; ${captureSummary.failed} used fallback visuals`
+          : `captured ${captureSummary.captured} of ${captureSummary.attempted} attempted source screenshots`
+    });
+  }
   if (renderResult?.qaCheck) qa.checks.push(renderResult.qaCheck);
   qa.ok = qa.checks.every((item) => item.pass);
   const uploadEnabled = env.values.YOUTUBE_UPLOAD_ENABLED === "true";
@@ -264,7 +292,9 @@ export async function runOvernight(options: RunOvernightOptions): Promise<RunOve
   await writeJson(join(episodeDir, "reports/rate-limits.json"), []);
   await writeJsonl(join(episodeDir, "reports/run-events.jsonl"), [
     runEvent("collect_fixture_items", "succeeded"),
-    runEvent("capture_fallback_cards", "fallback_used", true),
+    captureSummary
+      ? runEvent("capture_source_screenshots", captureSummary.failed === 0 ? "succeeded" : "fallback_used", captureSummary.failed > 0)
+      : runEvent("capture_fallback_cards", "fallback_used", true),
     runEvent("voice_placeholder", "skipped", true),
     renderResult
       ? runEvent("render_local_fallback_video", renderResult.status === "rendered" ? "succeeded" : "failed", renderResult.voice.provider === "silent_placeholder")
@@ -302,5 +332,12 @@ export async function runOvernight(options: RunOvernightOptions): Promise<RunOve
   await writeText(join(options.projectRoot, "reports/morning-handoff-2026-07-09.md"), handoff);
   await writeText(join(episodeDir, "reports/morning-handoff-2026-07-09.md"), handoff);
 
-  return { episodeId, episodeDir, qa, package: pkg, ...(renderResult ? { render: renderResult } : {}) };
+  return {
+    episodeId,
+    episodeDir,
+    qa,
+    package: pkg,
+    ...(captureSummary ? { capture: captureSummary } : {}),
+    ...(renderResult ? { render: renderResult } : {})
+  };
 }

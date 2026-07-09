@@ -17,6 +17,12 @@ Render a local preview video without uploading:
 pnpm newsroom:render --fixtures --no-upload
 ```
 
+Capture source screenshots, attach them to `shotlist.json`, then render without uploading:
+
+```bash
+pnpm newsroom:render --fixtures --capture --no-upload
+```
+
 Default dry-run output:
 
 ```text
@@ -32,6 +38,7 @@ episodes/2026-07-09-daily-ai-briefing/
   qa.json
   render/final.mp4       # only after newsroom:render
   render/captions.srt    # only after newsroom:render
+  assets/screenshots/    # after --capture
   assets/cards/
   reports/
 ```

@@ -13,6 +13,12 @@ Render a finished local preview without upload:
 pnpm newsroom:render --fixtures --no-upload
 ```
 
+Capture allowlisted source screenshots and render a preview without upload:
+
+```bash
+pnpm newsroom:render --fixtures --capture --no-upload
+```
+
 Verification commands:
 
 ```bash
@@ -21,6 +27,7 @@ pnpm test
 pnpm build
 pnpm newsroom:dry-run
 pnpm newsroom:render --fixtures --no-upload
+pnpm newsroom:render --fixtures --capture --no-upload
 ```
 
 Primary output:
@@ -30,6 +37,7 @@ episodes/2026-07-09-daily-ai-briefing/
 reports/morning-handoff-2026-07-09.md
 reports/questions-for-denny.md
 episodes/2026-07-09-daily-ai-briefing/render/final.mp4
+episodes/2026-07-09-daily-ai-briefing/reports/capture-summary.json
 ```
 
 Safe defaults:

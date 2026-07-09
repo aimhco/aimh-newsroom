@@ -22,7 +22,8 @@
   },
   "dependencies": {
     "@resvg/resvg-js": "^2.6.2",
-    "@resvg/resvg-js-darwin-x64": "2.6.2"
+    "@resvg/resvg-js-darwin-x64": "2.6.2",
+    "playwright": "1.61.0"
   },
   "devDependencies": {
     "@rollup/rollup-darwin-x64": "4.62.2",

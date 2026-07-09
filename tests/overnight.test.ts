@@ -71,4 +71,44 @@ describe("overnight dry run", () => {
     const renderStatus = await readFile(join(result.episodeDir, "render/render-status.json"), "utf8");
     expect(renderStatus).toContain("local_fallback_render");
   });
+
+  it("runs a capture adapter before rendering when capture is requested", async () => {
+    const root = await mkdtemp(join(tmpdir(), "aimh-newsroom-capture-"));
+    const result = await runOvernight({
+      projectRoot: root,
+      date: "2026-07-09",
+      fixtures: true,
+      dryRun: false,
+      noUpload: true,
+      captureSources: true,
+      renderVideo: true,
+      videoEnginePath: "/Users/dennywii/Documents/dev/aimh-video-engine",
+      captureAdapter: async ({ package: episodePackage }) => {
+        episodePackage.shotlist.shots[0]!.asset_path = "assets/screenshots/shot_001.png";
+        episodePackage.shotlist.shots[0]!.status = "captured";
+        return { attempted: 1, captured: 1, failed: 0, skipped: 4, results: [] };
+      },
+      renderer: async ({ episodeDir, package: episodePackage }) => ({
+        mode: "local_fallback_render",
+        status: "rendered",
+        finalVideoPath: join(episodeDir, "render/final.mp4"),
+        captionsPath: join(episodeDir, "render/captions.srt"),
+        voice: { provider: "silent_placeholder", chunks: [], warnings: [] },
+        warnings: [],
+        qaCheck: {
+          name: "local_render",
+          pass: episodePackage.shotlist.shots[0]?.asset_path === "assets/screenshots/shot_001.png",
+          detail: "stub render saw captured screenshot"
+        }
+      })
+    });
+
+    expect(result.capture?.captured).toBe(1);
+    expect(result.package.shotlist.shots[0]?.asset_path).toBe("assets/screenshots/shot_001.png");
+    expect(result.qa.checks.find((check) => check.name === "source_capture")).toEqual({
+      name: "source_capture",
+      pass: true,
+      detail: "captured 1 of 1 attempted source screenshots"
+    });
+  });
 });
