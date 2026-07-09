@@ -7,6 +7,12 @@ pnpm install
 pnpm newsroom:dry-run
 ```
 
+Render a finished local preview without upload:
+
+```bash
+pnpm newsroom:render --fixtures --no-upload
+```
+
 Verification commands:
 
 ```bash
@@ -14,6 +20,7 @@ pnpm lint
 pnpm test
 pnpm build
 pnpm newsroom:dry-run
+pnpm newsroom:render --fixtures --no-upload
 ```
 
 Primary output:
@@ -22,6 +29,7 @@ Primary output:
 episodes/2026-07-09-daily-ai-briefing/
 reports/morning-handoff-2026-07-09.md
 reports/questions-for-denny.md
+episodes/2026-07-09-daily-ai-briefing/render/final.mp4
 ```
 
 Safe defaults:

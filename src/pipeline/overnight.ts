@@ -7,6 +7,7 @@ import { normalizeRawItems } from "../normalize/normalize";
 import { buildEpisodePackage } from "../plan/episodeBuilder";
 import { runPackageQa } from "../qa/qaRunner";
 import { rankStories } from "../rank/scoreStory";
+import { renderLocalFallbackVideo, type LocalRenderResult } from "../render/localFallbackRenderer";
 import { renderMorningHandoff } from "../reports/morningHandoff";
 import { renderQuestionsForDenny } from "../reports/questionsForDenny";
 import type { EpisodePackage, QaReport, QuestionForDenny, RunEvent } from "../types";
@@ -19,7 +20,14 @@ export interface RunOvernightOptions {
   fixtures: boolean;
   dryRun: boolean;
   noUpload: boolean;
+  renderVideo?: boolean;
   videoEnginePath?: string;
+  renderer?: (options: {
+    episodeDir: string;
+    package: EpisodePackage;
+    env: Record<string, string | undefined>;
+    allowElevenLabs: boolean;
+  }) => Promise<LocalRenderResult>;
 }
 
 export interface RunOvernightResult {
@@ -27,6 +35,7 @@ export interface RunOvernightResult {
   episodeDir: string;
   qa: QaReport;
   package: EpisodePackage;
+  render?: LocalRenderResult;
 }
 
 function runEvent(task_id: string, status: RunEvent["status"], fallback_used = false): RunEvent {
@@ -178,7 +187,34 @@ export async function runOvernight(options: RunOvernightOptions): Promise<RunOve
   });
 
   await attachFallbackCards(episodeDir, pkg);
+  let renderResult: LocalRenderResult | undefined;
+  if (options.renderVideo) {
+    const renderer = options.renderer ?? renderLocalFallbackVideo;
+    try {
+      renderResult = await renderer({
+        episodeDir,
+        package: pkg,
+        env: env.values,
+        allowElevenLabs: !options.dryRun
+      });
+    } catch (error) {
+      renderResult = {
+        mode: "local_fallback_render",
+        status: "failed",
+        voice: { provider: "silent_placeholder", chunks: [], warnings: [] },
+        warnings: [(error as Error).message],
+        qaCheck: {
+          name: "local_render",
+          pass: false,
+          detail: (error as Error).message
+        }
+      };
+    }
+  }
+
   const qa = runPackageQa(pkg);
+  if (renderResult?.qaCheck) qa.checks.push(renderResult.qaCheck);
+  qa.ok = qa.checks.every((item) => item.pass);
   const uploadEnabled = env.values.YOUTUBE_UPLOAD_ENABLED === "true";
   const questions = buildQuestions({
     noUpload: options.noUpload,
@@ -194,16 +230,20 @@ export async function runOvernight(options: RunOvernightOptions): Promise<RunOve
   await writeJson(join(episodeDir, "rankings.json"), ranked);
   await writePackage(episodeDir, pkg);
   await writeJson(join(episodeDir, "qa.json"), qa);
-  await writeJson(join(episodeDir, "voice/narration.json"), {
-    provider: "placeholder",
-    status: "skipped",
-    reason: "Real voice generation requires ElevenLabs credentials and is skipped in dry-run mode."
-  });
-  await writeJson(join(episodeDir, "render/render-status.json"), {
-    mode: "package_only",
-    status: "skipped",
-    reason: "Existing video engine expects screen-recording inputs; newsroom episode package was produced for integration."
-  });
+  if (renderResult) {
+    await writeJson(join(episodeDir, "render/render-status.json"), renderResult);
+  } else {
+    await writeJson(join(episodeDir, "voice/narration.json"), {
+      provider: "placeholder",
+      status: "skipped",
+      reason: "Real voice generation requires ElevenLabs credentials and is skipped in dry-run mode."
+    });
+    await writeJson(join(episodeDir, "render/render-status.json"), {
+      mode: "package_only",
+      status: "skipped",
+      reason: "Existing video engine expects screen-recording inputs; newsroom episode package was produced for integration."
+    });
+  }
   await writeJson(join(episodeDir, "reports/video-engine-inspection.json"), videoEngine);
   await writeText(
     join(episodeDir, "reports/video-engine-integration-requests.md"),
@@ -226,7 +266,9 @@ export async function runOvernight(options: RunOvernightOptions): Promise<RunOve
     runEvent("collect_fixture_items", "succeeded"),
     runEvent("capture_fallback_cards", "fallback_used", true),
     runEvent("voice_placeholder", "skipped", true),
-    runEvent("render_package_only", "skipped", true),
+    renderResult
+      ? runEvent("render_local_fallback_video", renderResult.status === "rendered" ? "succeeded" : "failed", renderResult.voice.provider === "silent_placeholder")
+      : runEvent("render_package_only", "skipped", true),
     runEvent("upload_private", "skipped", true)
   ]);
   await writeText(
@@ -254,10 +296,11 @@ export async function runOvernight(options: RunOvernightOptions): Promise<RunOve
     qa,
     questions,
     videoEngine,
-    usedFixtures: options.fixtures
+    usedFixtures: options.fixtures,
+    ...(renderResult ? { render: renderResult } : {})
   });
   await writeText(join(options.projectRoot, "reports/morning-handoff-2026-07-09.md"), handoff);
   await writeText(join(episodeDir, "reports/morning-handoff-2026-07-09.md"), handoff);
 
-  return { episodeId, episodeDir, qa, package: pkg };
+  return { episodeId, episodeDir, qa, package: pkg, ...(renderResult ? { render: renderResult } : {}) };
 }

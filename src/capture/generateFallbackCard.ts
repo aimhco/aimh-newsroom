@@ -32,7 +32,10 @@ export async function generateFallbackCardPng(options: {
   const lines = wrapWords(options.title);
   const label = options.label ?? "AIMH NEWSROOM";
   const textLines = lines
-    .map((line, index) => `<text x="96" y="${330 + index * 78}" class="title">${escapeXml(line)}</text>`)
+    .map(
+      (line, index) =>
+        `<text x="140" y="${360 + index * 88}" font-family="Arial, sans-serif" font-size="76" font-weight="800" fill="#f8f4e8">${escapeXml(line)}</text>`
+    )
     .join("\n");
   const svg = `
 <svg width="1920" height="1080" viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg">
@@ -41,15 +44,10 @@ export async function generateFallbackCardPng(options: {
   <rect x="96" y="96" width="1728" height="888" fill="#101820"/>
   <rect x="96" y="96" width="1728" height="14" fill="#28d7a3"/>
   <circle cx="1650" cy="210" r="70" fill="#ffcc33"/>
-  <rect x="96" y="170" width="540" height="56" fill="#28d7a3"/>
-  <text x="128" y="209" class="label">${escapeXml(label)}</text>
+  <rect x="96" y="170" width="620" height="66" fill="#28d7a3"/>
+  <text x="128" y="215" font-family="Arial, sans-serif" font-size="34" font-weight="700" fill="#101820">${escapeXml(label)}</text>
   ${textLines}
-  <text x="96" y="912" class="source">Fallback visual generated for ${escapeXml(basename(options.outPath))}</text>
-  <style>
-    .label { font: 700 34px Arial, sans-serif; fill: #101820; letter-spacing: 0; }
-    .title { font: 800 68px Arial, sans-serif; fill: #f8f4e8; letter-spacing: 0; }
-    .source { font: 400 30px Arial, sans-serif; fill: #a7b3b0; letter-spacing: 0; }
-  </style>
+  <text x="140" y="912" font-family="Arial, sans-serif" font-size="30" font-weight="400" fill="#a7b3b0">Fallback visual generated for ${escapeXml(basename(options.outPath))}</text>
 </svg>`;
 
   try {

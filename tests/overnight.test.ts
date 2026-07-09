@@ -41,4 +41,34 @@ describe("overnight dry run", () => {
     expect(questions).toContain("YOUTUBE_UPLOAD_ENABLED");
     expect(questions).not.toContain("sk-");
   });
+
+  it("records a local render result when rendering is requested", async () => {
+    const root = await mkdtemp(join(tmpdir(), "aimh-newsroom-render-"));
+    const result = await runOvernight({
+      projectRoot: root,
+      date: "2026-07-09",
+      fixtures: true,
+      dryRun: false,
+      noUpload: true,
+      renderVideo: true,
+      videoEnginePath: "/Users/dennywii/Documents/dev/aimh-video-engine",
+      renderer: async ({ episodeDir }) => ({
+        mode: "local_fallback_render",
+        status: "rendered",
+        finalVideoPath: join(episodeDir, "render/final.mp4"),
+        captionsPath: join(episodeDir, "render/captions.srt"),
+        voice: { provider: "silent_placeholder", chunks: [], warnings: [] },
+        warnings: [],
+        qaCheck: { name: "local_render", pass: true, detail: "stub render" }
+      })
+    });
+
+    expect(result.qa.checks.find((check) => check.name === "local_render")).toEqual({
+      name: "local_render",
+      pass: true,
+      detail: "stub render"
+    });
+    const renderStatus = await readFile(join(result.episodeDir, "render/render-status.json"), "utf8");
+    expect(renderStatus).toContain("local_fallback_render");
+  });
 });

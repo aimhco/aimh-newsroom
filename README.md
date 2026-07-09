@@ -11,6 +11,12 @@ pnpm install
 pnpm newsroom:dry-run
 ```
 
+Render a local preview video without uploading:
+
+```bash
+pnpm newsroom:render --fixtures --no-upload
+```
+
 Default dry-run output:
 
 ```text
@@ -24,6 +30,8 @@ episodes/2026-07-09-daily-ai-briefing/
   sources.json
   metadata.json
   qa.json
+  render/final.mp4       # only after newsroom:render
+  render/captions.srt    # only after newsroom:render
   assets/cards/
   reports/
 ```

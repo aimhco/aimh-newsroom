@@ -1,5 +1,6 @@
 import type { QaReport, QuestionForDenny } from "../types";
 import type { VideoEngineInspection } from "../integrations/video-engine/detectVideoEngine";
+import type { LocalRenderResult } from "../render/localFallbackRenderer";
 import { renderQuestionsForDenny } from "./questionsForDenny";
 
 export function renderMorningHandoff(options: {
@@ -10,12 +11,14 @@ export function renderMorningHandoff(options: {
   questions: QuestionForDenny[];
   videoEngine: VideoEngineInspection;
   usedFixtures: boolean;
+  render?: LocalRenderResult;
 }): string {
+  const rendered = options.render?.status === "rendered";
   return `# AIMH Newsroom Morning Handoff - ${options.date}
 
 ## Summary
 
-Built the first local-first AIMH Newsroom MVP spine. The current run produced a reviewable episode package, deterministic script, shot list, fallback cards, QA report, review artifacts, and video-engine integration status. Upload remained disabled by policy.
+Built the first local-first AIMH Newsroom MVP spine. The current run produced a reviewable episode package, deterministic script, shot list, fallback cards, QA report, review artifacts,${rendered ? " a local final MP4," : ""} and video-engine integration status. Upload remained disabled by policy.
 
 ## Finished artifacts
 
@@ -23,6 +26,8 @@ Built the first local-first AIMH Newsroom MVP spine. The current run produced a 
 - QA report: \`${options.episodeDir}/qa.json\`
 - Review markdown: \`${options.episodeDir}/episode-review.md\`
 - Review HTML: \`${options.episodeDir}/review.html\`
+- Final video: ${rendered ? `\`${options.render?.finalVideoPath}\`` : "not rendered in this run"}
+- Captions: ${rendered ? `\`${options.render?.captionsPath}\`` : "not rendered in this run"}
 - Questions: \`${options.episodeDir}/reports/questions-for-denny.md\`
 
 ## Commands run
@@ -32,17 +37,18 @@ ${options.commandsRun.map((entry) => `- \`${entry.command}\`: ${entry.result}`).
 ## What worked
 
 - Fixture collection, normalization, verification labeling, ranking, episode planning, fallback card generation, QA, and handoff reporting completed.
+- Local fallback rendering ${rendered ? `completed with ${options.render?.voice.provider} voice audio.` : "was not requested in this run."}
 - YouTube metadata defaults to private.
 - Video-engine repo was inspected without mutating it.
 
 ## What used fixtures/mocks
 
-${options.usedFixtures ? "- Story collection used deterministic fixture raw items.\n- Voice generation used a placeholder manifest.\n- Browser capture used generated fallback cards." : "- No fixtures were requested for this run."}
+${options.usedFixtures ? `- Story collection used deterministic fixture raw items.\n- Voice generation ${rendered && options.render?.voice.provider === "elevenlabs" ? "used ElevenLabs from configured credentials." : "used a placeholder manifest."}\n- Browser capture used generated fallback cards.` : "- No fixtures were requested for this run."}
 
 ## What failed or is incomplete
 
-- Live source collectors, live Playwright MCP capture, direct ElevenLabs voice generation, full renderer integration, and YouTube upload are adapter skeletons or policy-disabled in this slice.
-- Existing video engine currently expects a screen-recording-first input folder, so this run used package-only integration.
+- Live source collectors, live Playwright MCP capture, full video-engine package integration, and YouTube upload are still adapter skeletons or policy-disabled in this slice.
+- Existing video engine currently expects a screen-recording-first input folder, so this run used the newsroom local fallback renderer when rendering was requested.
 
 ## Questions for Denny
 
@@ -77,6 +83,12 @@ ${options.qa.checks.map((check) => `- ${check.pass ? "PASS" : "FAIL"} ${check.na
 
 \`\`\`bash
 pnpm newsroom:dry-run
+\`\`\`
+
+To render a local preview without upload:
+
+\`\`\`bash
+pnpm newsroom:render --fixtures --no-upload
 \`\`\`
 `;
 }
