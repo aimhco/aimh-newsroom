@@ -79,6 +79,11 @@ const isPublicDestination = (hostname: string): boolean => {
   return !blockedAddresses.check(normalized, family === 4 ? "ipv4" : "ipv6");
 };
 
+const isVimeoCdnDestination = (hostname: string): boolean => {
+  const normalized = normalizedHostname(hostname);
+  return normalized === "vimeocdn.com" || normalized.endsWith(".vimeocdn.com");
+};
+
 const isAllowedConfigQuery = (url: URL): boolean => {
   const entries = [...url.searchParams.entries()];
   if (entries.length === 0) return true;
@@ -128,6 +133,7 @@ const asHlsUrl = (value: unknown): string | undefined => {
       parsed.username === "" &&
       parsed.password === "" &&
       parsed.pathname.toLowerCase().endsWith(".m3u8") &&
+      isVimeoCdnDestination(parsed.hostname) &&
       isPublicDestination(parsed.hostname)
       ? url
       : undefined;

@@ -10,7 +10,8 @@ import {
   resolveVimeoHlsUrl as defaultResolveVimeoHlsUrl
 } from "./vimeo";
 
-const DURATION_TOLERANCE_MILLISECONDS = 250;
+const DURATION_TOLERANCE_SECONDS = 0.25;
+const DURATION_COMPARISON_EPSILON_SECONDS = 1e-9;
 const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_-]{0,31}$/;
 
 export interface ClipArgsOptions {
@@ -187,15 +188,14 @@ export async function extractSourceClip(
   }
 
   const expectedDurationText = (options.endSeconds - options.startSeconds).toFixed(3);
-  const expectedDurationMilliseconds = Math.round(Number(expectedDurationText) * 1000);
-  const actualDurationMilliseconds = Math.round(actualDuration * 1000);
+  const expectedDuration = Number(expectedDurationText);
   if (
     !Number.isFinite(actualDuration) ||
-    Math.abs(actualDurationMilliseconds - expectedDurationMilliseconds) >
-      DURATION_TOLERANCE_MILLISECONDS
+    Math.abs(actualDuration - expectedDuration) >
+      DURATION_TOLERANCE_SECONDS + DURATION_COMPARISON_EPSILON_SECONDS
   ) {
     throw new Error(
-      `Source clip duration mismatch: expected ${expectedDurationText}s, received ${actualDuration.toFixed(3)}s (tolerance ${(DURATION_TOLERANCE_MILLISECONDS / 1000).toFixed(3)}s)`
+      `Source clip duration mismatch: expected ${expectedDurationText}s, received ${actualDuration.toFixed(3)}s (tolerance ${DURATION_TOLERANCE_SECONDS.toFixed(3)}s)`
     );
   }
 }

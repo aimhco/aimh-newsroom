@@ -7,8 +7,10 @@ const preferredConfig = {
     files: {
       hls: {
         cdns: {
-          fastly_skyfire: { url: "https://skyfire.example/playlist.m3u8" },
-          akfire_interconnect_quic: { url: "https://ak.example/playlist.m3u8" }
+          fastly_skyfire: { url: "https://skyfire.vimeocdn.com/playlist.m3u8" },
+          akfire_interconnect_quic: {
+            url: "https://vod-adaptive-ak.vimeocdn.com/playlist.m3u8"
+          }
         }
       }
     }
@@ -23,7 +25,9 @@ const configWithPlaylist = (url: string) => ({
 
 describe("Vimeo HLS URL resolution", () => {
   it("prefers the Fastly Skyfire playlist", () => {
-    expect(selectVimeoHlsUrl(preferredConfig)).toBe("https://skyfire.example/playlist.m3u8");
+    expect(selectVimeoHlsUrl(preferredConfig)).toBe(
+      "https://skyfire.vimeocdn.com/playlist.m3u8"
+    );
   });
 
   it("falls back to Akamai and then the first valid CDN playlist", () => {
@@ -33,15 +37,17 @@ describe("Vimeo HLS URL resolution", () => {
           files: {
             hls: {
               cdns: {
-                fastly_skyfire: { url: "http://skyfire.example/playlist.m3u8" },
-                akfire_interconnect_quic: { url: "https://ak.example/playlist.m3u8?token=signed" },
-                other: { url: "https://other.example/playlist.m3u8" }
+                fastly_skyfire: { url: "http://skyfire.vimeocdn.com/playlist.m3u8" },
+                akfire_interconnect_quic: {
+                  url: "https://vod-adaptive-ak.vimeocdn.com/playlist.m3u8?token=signed"
+                },
+                other: { url: "https://other.vimeocdn.com/playlist.m3u8" }
               }
             }
           }
         }
       })
-    ).toBe("https://ak.example/playlist.m3u8?token=signed");
+    ).toBe("https://vod-adaptive-ak.vimeocdn.com/playlist.m3u8?token=signed");
 
     expect(
       selectVimeoHlsUrl({
@@ -50,14 +56,22 @@ describe("Vimeo HLS URL resolution", () => {
             hls: {
               cdns: {
                 invalid: { url: "https://cdn.example/video.mp4" },
-                firstValid: { url: "https://first.example/playlist.m3u8?token=fresh" },
-                secondValid: { url: "https://second.example/playlist.m3u8" }
+                firstValid: { url: "https://first.vimeocdn.com/playlist.m3u8?token=fresh" },
+                secondValid: { url: "https://second.vimeocdn.com/playlist.m3u8" }
               }
             }
           }
         }
       })
-    ).toBe("https://first.example/playlist.m3u8?token=fresh");
+    ).toBe("https://first.vimeocdn.com/playlist.m3u8?token=fresh");
+  });
+
+  it.each([
+    "https://vimeocdn.com/playlist.m3u8",
+    "https://skyfire.vimeocdn.com/playlist.m3u8",
+    "https://vod-adaptive-ak.vimeocdn.com/playlist.m3u8"
+  ])("accepts approved Vimeo CDN host %s", (url) => {
+    expect(selectVimeoHlsUrl(configWithPlaylist(url))).toBe(url);
   });
 
   it.each([
@@ -104,7 +118,12 @@ describe("Vimeo HLS URL resolution", () => {
     "https://[fc00::1]/playlist.m3u8",
     "https://[fe80::1]/playlist.m3u8",
     "https://user:password@cdn.example/playlist.m3u8",
-    "https://cdn.example:8443/playlist.m3u8"
+    "https://cdn.example:8443/playlist.m3u8",
+    "https://cdn.example/playlist.m3u8",
+    "https://127.0.0.1.nip.io/playlist.m3u8",
+    "https://vimeocdn.com.evil.example/playlist.m3u8",
+    "https://evilvimeocdn.com/playlist.m3u8",
+    "https://skyfire.vimeocdn.com.nip.io/playlist.m3u8"
   ])("rejects non-public playlist destination %s", (url) => {
     expect(() => selectVimeoHlsUrl(configWithPlaylist(url))).toThrow(
       "Vimeo player config does not contain a valid HLS playlist"
@@ -148,7 +167,7 @@ describe("Vimeo HLS URL resolution", () => {
 
     await expect(
       resolveVimeoHlsUrl(playerConfigUrl, { fetch: fetchConfig, createTimeoutSignal })
-    ).resolves.toBe("https://skyfire.example/playlist.m3u8");
+    ).resolves.toBe("https://skyfire.vimeocdn.com/playlist.m3u8");
     expect(createTimeoutSignal).toHaveBeenCalledWith(15_000);
     expect(fetchConfig).toHaveBeenCalledWith(playerConfigUrl, { redirect: "error", signal });
 
@@ -488,26 +507,29 @@ describe("official source clip extraction", () => {
     ).resolves.toBeUndefined();
   });
 
-  it.each([9.749, 10.251])("rejects duration beyond tolerance boundary %s", async (actualDuration) => {
-    await expect(
-      extractSourceClip(
-        {
-          playerConfigUrl,
-          startSeconds: 5,
-          endSeconds: 15,
-          outputPath: "/tmp/source.mp4",
-          ffmpegPath: "ffmpeg",
-          ffprobePath: "ffprobe"
-        },
-        {
-          resolveVimeoHlsUrl: async () => "https://cdn.example/playlist.m3u8",
-          mkdir: async () => undefined,
-          runCommand: async () => ({ stdout: "", stderr: "" }),
-          ffprobeDurationSeconds: async () => actualDuration
-        }
-      )
-    ).rejects.toThrow("Source clip duration mismatch");
-  });
+  it.each([9.7496, 10.2504])(
+    "rejects duration beyond tolerance boundary %s",
+    async (actualDuration) => {
+      await expect(
+        extractSourceClip(
+          {
+            playerConfigUrl,
+            startSeconds: 5,
+            endSeconds: 15,
+            outputPath: "/tmp/source.mp4",
+            ffmpegPath: "ffmpeg",
+            ffprobePath: "ffprobe"
+          },
+          {
+            resolveVimeoHlsUrl: async () => "https://cdn.example/playlist.m3u8",
+            mkdir: async () => undefined,
+            runCommand: async () => ({ stdout: "", stderr: "" }),
+            ffprobeDurationSeconds: async () => actualDuration
+          }
+        )
+      ).rejects.toThrow("Source clip duration mismatch");
+    }
+  );
 
   it("reports duration mismatches without exposing signed source URLs", async () => {
     const signedUrl = "https://cdn.example/playlist.m3u8?token=fresh-secret";
