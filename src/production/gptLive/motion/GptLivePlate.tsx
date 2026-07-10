@@ -8,7 +8,11 @@ import {
   useVideoConfig
 } from "remotion";
 import type { GptLivePlateProps } from "./Root";
-import { sceneStyle, type ScenePalette } from "./sceneStyle";
+import {
+  EVIDENCE_BENCHMARK_COPY,
+  sceneStyle,
+  type ScenePalette
+} from "./sceneStyle";
 
 const FONT = "Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
 const MONO = "'SFMono-Regular', Consolas, 'Liberation Mono', monospace";
@@ -310,14 +314,22 @@ const EvidenceScene = ({ palette, frame }: { palette: ScenePalette; frame: numbe
             transform: `translateY(${(1 - reveal) * 28 + (activeColumn === 1 ? 0 : 10)}px)`
           }}
         >
-          <div style={{ ...labelStyle(palette), color: palette.accent }}>OPENAI-REPORTED BENCHMARK</div>
-          <div style={{ marginTop: 28, fontSize: 58, lineHeight: 1.04, fontWeight: 850 }}>
-            LARGE GAIN IN EXPERT SCIENCE REASONING
+          <div style={{ ...labelStyle(palette), color: palette.accent }}>
+            {EVIDENCE_BENCHMARK_COPY.attribution}
           </div>
-          <div style={{ marginTop: 28, fontSize: 30, lineHeight: 1.3 }}>
-            Vendor-reported result. This is not independent validation.
+          <div style={{ marginTop: 24, fontSize: 46, lineHeight: 1.02, fontWeight: 850 }}>
+            {EVIDENCE_BENCHMARK_COPY.comparison}
           </div>
-          <SourceLabel palette={palette}>SOURCE / OPENAI'S OWN TESTS</SourceLabel>
+          <div style={{ marginTop: 14, fontSize: 40, lineHeight: 1, fontWeight: 850, color: palette.accent }}>
+            {EVIDENCE_BENCHMARK_COPY.benchmark}
+          </div>
+          <div style={{ marginTop: 24, fontSize: 27, lineHeight: 1.25 }}>
+            {EVIDENCE_BENCHMARK_COPY.statement}
+          </div>
+          <div style={{ marginTop: 18, fontSize: 25, lineHeight: 1.2, fontWeight: 800, color: palette.signal }}>
+            {EVIDENCE_BENCHMARK_COPY.qualification}
+          </div>
+          <SourceLabel palette={palette}>SOURCE / OPENAI'S OWN GPQA TESTS</SourceLabel>
         </div>
       </div>
     </div>

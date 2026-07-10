@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { GPT_LIVE_CONTENT } from "../src/production/gptLive/content";
 import {
@@ -6,6 +6,7 @@ import {
   type GptLivePlateProps
 } from "../src/production/gptLive/motion/Root";
 import {
+  EVIDENCE_BENCHMARK_COPY,
   GPT_LIVE_SCENES,
   sceneStyle,
   type SceneRect
@@ -47,7 +48,25 @@ const validInspection = (durationSeconds = 8): MediaInspection => ({
   }
 });
 
+const validSlateInspection = (durationSeconds = 8): MediaInspection => ({
+  ...validInspection(durationSeconds),
+  audio: { codecName: "aac" }
+});
+
+const isMasterPath = (path: string): boolean => path.includes(`${sep}master${sep}`);
+
 describe("GPT-Live scene styles", () => {
+  it("pins the approved OpenAI-reported GPQA comparison for the evidence scene", () => {
+    expect(EVIDENCE_BENCHMARK_COPY).toEqual({
+      attribution: "OPENAI-REPORTED / VENDOR-REPORTED",
+      comparison: "GPT-LIVE-1 VS ADVANCED VOICE MODE",
+      benchmark: "ON GPQA",
+      statement:
+        "OpenAI reports GPT-Live-1 substantially outperforms Advanced Voice Mode on GPQA.",
+      qualification: "Not independent validation."
+    });
+  });
+
   it("pins the exact use-case variant contracts", () => {
     expect(sceneStyle("dynamic_editorial", "use_cases")).toMatchObject({
       persistentHost: false,
@@ -181,7 +200,15 @@ describe("GPT-Live plate render planning", () => {
     ["codec", { ...validInspection(), video: { ...validInspection().video, codecName: "hevc" } }, "H.264"],
     ["duration", validInspection(8.101), "duration mismatch"]
   ])("rejects an invalid plate %s contract", (_name, inspection, message) => {
-    expect(() => assertPlateContract(inspection as MediaInspection, 8)).toThrow(message as string);
+    expect(() =>
+      assertPlateContract(inspection as MediaInspection, validSlateInspection(8))
+    ).toThrow(message as string);
+  });
+
+  it("accepts an inclusive 0.1s plate-versus-slate duration delta", () => {
+    expect(() =>
+      assertPlateContract(validInspection(20.1), validSlateInspection(20))
+    ).not.toThrow();
   });
 
   it("bundles once, renders 14 muted H.264 plates, validates them, then atomically publishes the plan", async () => {
@@ -195,7 +222,9 @@ describe("GPT-Live plate render planning", () => {
     const inspectMediaFile = vi.fn(async (_ffprobe: string, outputPath: string) => {
       const narration = narrationRecords.find(({ id }) => outputPath.includes(id))!;
       events.push(`inspect:${outputPath}`);
-      return validInspection(narration.durationSeconds);
+      return isMasterPath(outputPath)
+        ? validSlateInspection(narration.durationSeconds)
+        : validInspection(narration.durationSeconds);
     });
     const writeJsonAtomic = vi.fn(async (path: string) => {
       events.push(`publish:${path}`);
@@ -215,7 +244,13 @@ describe("GPT-Live plate render planning", () => {
 
     expect(bundle).toHaveBeenCalledTimes(1);
     expect(renderMedia).toHaveBeenCalledTimes(14);
-    expect(inspectMediaFile).toHaveBeenCalledTimes(14);
+    expect(inspectMediaFile).toHaveBeenCalledTimes(28);
+    for (const narration of narrationRecords) {
+      expect(inspectMediaFile).toHaveBeenCalledWith(
+        "ffprobe",
+        join(episodeDir, "master", `${narration.id}.mp4`)
+      );
+    }
     expect(renderMedia.mock.calls.every(([options]) => options.codec === "h264")).toBe(true);
     expect(renderMedia.mock.calls.every(([options]) => options.muted === true)).toBe(true);
     expect(writeJsonAtomic).toHaveBeenCalledOnce();
@@ -239,7 +274,9 @@ describe("GPT-Live plate render planning", () => {
         ensureDir: async () => undefined,
         inspectMediaFile: async (_ffprobe, outputPath) => {
           const narration = narrationRecords.find(({ id }) => outputPath.includes(id))!;
-          return validInspection(narration.durationSeconds);
+          return isMasterPath(outputPath)
+            ? validSlateInspection(narration.durationSeconds)
+            : validInspection(narration.durationSeconds);
         },
         readFile,
         renderMedia: async () => undefined,
@@ -255,6 +292,36 @@ describe("GPT-Live plate render planning", () => {
     expect(result.jobs).toHaveLength(14);
   });
 
+  it("rejects plate-versus-slate drift above 0.1s even when both match voice within 0.1s", async () => {
+    const episodeDir = "/tmp/gpt-live-motion";
+    const records = narrationRecords.map((record) => ({ ...record, durationSeconds: 8 }));
+    const inspectMediaFile = vi.fn(async (_ffprobe: string, outputPath: string) =>
+      isMasterPath(outputPath)
+        ? validSlateInspection(7.94)
+        : validInspection(8.06)
+    );
+    const writeJsonAtomic = vi.fn(async () => undefined);
+
+    await expect(
+      renderGptLivePlates(
+        { episodeDir, ffprobePath: "ffprobe", narrationRecords: records },
+        {
+          bundle: async () => "serve-url",
+          ensureDir: async () => undefined,
+          inspectMediaFile,
+          renderMedia: async () => undefined,
+          selectComposition: async () => ({ id: "GptLivePlate" }),
+          writeJsonAtomic
+        }
+      )
+    ).rejects.toThrow("plate/slate duration mismatch");
+    expect(inspectMediaFile).toHaveBeenCalledWith(
+      "ffprobe",
+      join(episodeDir, "master", "narration_hook.mp4")
+    );
+    expect(writeJsonAtomic).not.toHaveBeenCalled();
+  });
+
   it("does not publish a plan when any plate fails validation", async () => {
     const writeJsonAtomic = vi.fn(async () => undefined);
     await expect(
@@ -263,7 +330,10 @@ describe("GPT-Live plate render planning", () => {
         {
           bundle: async () => "serve-url",
           ensureDir: async () => undefined,
-          inspectMediaFile: async () => ({ ...validInspection(), audio: { codecName: "aac" } }),
+          inspectMediaFile: async (_ffprobe, outputPath) =>
+            isMasterPath(outputPath)
+              ? validSlateInspection()
+              : { ...validInspection(), audio: { codecName: "aac" } },
           renderMedia: async () => undefined,
           selectComposition: async () => ({ id: "GptLivePlate" }),
           writeJsonAtomic

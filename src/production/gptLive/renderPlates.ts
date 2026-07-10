@@ -10,6 +10,7 @@ import { ensureDir as defaultEnsureDir } from "../../utils/fs";
 import { writeJsonAtomic as defaultWriteJsonAtomic } from "./atomicFiles";
 import { GPT_LIVE_CONTENT } from "./content";
 import {
+  assertNarrationSlateContract,
   inspectMediaFile as defaultInspectMediaFile,
   type MediaInspection
 } from "./mediaInspection";
@@ -189,23 +190,31 @@ export function buildPlateRenderJobs(options: BuildPlateRenderJobsOptions): read
 }
 
 export function assertPlateContract(
-  inspection: MediaInspection,
-  expectedDurationSeconds: number
+  plateInspection: MediaInspection,
+  slateInspection: MediaInspection
 ): void {
-  if (inspection.video.codecName !== "h264") throw new Error("Motion plate must use H.264 video");
-  if (inspection.video.width !== 1920 || inspection.video.height !== 1080) {
+  const durationComparisonEpsilon =
+    Number.EPSILON *
+    Math.max(1, Math.abs(plateInspection.durationSeconds), Math.abs(slateInspection.durationSeconds)) *
+    4;
+  if (plateInspection.video.codecName !== "h264") {
+    throw new Error("Motion plate must use H.264 video");
+  }
+  if (plateInspection.video.width !== 1920 || plateInspection.video.height !== 1080) {
     throw new Error("Motion plate must be 1920x1080");
   }
-  if (Math.abs(inspection.video.framesPerSecond - 30) > FRAME_RATE_TOLERANCE) {
+  if (Math.abs(plateInspection.video.framesPerSecond - 30) > FRAME_RATE_TOLERANCE) {
     throw new Error("Motion plate must be 30fps");
   }
-  if (inspection.audio) throw new Error("Motion plate must not contain audio");
+  if (plateInspection.audio) throw new Error("Motion plate must not contain audio");
   if (
-    !Number.isFinite(inspection.durationSeconds) ||
-    Math.abs(inspection.durationSeconds - expectedDurationSeconds) > DURATION_TOLERANCE_SECONDS
+    !Number.isFinite(plateInspection.durationSeconds) ||
+    !Number.isFinite(slateInspection.durationSeconds) ||
+    Math.abs(plateInspection.durationSeconds - slateInspection.durationSeconds) >
+      DURATION_TOLERANCE_SECONDS + durationComparisonEpsilon
   ) {
     throw new Error(
-      `Motion plate duration mismatch: expected ${expectedDurationSeconds.toFixed(3)}s, received ${inspection.durationSeconds.toFixed(3)}s`
+      `Motion plate/slate duration mismatch: slate ${slateInspection.durationSeconds.toFixed(3)}s, plate ${plateInspection.durationSeconds.toFixed(3)}s`
     );
   }
 }
@@ -241,6 +250,11 @@ export async function renderGptLivePlates(
     }))
   });
   const planPath = join(options.episodeDir, "tella", "plan.json");
+  const narrationPlanById = new Map(
+    plan.clips
+      .filter((clip) => clip.kind === "narration")
+      .map((clip) => [clip.id, clip])
+  );
   const entryPoint = fileURLToPath(new URL("./motion/Root.tsx", import.meta.url));
   const serveUrl = await bundle({ entryPoint });
 
@@ -262,10 +276,14 @@ export async function renderGptLivePlates(
       overwrite: true,
       pixelFormat: "yuv420p"
     });
-    assertPlateContract(
-      await inspectMediaFile(options.ffprobePath, job.outputPath),
-      job.durationSeconds
-    );
+    const narrationPlan = narrationPlanById.get(job.narrationId);
+    if (!narrationPlan) {
+      throw new Error(`Missing narration slate plan: ${job.narrationId}`);
+    }
+    const plateInspection = await inspectMediaFile(options.ffprobePath, job.outputPath);
+    const slateInspection = await inspectMediaFile(options.ffprobePath, narrationPlan.masterPath);
+    assertNarrationSlateContract(slateInspection, job.durationSeconds);
+    assertPlateContract(plateInspection, slateInspection);
   }
 
   if (options.publishPlan !== false) {
