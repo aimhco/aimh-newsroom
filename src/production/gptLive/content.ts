@@ -7,6 +7,78 @@ import type {
   TimelineItem
 } from "./types";
 
+const invalidProduction = (detail: string): never => {
+  throw new Error(`Invalid GPT-Live production: ${detail}`);
+};
+
+const assertUniqueIds = (label: string, values: readonly { readonly id: string }[]): void => {
+  const ids = new Set<string>();
+
+  for (const { id } of values) {
+    if (ids.has(id)) {
+      invalidProduction(`duplicate ${label} id "${id}"`);
+    }
+    ids.add(id);
+  }
+};
+
+const assertNarrationClaimsResolve = (
+  narration: readonly NarrationSpec[],
+  claimIds: ReadonlySet<string>
+): void => {
+  for (const item of narration) {
+    for (const claimId of item.claimIds) {
+      if (!claimIds.has(claimId)) {
+        invalidProduction(`narration "${item.id}" references unknown claim "${claimId}"`);
+      }
+    }
+  }
+};
+
+export const validateGptLiveProduction = (production: GptLiveProduction): void => {
+  assertUniqueIds("source", production.sources);
+  assertUniqueIds("claim", production.claims);
+  assertUniqueIds("narration", production.narration);
+  assertUniqueIds("timeline", production.timeline);
+
+  const sourceIds = new Set(production.sources.map(({ id }) => id));
+  const claimIds = new Set(production.claims.map(({ id }) => id));
+
+  for (const claim of production.claims) {
+    for (const sourceId of claim.sourceIds) {
+      if (!sourceIds.has(sourceId)) {
+        invalidProduction(`claim "${claim.id}" references unknown source "${sourceId}"`);
+      }
+    }
+  }
+
+  assertNarrationClaimsResolve(production.narration, claimIds);
+
+  const timelineNarration: NarrationSpec[] = [];
+  for (const item of production.timeline) {
+    if (item.kind === "source_clip") {
+      if (!sourceIds.has(item.sourceId)) {
+        invalidProduction(`source clip "${item.id}" references unknown source "${item.sourceId}"`);
+      }
+    } else {
+      timelineNarration.push(item);
+    }
+  }
+  assertNarrationClaimsResolve(timelineNarration, claimIds);
+};
+
+const deepFreeze = <T>(value: T): T => {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) {
+    return value;
+  }
+
+  for (const nestedValue of Object.values(value)) {
+    deepFreeze(nestedValue);
+  }
+
+  return Object.freeze(value);
+};
+
 const GPT_LIVE_SOURCES = [
   {
     id: "src_openai_article",
@@ -175,7 +247,7 @@ const CLIP_INTERRUPTION = {
   sourceId: "src_openai_article"
 } as const satisfies SourceClipSpec;
 
-export const GPT_LIVE_TIMELINE = [
+export const GPT_LIVE_TIMELINE = deepFreeze([
   CLIP_TRANSLATION,
   NARRATION_HOOK,
   CLIP_INTERRUPTION,
@@ -185,9 +257,9 @@ export const GPT_LIVE_TIMELINE = [
   NARRATION_AVAILABILITY,
   NARRATION_FUTURE,
   NARRATION_CTA
-] as const satisfies readonly TimelineItem[];
+] as const satisfies readonly TimelineItem[]);
 
-export const GPT_LIVE_CONTENT = {
+const GPT_LIVE_CONTENT_MANIFEST = {
   id: "2026-07-10-gpt-live-tella-ab",
   variants: ["dynamic_editorial", "aimh_visual_host"],
   sources: GPT_LIVE_SOURCES,
@@ -203,3 +275,7 @@ export const GPT_LIVE_CONTENT = {
   },
   musicPath: "/Users/dennywii/Documents/dev/aimh-video-engine/assets/music/Body_Komorebi_Futuremono.mp3"
 } as const satisfies GptLiveProduction;
+
+validateGptLiveProduction(GPT_LIVE_CONTENT_MANIFEST);
+
+export const GPT_LIVE_CONTENT = deepFreeze(GPT_LIVE_CONTENT_MANIFEST);

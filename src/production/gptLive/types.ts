@@ -3,53 +3,53 @@ export type GptLiveVariant = "dynamic_editorial" | "aimh_visual_host";
 export type TimelineKind = "source_clip" | "narration";
 
 export interface ProductionSource {
-  id: string;
-  title: string;
-  url: string;
-  publisher: string;
-  accessedAt: string;
+  readonly id: string;
+  readonly title: string;
+  readonly url: string;
+  readonly publisher: string;
+  readonly accessedAt: string;
 }
 
 export interface ProductionClaim {
-  id: string;
-  text: string;
-  sourceIds: readonly string[];
+  readonly id: string;
+  readonly text: string;
+  readonly sourceIds: readonly string[];
 }
 
 export interface SourceClipSpec {
-  id: string;
-  kind: "source_clip";
-  playerConfigUrl: string;
-  startSeconds: number;
-  endSeconds: number;
-  sourceId: string;
+  readonly id: string;
+  readonly kind: "source_clip";
+  readonly playerConfigUrl: string;
+  readonly startSeconds: number;
+  readonly endSeconds: number;
+  readonly sourceId: string;
 }
 
 export interface NarrationSpec {
-  id: string;
-  kind: "narration";
-  text: string;
-  claimIds: readonly string[];
-  scene: "hook" | "full_duplex" | "use_cases" | "evidence" | "availability" | "future" | "cta";
+  readonly id: string;
+  readonly kind: "narration";
+  readonly text: string;
+  readonly claimIds: readonly string[];
+  readonly scene: "hook" | "full_duplex" | "use_cases" | "evidence" | "availability" | "future" | "cta";
 }
 
 export type TimelineItem = SourceClipSpec | NarrationSpec;
 
 export interface GptLiveProduction {
-  id: string;
-  variants: readonly GptLiveVariant[];
-  sources: readonly ProductionSource[];
-  claims: readonly ProductionClaim[];
-  narration: readonly NarrationSpec[];
-  timeline: readonly TimelineItem[];
-  branding: {
-    logoPath: string;
-    width: number;
-    marginTop: number;
-    marginRight: number;
-    opacity: number;
+  readonly id: string;
+  readonly variants: readonly GptLiveVariant[];
+  readonly sources: readonly ProductionSource[];
+  readonly claims: readonly ProductionClaim[];
+  readonly narration: readonly NarrationSpec[];
+  readonly timeline: readonly TimelineItem[];
+  readonly branding: {
+    readonly logoPath: string;
+    readonly width: number;
+    readonly marginTop: number;
+    readonly marginRight: number;
+    readonly opacity: number;
   };
-  musicPath: string;
+  readonly musicPath: string;
 }
 
 export interface TellaProductionState {
