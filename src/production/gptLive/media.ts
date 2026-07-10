@@ -80,7 +80,12 @@ export async function extractSourceClip(
   const runCommand = dependencies.runCommand ?? defaultRunCommand;
   const ffprobeDurationSeconds =
     dependencies.ffprobeDurationSeconds ?? defaultFfprobeDurationSeconds;
-  const inputUrl = await resolveVimeoHlsUrl(options.playerConfigUrl);
+  let inputUrl: string;
+  try {
+    inputUrl = await resolveVimeoHlsUrl(options.playerConfigUrl);
+  } catch {
+    throw new Error("Source clip playlist resolution failed");
+  }
 
   try {
     await runCommand(

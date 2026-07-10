@@ -213,6 +213,55 @@ describe("official source clip extraction", () => {
     expect(probe).toHaveBeenCalledWith("/usr/local/bin/ffprobe", "/tmp/source.mp4");
   });
 
+  it("sanitizes resolver failures that contain a signed playlist URL", async () => {
+    const signedUrl = "https://cdn.example/playlist.m3u8?token=resolver-secret&expires=123";
+    const extraction = extractSourceClip(
+      {
+        playerConfigUrl: "https://player.vimeo.com/video/123/config?h=config-secret",
+        startSeconds: 5,
+        endSeconds: 15,
+        outputPath: "/tmp/source.mp4",
+        ffmpegPath: "ffmpeg",
+        ffprobePath: "ffprobe"
+      },
+      {
+        resolveVimeoHlsUrl: async () => {
+          throw new Error(`Vimeo resolver failed for ${signedUrl}`);
+        }
+      }
+    );
+
+    await expect(extraction).rejects.toThrow("Source clip playlist resolution failed");
+    await expect(extraction).rejects.not.toThrow(
+      /cdn\.example|playlist\.m3u8|resolver-secret|token=|expires=/
+    );
+  });
+
+  it("sanitizes command failures that contain a signed playlist URL", async () => {
+    const signedUrl = "https://cdn.example/playlist.m3u8?token=command-secret&expires=123";
+    const extraction = extractSourceClip(
+      {
+        playerConfigUrl: "https://player.vimeo.com/video/123/config?h=config-secret",
+        startSeconds: 5,
+        endSeconds: 15,
+        outputPath: "/tmp/source.mp4",
+        ffmpegPath: "ffmpeg",
+        ffprobePath: "ffprobe"
+      },
+      {
+        resolveVimeoHlsUrl: async () => signedUrl,
+        runCommand: async () => {
+          throw new Error(`ffmpeg failed while reading ${signedUrl}`);
+        }
+      }
+    );
+
+    await expect(extraction).rejects.toThrow("Source clip extraction command failed");
+    await expect(extraction).rejects.not.toThrow(
+      /cdn\.example|playlist\.m3u8|command-secret|token=|expires=/
+    );
+  });
+
   it("reports duration mismatches without exposing signed source URLs", async () => {
     const signedUrl = "https://cdn.example/playlist.m3u8?token=fresh-secret";
     const extraction = extractSourceClip(
