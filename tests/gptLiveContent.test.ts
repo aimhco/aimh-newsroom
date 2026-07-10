@@ -412,6 +412,10 @@ describe("GPT-Live production preparation", () => {
       return validMediaInspection(durationById.get(id)!);
     });
     const publications: string[] = [];
+    const plateRendering = vi.fn(async () => {
+      publications.push("plates-complete");
+      return { jobs: [] };
+    });
     const writeJsonAtomic = vi.fn(async (path: string, value: unknown) => {
       publications.push(path);
       await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -439,6 +443,7 @@ describe("GPT-Live production preparation", () => {
           synthesizeNarration,
           runCommand,
           inspectMediaFile,
+          renderPlates: plateRendering,
           access: async () => undefined,
           writeJsonAtomic,
           writeTextAtomic,
@@ -477,6 +482,7 @@ describe("GPT-Live production preparation", () => {
       expect(runCommand).toHaveBeenCalledTimes(7);
       expect(runCommand.mock.calls.every(([command]) => command === "/tools/ffmpeg")).toBe(true);
       expect(inspectMediaFile).toHaveBeenCalledTimes(7);
+      expect(plateRendering).toHaveBeenCalledOnce();
 
       const productionText = await readFile(result.productionPath, "utf8");
       const voiceText = await readFile(result.voicePath, "utf8");
@@ -506,12 +512,16 @@ describe("GPT-Live production preparation", () => {
         manifestFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/)
       });
       expect(publications).toEqual([
+        "plates-complete",
         result.productionPath,
         result.voicePath,
         result.planPath,
         result.sourceMatrixPath,
         result.preparedPath
       ]);
+      expect(publications.indexOf("plates-complete")).toBeLessThan(
+        publications.indexOf(result.preparedPath)
+      );
       expect(result.episodeDir).toBe(episodeDir);
     } finally {
       await rm(episodeDir, { recursive: true, force: true });

@@ -23,6 +23,10 @@ import {
   assertNarrationSlateContract,
   inspectMediaFile as defaultInspectMediaFile
 } from "./mediaInspection";
+import {
+  renderGptLivePlates as defaultRenderGptLivePlates,
+  type RenderGptLivePlatesOptions
+} from "./renderPlates";
 import { buildTellaPlan, type TellaPlan } from "./tellaPlan";
 
 const EPISODE_SUBDIRECTORIES = [
@@ -58,6 +62,7 @@ type SynthesizeNarration = (
   options: Parameters<typeof defaultSynthesizeNarration>[0]
 ) => Promise<VoiceRenderResult>;
 type AccessFile = (path: string, mode?: number) => Promise<void>;
+type RenderPlates = (options: RenderGptLivePlatesOptions) => Promise<unknown>;
 
 export interface PrepareGptLiveProductionDependencies {
   readonly access?: AccessFile;
@@ -67,6 +72,7 @@ export interface PrepareGptLiveProductionDependencies {
   readonly runCommand?: typeof defaultRunCommand;
   readonly inspectMediaFile?: typeof defaultInspectMediaFile;
   readonly removeFile?: (path: string) => Promise<void>;
+  readonly renderPlates?: RenderPlates;
   readonly stat?: (path: string) => Promise<FileStat>;
   readonly writeJsonAtomic?: typeof defaultWriteJsonAtomic;
   readonly writeTextAtomic?: typeof defaultWriteTextAtomic;
@@ -283,6 +289,8 @@ export async function prepareGptLiveProduction(
   const inspectMediaFile = dependencies.inspectMediaFile ?? defaultInspectMediaFile;
   const removeFile =
     dependencies.removeFile ?? ((path: string) => defaultRm(path, { force: true }));
+  const renderPlates = dependencies.renderPlates ?? ((renderOptions) =>
+    defaultRenderGptLivePlates(renderOptions));
   const stat = dependencies.stat ?? defaultStat;
   const writeJsonAtomic = dependencies.writeJsonAtomic ?? defaultWriteJsonAtomic;
   const writeTextAtomic = dependencies.writeTextAtomic ?? defaultWriteTextAtomic;
@@ -339,6 +347,16 @@ export async function prepareGptLiveProduction(
       audioPath: chunk.file,
       durationSeconds: chunk.durationSeconds
     }))
+  });
+  await renderPlates({
+    episodeDir: options.episodeDir,
+    ffprobePath: options.ffprobePath,
+    narrationRecords: chunks.map((chunk) => ({
+      id: chunk.id,
+      text: chunk.text,
+      durationSeconds: chunk.durationSeconds
+    })),
+    publishPlan: false
   });
   const productionPath = join(options.episodeDir, "production.json");
   const voicePath = join(options.episodeDir, "voice", "narration.json");
