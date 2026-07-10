@@ -10,9 +10,40 @@ import {
   resolveVimeoHlsUrl as defaultResolveVimeoHlsUrl
 } from "./vimeo";
 
-const DURATION_TOLERANCE_SECONDS = 0.25;
-const DURATION_COMPARISON_EPSILON_SECONDS = 1e-9;
+const DURATION_TOLERANCE_TEXT = "0.250";
 const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_-]{0,31}$/;
+
+interface DecimalValue {
+  readonly coefficient: bigint;
+  readonly scale: number;
+}
+
+const parseDecimal = (value: string): DecimalValue => {
+  const match = value.match(/^([+-]?)(\d+)(?:\.(\d*))?(?:e([+-]?\d+))?$/i);
+  if (!match) throw new Error("Invalid decimal duration");
+
+  const fraction = match[3] ?? "";
+  const coefficient = BigInt(`${match[2]}${fraction}`);
+  const exponent = Number(match[4] ?? "0");
+  return {
+    coefficient: match[1] === "-" ? -coefficient : coefficient,
+    scale: fraction.length - exponent
+  };
+};
+
+const scaledCoefficient = (value: DecimalValue, scale: number): bigint =>
+  value.coefficient * 10n ** BigInt(scale - value.scale);
+
+const decimalDifferenceExceeds = (left: string, right: string, tolerance: string): boolean => {
+  const leftValue = parseDecimal(left);
+  const rightValue = parseDecimal(right);
+  const toleranceValue = parseDecimal(tolerance);
+  const commonScale = Math.max(leftValue.scale, rightValue.scale, toleranceValue.scale);
+  const difference =
+    scaledCoefficient(leftValue, commonScale) - scaledCoefficient(rightValue, commonScale);
+  const absoluteDifference = difference < 0n ? -difference : difference;
+  return absoluteDifference > scaledCoefficient(toleranceValue, commonScale);
+};
 
 export interface ClipArgsOptions {
   readonly inputUrl: string;
@@ -188,14 +219,12 @@ export async function extractSourceClip(
   }
 
   const expectedDurationText = (options.endSeconds - options.startSeconds).toFixed(3);
-  const expectedDuration = Number(expectedDurationText);
   if (
     !Number.isFinite(actualDuration) ||
-    Math.abs(actualDuration - expectedDuration) >
-      DURATION_TOLERANCE_SECONDS + DURATION_COMPARISON_EPSILON_SECONDS
+    decimalDifferenceExceeds(actualDuration.toString(), expectedDurationText, DURATION_TOLERANCE_TEXT)
   ) {
     throw new Error(
-      `Source clip duration mismatch: expected ${expectedDurationText}s, received ${actualDuration.toFixed(3)}s (tolerance ${DURATION_TOLERANCE_SECONDS.toFixed(3)}s)`
+      `Source clip duration mismatch: expected ${expectedDurationText}s, received ${actualDuration.toFixed(3)}s (tolerance ${DURATION_TOLERANCE_TEXT}s)`
     );
   }
 }

@@ -507,6 +507,75 @@ describe("official source clip extraction", () => {
     ).resolves.toBeUndefined();
   });
 
+  it.each([12.1, 12.6])(
+    "accepts exact 0.25 boundary around requested duration 12.350: %s",
+    async (actualDuration) => {
+      await expect(
+        extractSourceClip(
+          {
+            playerConfigUrl,
+            startSeconds: 50.82,
+            endSeconds: 63.17,
+            outputPath: "/tmp/source.mp4",
+            ffmpegPath: "ffmpeg",
+            ffprobePath: "ffprobe"
+          },
+          {
+            resolveVimeoHlsUrl: async () => "https://cdn.example/playlist.m3u8",
+            mkdir: async () => undefined,
+            runCommand: async () => ({ stdout: "", stderr: "" }),
+            ffprobeDurationSeconds: async () => actualDuration
+          }
+        )
+      ).resolves.toBeUndefined();
+    }
+  );
+
+  it.each([9.9, 10.1])("accepts ordinary duration within tolerance %s", async (actualDuration) => {
+    await expect(
+      extractSourceClip(
+        {
+          playerConfigUrl,
+          startSeconds: 5,
+          endSeconds: 15,
+          outputPath: "/tmp/source.mp4",
+          ffmpegPath: "ffmpeg",
+          ffprobePath: "ffprobe"
+        },
+        {
+          resolveVimeoHlsUrl: async () => "https://cdn.example/playlist.m3u8",
+          mkdir: async () => undefined,
+          runCommand: async () => ({ stdout: "", stderr: "" }),
+          ffprobeDurationSeconds: async () => actualDuration
+        }
+      )
+    ).resolves.toBeUndefined();
+  });
+
+  it.each([9.7499999995, 10.2500000005])(
+    "rejects every representable decimal beyond the exact tolerance %s",
+    async (actualDuration) => {
+      await expect(
+        extractSourceClip(
+          {
+            playerConfigUrl,
+            startSeconds: 5,
+            endSeconds: 15,
+            outputPath: "/tmp/source.mp4",
+            ffmpegPath: "ffmpeg",
+            ffprobePath: "ffprobe"
+          },
+          {
+            resolveVimeoHlsUrl: async () => "https://cdn.example/playlist.m3u8",
+            mkdir: async () => undefined,
+            runCommand: async () => ({ stdout: "", stderr: "" }),
+            ffprobeDurationSeconds: async () => actualDuration
+          }
+        )
+      ).rejects.toThrow("Source clip duration mismatch");
+    }
+  );
+
   it.each([9.7496, 10.2504])(
     "rejects duration beyond tolerance boundary %s",
     async (actualDuration) => {
