@@ -1,10 +1,16 @@
-import { mkdtemp, readFile, rm, stat as fsStat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat as fsStat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_ENV_KEYS, loadEnvSnapshot } from "../src/config/env";
 import * as contentModule from "../src/production/gptLive/content";
 import { runGptLiveCli } from "../src/production/gptLive/cli";
+import {
+  assertNarrationSlateContract,
+  buildFfprobeMediaArgs,
+  parseFfprobeMediaJson,
+  type MediaInspection
+} from "../src/production/gptLive/mediaInspection";
 import {
   buildNarrationSlateArgs,
   prepareGptLiveProduction
@@ -284,6 +290,64 @@ describe("GPT-Live production preparation", () => {
     }))
   });
 
+  const validMediaInspection = (durationSeconds = 8.25): MediaInspection => ({
+    durationSeconds,
+    video: {
+      codecName: "h264",
+      width: 1920,
+      height: 1080,
+      framesPerSecond: 30
+    },
+    audio: { codecName: "aac" }
+  });
+
+  it("parses ffprobe JSON and keeps the inspected path as one command argument", () => {
+    const inspectedPath = "/tmp/slate;not-a-command.mp4";
+    expect(buildFfprobeMediaArgs(inspectedPath)).toEqual([
+      "-v",
+      "error",
+      "-show_entries",
+      "stream=codec_type,codec_name,width,height,r_frame_rate:format=duration",
+      "-of",
+      "json",
+      inspectedPath
+    ]);
+    expect(
+      parseFfprobeMediaJson(
+        JSON.stringify({
+          streams: [
+            {
+              codec_type: "video",
+              codec_name: "h264",
+              width: 1920,
+              height: 1080,
+              r_frame_rate: "30/1"
+            },
+            { codec_type: "audio", codec_name: "aac" }
+          ],
+          format: { duration: "8.250" }
+        })
+      )
+    ).toEqual(validMediaInspection());
+  });
+
+  it.each([
+    { name: "video codec", inspection: { video: { codecName: "hevc" } }, error: "H.264" },
+    { name: "audio codec", inspection: { audio: { codecName: "mp3" } }, error: "AAC" },
+    { name: "dimensions", inspection: { video: { width: 1280 } }, error: "1920x1080" },
+    { name: "frame rate", inspection: { video: { framesPerSecond: 29.97 } }, error: "30fps" },
+    { name: "audio stream", inspection: { audio: undefined }, error: "audio stream" }
+  ])("rejects an invalid narration slate $name", ({ inspection, error }) => {
+    const valid = validMediaInspection();
+    const candidate = {
+      ...valid,
+      ...inspection,
+      video: inspection.video ? { ...valid.video, ...inspection.video } : valid.video
+    } as MediaInspection;
+
+    expect(() => assertNarrationSlateContract(candidate, 8.25)).toThrow(error);
+  });
+
   it("builds a black 1080p H.264/AAC slate command around the exact voice duration", () => {
     expect(
       buildNarrationSlateArgs({
@@ -335,9 +399,18 @@ describe("GPT-Live production preparation", () => {
       stdout: "",
       stderr: ""
     }));
-    const ffprobeDurationSeconds = vi.fn(async (_ffprobePath: string, file: string) => {
+    const inspectMediaFile = vi.fn(async (_ffprobePath: string, file: string) => {
       const id = basename(file, ".mp4");
-      return durationById.get(id)!;
+      return validMediaInspection(durationById.get(id)!);
+    });
+    const publications: string[] = [];
+    const writeJsonAtomic = vi.fn(async (path: string, value: unknown) => {
+      publications.push(path);
+      await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    });
+    const writeTextAtomic = vi.fn(async (path: string, value: string) => {
+      publications.push(path);
+      await writeFile(path, value, "utf8");
     });
 
     try {
@@ -355,9 +428,12 @@ describe("GPT-Live production preparation", () => {
         },
         {
           extractSourceClip,
-          synthesizeNarration: synthesizeNarration as never,
+          synthesizeNarration,
           runCommand,
-          ffprobeDurationSeconds,
+          inspectMediaFile,
+          access: async () => undefined,
+          writeJsonAtomic,
+          writeTextAtomic,
           stat: async () => ({ size: 100, isFile: () => true })
         }
       );
@@ -392,13 +468,14 @@ describe("GPT-Live production preparation", () => {
       );
       expect(runCommand).toHaveBeenCalledTimes(7);
       expect(runCommand.mock.calls.every(([command]) => command === "/tools/ffmpeg")).toBe(true);
-      expect(ffprobeDurationSeconds).toHaveBeenCalledTimes(7);
+      expect(inspectMediaFile).toHaveBeenCalledTimes(7);
 
       const productionText = await readFile(result.productionPath, "utf8");
       const voiceText = await readFile(result.voicePath, "utf8");
       const planText = await readFile(result.planPath, "utf8");
       const matrixText = await readFile(result.sourceMatrixPath, "utf8");
-      const persistedText = [productionText, voiceText, planText, matrixText].join("\n");
+      const preparedText = await readFile(result.preparedPath, "utf8");
+      const persistedText = [productionText, voiceText, planText, matrixText, preparedText].join("\n");
 
       expect(JSON.parse(productionText)).toMatchObject({
         id: GPT_LIVE_CONTENT.id,
@@ -415,6 +492,18 @@ describe("GPT-Live production preparation", () => {
         expect(matrixText).toContain(source.url);
       }
       expect(persistedText).not.toMatch(/eleven-secret|voice-secret|playlist\.m3u8\?/);
+      expect(JSON.parse(preparedText)).toMatchObject({
+        status: "prepared",
+        productionId: GPT_LIVE_CONTENT.id,
+        manifestFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/)
+      });
+      expect(publications).toEqual([
+        result.productionPath,
+        result.voicePath,
+        result.planPath,
+        result.sourceMatrixPath,
+        result.preparedPath
+      ]);
       expect(result.episodeDir).toBe(episodeDir);
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
@@ -453,21 +542,171 @@ describe("GPT-Live production preparation", () => {
       const preparation = prepareGptLiveProduction(
         {
           episodeDir,
-          env: {},
+          env: {
+            ELEVENLABS_API_KEY: "test-key",
+            ELEVENLABS_VOICE_ID: "test-voice",
+            AIMH_LOGO_PATH: "/assets/logo.png",
+            AIMH_BODY_MUSIC_PATH: "/assets/music.mp3"
+          },
           ffmpegPath: "ffmpeg",
           ffprobePath: "ffprobe"
         },
         {
           extractSourceClip: async () => undefined,
           synthesizeNarration: (async ({ outDir }: { outDir: string }) =>
-            mutate(successfulVoiceResult(outDir))) as never,
+            mutate(successfulVoiceResult(outDir))),
           runCommand: async () => ({ stdout: "", stderr: "" }),
-          ffprobeDurationSeconds: async () => 1,
+          inspectMediaFile: async () => validMediaInspection(1),
+          access: async () => undefined,
           stat: async () => ({ size: 100, isFile: () => true })
         }
       );
 
       await expect(preparation).rejects.toThrow(expected);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("removes a stale completion marker before a rerun can fail", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-stale-marker-"));
+    const markerPath = join(episodeDir, "reports", "prepared.json");
+    await mkdir(join(episodeDir, "reports"), { recursive: true });
+    await writeFile(markerPath, '{"status":"prepared","stale":true}\n');
+
+    try {
+      await expect(
+        prepareGptLiveProduction(
+          {
+            episodeDir,
+            env: {
+              ELEVENLABS_API_KEY: "test-key",
+              ELEVENLABS_VOICE_ID: "test-voice",
+              AIMH_LOGO_PATH: "/assets/logo.png",
+              AIMH_BODY_MUSIC_PATH: "/assets/music.mp3"
+            },
+            ffmpegPath: "ffmpeg",
+            ffprobePath: "ffprobe"
+          },
+          {
+            access: async () => undefined,
+            extractSourceClip: async () => {
+              throw new Error("injected source failure");
+            }
+          }
+        )
+      ).rejects.toThrow("injected source failure");
+      await expect(readFile(markerPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: "missing ElevenLabs credentials",
+      options: { env: { AIMH_LOGO_PATH: "/logo", AIMH_BODY_MUSIC_PATH: "/music" } },
+      error: "ElevenLabs credentials"
+    },
+    {
+      name: "blank ElevenLabs credentials",
+      options: {
+        env: {
+          ELEVENLABS_API_KEY: " ",
+          ELEVENLABS_VOICE_ID: "\t",
+          AIMH_LOGO_PATH: "/logo",
+          AIMH_BODY_MUSIC_PATH: "/music"
+        }
+      },
+      error: "ElevenLabs credentials"
+    },
+    { name: "missing ffmpeg path", options: { ffmpegPath: "" }, error: "ffmpeg path" },
+    { name: "missing ffprobe path", options: { ffprobePath: "" }, error: "ffprobe path" }
+  ])("fails preflight for $name before source extraction", async ({ options, error }) => {
+    const extractSourceClip = vi.fn(async () => undefined);
+    const ensureDir = vi.fn(async () => undefined);
+    const base = {
+      episodeDir: "/tmp/valid-episode",
+      env: {
+        ELEVENLABS_API_KEY: "test-key",
+        ELEVENLABS_VOICE_ID: "test-voice",
+        AIMH_LOGO_PATH: "/logo",
+        AIMH_BODY_MUSIC_PATH: "/music"
+      },
+      ffmpegPath: "ffmpeg",
+      ffprobePath: "ffprobe"
+    };
+
+    await expect(
+      prepareGptLiveProduction(
+        { ...base, ...options, env: options.env ?? base.env },
+        { access: async () => undefined, ensureDir, extractSourceClip }
+      )
+    ).rejects.toThrow(error);
+    expect(ensureDir).not.toHaveBeenCalled();
+    expect(extractSourceClip).not.toHaveBeenCalled();
+  });
+
+  it("fails preflight when a required brand asset is unreadable", async () => {
+    const extractSourceClip = vi.fn(async () => undefined);
+    await expect(
+      prepareGptLiveProduction(
+        {
+          episodeDir: "/tmp/valid-episode",
+          env: {
+            ELEVENLABS_API_KEY: "test-key",
+            ELEVENLABS_VOICE_ID: "test-voice",
+            AIMH_LOGO_PATH: "/missing/logo.png",
+            AIMH_BODY_MUSIC_PATH: "/music.mp3"
+          },
+          ffmpegPath: "ffmpeg",
+          ffprobePath: "ffprobe"
+        },
+        {
+          access: async (path: string) => {
+            if (path.includes("logo")) throw new Error("ENOENT");
+          },
+          ensureDir: async () => undefined,
+          extractSourceClip
+        }
+      )
+    ).rejects.toThrow("AIMH logo is not readable");
+    expect(extractSourceClip).not.toHaveBeenCalled();
+  });
+
+  it("rejects a slate with the wrong stream contract and leaves no completion marker", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-stream-contract-"));
+
+    try {
+      await expect(
+        prepareGptLiveProduction(
+          {
+            episodeDir,
+            env: {
+              ELEVENLABS_API_KEY: "test-key",
+              ELEVENLABS_VOICE_ID: "test-voice",
+              AIMH_LOGO_PATH: "/logo.png",
+              AIMH_BODY_MUSIC_PATH: "/music.mp3"
+            },
+            ffmpegPath: "ffmpeg",
+            ffprobePath: "ffprobe"
+          },
+          {
+            access: async () => undefined,
+            extractSourceClip: async () => undefined,
+            synthesizeNarration: async ({ outDir }) => successfulVoiceResult(outDir),
+            stat: async () => ({ size: 100, isFile: () => true }),
+            runCommand: async () => ({ stdout: "", stderr: "" }),
+            inspectMediaFile: async () => ({
+              ...validMediaInspection(8.25),
+              video: { ...validMediaInspection().video, codecName: "hevc" }
+            })
+          }
+        )
+      ).rejects.toThrow("H.264");
+      await expect(
+        readFile(join(episodeDir, "reports", "prepared.json"), "utf8")
+      ).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
     }
@@ -489,7 +728,7 @@ describe("GPT-Live preparation CLI", () => {
     await runGptLiveCli(["prepare", "--", "--episode-dir", "episodes/custom"], {
       cwd: () => "/project",
       loadEnvSnapshotFromFiles,
-      prepareGptLiveProduction: prepareGptLiveProduction as never
+      prepareGptLiveProduction
     });
 
     expect(loadEnvSnapshotFromFiles).toHaveBeenCalledWith(
@@ -510,7 +749,7 @@ describe("GPT-Live preparation CLI", () => {
     await runGptLiveCli(["prepare"], {
       cwd: () => "/project",
       loadEnvSnapshotFromFiles: async () => ({ values: {}, status: {} }),
-      prepareGptLiveProduction: prepareGptLiveProduction as never
+      prepareGptLiveProduction
     });
 
     expect(prepareGptLiveProduction).toHaveBeenCalledWith(
@@ -529,6 +768,51 @@ describe("GPT-Live preparation CLI", () => {
     { args: ["unexpected"], error: "Unknown command: unexpected" }
   ])("rejects invalid command input: $args", async ({ args, error }) => {
     await expect(runGptLiveCli(args)).rejects.toThrow(error);
+  });
+
+  it.each([
+    { name: "unknown option typo", args: ["prepare", "--episode-dr", "episodes/x"] },
+    {
+      name: "duplicate option",
+      args: ["prepare", "--episode-dir", "episodes/a", "--episode-dir=episodes/b"]
+    },
+    { name: "stray positional argument", args: ["prepare", "episodes/x"] },
+    { name: "excess separators", args: ["prepare", "--", "--", "--episode-dir", "episodes/x"] },
+    { name: "trailing separator", args: ["prepare", "--episode-dir", "episodes/x", "--"] }
+  ])("rejects $name before loading env or preparing", async ({ args }) => {
+    const loadEnvSnapshotFromFiles = vi.fn(async () => ({ values: {}, status: {} }));
+    const prepareGptLiveProduction = vi.fn(async () => ({ ok: true }));
+
+    await expect(
+      runGptLiveCli(args, {
+        cwd: () => "/project",
+        loadEnvSnapshotFromFiles,
+        prepareGptLiveProduction
+      })
+    ).rejects.toThrow();
+    expect(loadEnvSnapshotFromFiles).not.toHaveBeenCalled();
+    expect(prepareGptLiveProduction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "episodes root", value: "episodes" },
+    { name: "project root", value: "." },
+    { name: "filesystem root", value: "/" },
+    { name: "relative traversal", value: "../outside" },
+    { name: "absolute outside path", value: "/tmp/outside" }
+  ])("rejects $name as an episode destination before preparation", async ({ value }) => {
+    const loadEnvSnapshotFromFiles = vi.fn(async () => ({ values: {}, status: {} }));
+    const prepareGptLiveProduction = vi.fn(async () => ({ ok: true }));
+
+    await expect(
+      runGptLiveCli(["prepare", "--episode-dir", value], {
+        cwd: () => "/project",
+        loadEnvSnapshotFromFiles,
+        prepareGptLiveProduction
+      })
+    ).rejects.toThrow("Episode directory must be a child of /project/episodes");
+    expect(loadEnvSnapshotFromFiles).not.toHaveBeenCalled();
+    expect(prepareGptLiveProduction).not.toHaveBeenCalled();
   });
 });
 

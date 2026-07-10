@@ -1,21 +1,28 @@
-import { stat as defaultStat } from "node:fs/promises";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { constants } from "node:fs";
+import {
+  access as defaultAccess,
+  rm as defaultRm,
+  stat as defaultStat
+} from "node:fs/promises";
+import { isAbsolute, join, parse } from "node:path";
 import type { ScriptFile } from "../../types";
-import {
-  ffprobeDurationSeconds as defaultFfprobeDurationSeconds,
-  runCommand as defaultRunCommand
-} from "../../render/process";
-import {
-  ensureDir as defaultEnsureDir,
-  writeJson as defaultWriteJson,
-  writeText as defaultWriteText
-} from "../../utils/fs";
+import { runCommand as defaultRunCommand } from "../../render/process";
+import { ensureDir as defaultEnsureDir } from "../../utils/fs";
 import {
   synthesizeNarration as defaultSynthesizeNarration,
   type VoiceRenderResult
 } from "../../voice/elevenLabsAdapter";
 import { GPT_LIVE_CONTENT } from "./content";
+import {
+  writeJsonAtomic as defaultWriteJsonAtomic,
+  writeTextAtomic as defaultWriteTextAtomic
+} from "./atomicFiles";
 import { extractSourceClip as defaultExtractSourceClip } from "./media";
+import {
+  assertNarrationSlateContract,
+  inspectMediaFile as defaultInspectMediaFile
+} from "./mediaInspection";
 import { buildTellaPlan, type TellaPlan } from "./tellaPlan";
 
 const EPISODE_SUBDIRECTORIES = [
@@ -28,7 +35,6 @@ const EPISODE_SUBDIRECTORIES = [
   "final",
   "reports"
 ] as const;
-const SLATE_DURATION_TOLERANCE_SECONDS = 0.1;
 
 export interface NarrationSlateArgsOptions {
   readonly audioPath: string;
@@ -48,15 +54,22 @@ interface FileStat {
   isFile(): boolean;
 }
 
+type SynthesizeNarration = (
+  options: Parameters<typeof defaultSynthesizeNarration>[0]
+) => Promise<VoiceRenderResult>;
+type AccessFile = (path: string, mode?: number) => Promise<void>;
+
 export interface PrepareGptLiveProductionDependencies {
+  readonly access?: AccessFile;
   readonly ensureDir?: typeof defaultEnsureDir;
   readonly extractSourceClip?: typeof defaultExtractSourceClip;
-  readonly synthesizeNarration?: typeof defaultSynthesizeNarration;
+  readonly synthesizeNarration?: SynthesizeNarration;
   readonly runCommand?: typeof defaultRunCommand;
-  readonly ffprobeDurationSeconds?: typeof defaultFfprobeDurationSeconds;
+  readonly inspectMediaFile?: typeof defaultInspectMediaFile;
+  readonly removeFile?: (path: string) => Promise<void>;
   readonly stat?: (path: string) => Promise<FileStat>;
-  readonly writeJson?: typeof defaultWriteJson;
-  readonly writeText?: typeof defaultWriteText;
+  readonly writeJsonAtomic?: typeof defaultWriteJsonAtomic;
+  readonly writeTextAtomic?: typeof defaultWriteTextAtomic;
 }
 
 export interface PrepareGptLiveProductionResult {
@@ -65,6 +78,7 @@ export interface PrepareGptLiveProductionResult {
   readonly voicePath: string;
   readonly planPath: string;
   readonly sourceMatrixPath: string;
+  readonly preparedPath: string;
   readonly script: ScriptFile;
   readonly voice: VoiceRenderResult;
   readonly plan: TellaPlan;
@@ -89,6 +103,41 @@ const buildScript = (): ScriptFile => ({
     shot_ids: []
   }))
 });
+
+const requireConfiguredValue = (value: string | undefined, label: string): string => {
+  if (!value?.trim()) throw new Error(`GPT-Live preflight failed: ${label} is not configured`);
+  return value;
+};
+
+const runPreflight = async (
+  options: PrepareGptLiveProductionOptions,
+  access: AccessFile
+): Promise<void> => {
+  if (!isAbsolute(options.episodeDir) || options.episodeDir === parse(options.episodeDir).root) {
+    throw new Error("GPT-Live preflight failed: episode destination is invalid");
+  }
+  if (!options.env.ELEVENLABS_API_KEY?.trim() || !options.env.ELEVENLABS_VOICE_ID?.trim()) {
+    throw new Error("GPT-Live preflight failed: ElevenLabs credentials are required");
+  }
+  requireConfiguredValue(options.ffmpegPath, "ffmpeg path");
+  requireConfiguredValue(options.ffprobePath, "ffprobe path");
+  const logoPath = requireConfiguredValue(options.env.AIMH_LOGO_PATH, "AIMH logo path");
+  const musicPath = requireConfiguredValue(
+    options.env.AIMH_BODY_MUSIC_PATH,
+    "AIMH body music path"
+  );
+
+  try {
+    await access(logoPath, constants.R_OK);
+  } catch {
+    throw new Error("GPT-Live preflight failed: AIMH logo is not readable");
+  }
+  try {
+    await access(musicPath, constants.R_OK);
+  } catch {
+    throw new Error("GPT-Live preflight failed: AIMH body music is not readable");
+  }
+};
 
 export function buildNarrationSlateArgs(options: NarrationSlateArgsOptions): string[] {
   if (!Number.isFinite(options.durationSeconds) || options.durationSeconds <= 0) {
@@ -226,15 +275,21 @@ export async function prepareGptLiveProduction(
   options: PrepareGptLiveProductionOptions,
   dependencies: PrepareGptLiveProductionDependencies = {}
 ): Promise<PrepareGptLiveProductionResult> {
+  const access = dependencies.access ?? defaultAccess;
   const ensureDir = dependencies.ensureDir ?? defaultEnsureDir;
   const extractSourceClip = dependencies.extractSourceClip ?? defaultExtractSourceClip;
   const synthesizeNarration = dependencies.synthesizeNarration ?? defaultSynthesizeNarration;
   const runCommand = dependencies.runCommand ?? defaultRunCommand;
-  const ffprobeDurationSeconds =
-    dependencies.ffprobeDurationSeconds ?? defaultFfprobeDurationSeconds;
+  const inspectMediaFile = dependencies.inspectMediaFile ?? defaultInspectMediaFile;
+  const removeFile =
+    dependencies.removeFile ?? ((path: string) => defaultRm(path, { force: true }));
   const stat = dependencies.stat ?? defaultStat;
-  const writeJson = dependencies.writeJson ?? defaultWriteJson;
-  const writeText = dependencies.writeText ?? defaultWriteText;
+  const writeJsonAtomic = dependencies.writeJsonAtomic ?? defaultWriteJsonAtomic;
+  const writeTextAtomic = dependencies.writeTextAtomic ?? defaultWriteTextAtomic;
+  const preparedPath = join(options.episodeDir, "reports", "prepared.json");
+
+  await runPreflight(options, access);
+  await removeFile(preparedPath);
 
   await Promise.all(
     EPISODE_SUBDIRECTORIES.map((directory) => ensureDir(join(options.episodeDir, directory)))
@@ -273,15 +328,8 @@ export async function prepareGptLiveProduction(
         outputPath
       })
     );
-    const slateDuration = await ffprobeDurationSeconds(options.ffprobePath, outputPath);
-    if (
-      !Number.isFinite(slateDuration) ||
-      Math.abs(slateDuration - chunk.durationSeconds) > SLATE_DURATION_TOLERANCE_SECONDS
-    ) {
-      throw new Error(
-        `Narration slate duration mismatch: ${chunk.id} expected ${chunk.durationSeconds.toFixed(3)}s, received ${slateDuration.toFixed(3)}s`
-      );
-    }
+    const inspection = await inspectMediaFile(options.ffprobePath, outputPath);
+    assertNarrationSlateContract(inspection, chunk.durationSeconds);
   }
 
   const plan = buildTellaPlan({
@@ -305,11 +353,22 @@ export async function prepareGptLiveProduction(
     },
     musicPath: options.env.AIMH_BODY_MUSIC_PATH ?? GPT_LIVE_CONTENT.musicPath
   };
+  const sourceMatrix = renderSourceMatrix();
+  const manifestFingerprint = createHash("sha256")
+    .update(JSON.stringify({ production, voice, plan, sourceMatrix }))
+    .digest("hex");
+  const prepared = {
+    schemaVersion: "0.1.0",
+    status: "prepared",
+    productionId: GPT_LIVE_CONTENT.id,
+    manifestFingerprint
+  } as const;
 
-  await writeJson(productionPath, production);
-  await writeJson(voicePath, voice);
-  await writeJson(planPath, plan);
-  await writeText(sourceMatrixPath, renderSourceMatrix());
+  await writeJsonAtomic(productionPath, production);
+  await writeJsonAtomic(voicePath, voice);
+  await writeJsonAtomic(planPath, plan);
+  await writeTextAtomic(sourceMatrixPath, sourceMatrix);
+  await writeJsonAtomic(preparedPath, prepared);
 
   return {
     episodeDir: options.episodeDir,
@@ -317,6 +376,7 @@ export async function prepareGptLiveProduction(
     voicePath,
     planPath,
     sourceMatrixPath,
+    preparedPath,
     script,
     voice,
     plan

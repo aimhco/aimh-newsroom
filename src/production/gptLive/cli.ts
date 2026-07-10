@@ -1,5 +1,5 @@
 import { pathToFileURL } from "node:url";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   loadEnvSnapshotFromFiles as defaultLoadEnvSnapshotFromFiles,
   type EnvSnapshot
@@ -12,31 +12,48 @@ import {
 
 const DEFAULT_VIDEO_ENGINE_PATH = "/Users/dennywii/Documents/dev/aimh-video-engine";
 
-export interface GptLiveCliDependencies {
+type PrepareGptLiveProductionFunction<TResult> = (
+  options: Parameters<typeof defaultPrepareGptLiveProduction>[0]
+) => Promise<TResult>;
+
+export interface GptLiveCliDependencies<TResult = PrepareGptLiveProductionResult> {
   readonly cwd?: () => string;
   readonly loadEnvSnapshotFromFiles?: (
     projectRoot: string,
     videoEnginePath: string
   ) => Promise<EnvSnapshot>;
-  readonly prepareGptLiveProduction?: typeof defaultPrepareGptLiveProduction;
+  readonly prepareGptLiveProduction?: PrepareGptLiveProductionFunction<TResult>;
 }
 
-const optionValue = (args: readonly string[], name: string): string | undefined => {
-  const exactIndex = args.indexOf(name);
-  if (exactIndex >= 0) {
-    const value = args[exactIndex + 1];
-    if (!value || value.startsWith("--")) throw new Error(`Missing value for ${name}`);
-    return value;
+const parsePrepareArgs = (rawArgs: readonly string[]): { readonly episodeDir?: string } => {
+  const args = [...rawArgs];
+  if (args[0] === "--") args.shift();
+  if (args.includes("--")) throw new Error("Unexpected or excess -- separator");
+
+  let episodeDir: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    if (argument === "--episode-dir") {
+      if (episodeDir !== undefined) throw new Error("Duplicate option: --episode-dir");
+      const value = args[index + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error("Missing value for --episode-dir");
+      }
+      episodeDir = value;
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("--episode-dir=")) {
+      if (episodeDir !== undefined) throw new Error("Duplicate option: --episode-dir");
+      episodeDir = argument.slice("--episode-dir=".length);
+      if (!episodeDir) throw new Error("Missing value for --episode-dir");
+      continue;
+    }
+    if (argument.startsWith("--")) throw new Error(`Unknown option: ${argument}`);
+    throw new Error(`Unexpected positional argument: ${argument}`);
   }
 
-  const prefix = `${name}=`;
-  const inline = args.find((argument) => argument.startsWith(prefix));
-  if (inline !== undefined) {
-    const value = inline.slice(prefix.length);
-    if (!value) throw new Error(`Missing value for ${name}`);
-    return value;
-  }
-  return undefined;
+  return episodeDir === undefined ? {} : { episodeDir };
 };
 
 const loadCliEnv = async (
@@ -54,12 +71,26 @@ const loadCliEnv = async (
   return initial;
 };
 
-export async function runGptLiveCli(
+const resolveEpisodeDirectory = (projectRoot: string, value: string): string => {
+  const episodesRoot = resolve(projectRoot, "episodes");
+  const episodeDir = resolve(projectRoot, value);
+  const childPath = relative(episodesRoot, episodeDir);
+  if (
+    !childPath ||
+    childPath === ".." ||
+    childPath.startsWith(`..${sep}`) ||
+    isAbsolute(childPath)
+  ) {
+    throw new Error(`Episode directory must be a child of ${episodesRoot}`);
+  }
+  return episodeDir;
+};
+
+export async function runGptLiveCli<TResult = PrepareGptLiveProductionResult>(
   rawArgs: readonly string[],
-  dependencies: GptLiveCliDependencies = {}
-): Promise<PrepareGptLiveProductionResult | unknown> {
-  const args = rawArgs.filter((argument) => argument !== "--");
-  const command = args[0];
+  dependencies: GptLiveCliDependencies<TResult> = {}
+): Promise<TResult> {
+  const command = rawArgs[0];
 
   if (command === "finish" || command === "qa") {
     throw new Error(`Command not yet implemented: ${command}`);
@@ -68,15 +99,15 @@ export async function runGptLiveCli(
     throw new Error(`Unknown command: ${command ?? "<missing>"}`);
   }
 
-  const episodeDirOption = optionValue(args.slice(1), "--episode-dir");
+  const parsed = parsePrepareArgs(rawArgs.slice(1));
   const projectRoot = resolve((dependencies.cwd ?? process.cwd)());
-  const episodeDir = resolve(
+  const episodeDir = resolveEpisodeDirectory(
     projectRoot,
-    episodeDirOption ?? joinDefaultEpisodeDirectory(GPT_LIVE_CONTENT.id)
+    parsed.episodeDir ?? joinDefaultEpisodeDirectory(GPT_LIVE_CONTENT.id)
   );
   const env = await loadCliEnv(projectRoot, dependencies.loadEnvSnapshotFromFiles);
-  const prepareGptLiveProduction =
-    dependencies.prepareGptLiveProduction ?? defaultPrepareGptLiveProduction;
+  const prepareGptLiveProduction = dependencies.prepareGptLiveProduction ??
+    (defaultPrepareGptLiveProduction as PrepareGptLiveProductionFunction<TResult>);
 
   return prepareGptLiveProduction({
     episodeDir,
@@ -97,14 +128,7 @@ const isDirectExecution = (): boolean => {
 if (isDirectExecution()) {
   runGptLiveCli(process.argv.slice(2))
     .then((result) => {
-      if (
-        result &&
-        typeof result === "object" &&
-        "episodeDir" in result &&
-        typeof result.episodeDir === "string"
-      ) {
-        console.log(`episode: ${result.episodeDir}`);
-      }
+      console.log(`episode: ${result.episodeDir}`);
     })
     .catch((error: unknown) => {
       console.error(error instanceof Error ? error.message : String(error));
