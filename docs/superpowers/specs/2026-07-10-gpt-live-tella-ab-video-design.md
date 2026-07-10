@@ -150,6 +150,24 @@ The source package must retain URLs, extracted claims, retrieval timestamps, and
 
 Both exports must have matching total duration within 0.5 seconds and identical spoken content.
 
+## Shared AIMH Branding
+
+Both versions must use the existing AIMH logo from:
+
+`/Users/dennywii/Documents/dev/aimh-video-engine/assets/logo.png`
+
+Match the established `aimh-video-engine` watermark treatment exactly at 1920x1080:
+
+- Position: top-right for the entire video.
+- Width: 150 pixels.
+- Top margin: 24 pixels.
+- Right margin: 24 pixels.
+- Opacity: 85%.
+
+Apply the logo after the Tella export using the same deterministic FFmpeg overlay treatment as `aimh-video-engine`. This keeps the branding identical across both variants and prevents Tella layout changes from moving or resizing it.
+
+All motion graphics, source labels, captions, and Version B host elements must reserve the logo's top-right safe area. The Version B visual host supplements this shared watermark; it does not replace it.
+
 ## Version A: Dynamic Editorial
 
 Version A is footage-first. The narration acts as the host.
@@ -200,6 +218,7 @@ Version B tests whether a persistent branded presence improves continuity and ch
 4. Duplicate the content master for Version A and Version B.
 5. Apply each version's layouts, overlays, zooms, and transitions through Tella MCP.
 6. Export both versions at 1920x1080 and 30 fps without burned-in full captions unless the final design explicitly calls for selective kinetic captions.
+7. Apply the shared AIMH logo to both exports using the established 150-pixel, 24-pixel-margin, 85%-opacity watermark treatment.
 
 Tella is the assembly and finishing editor. It is not expected to generate every motion graphic.
 
@@ -235,6 +254,8 @@ Tella is the assembly and finishing editor. It is not expected to generate every
 - No text or overlays exceed safe bounds or cover important source content.
 - No unintentional static visual state lasts longer than six seconds.
 - Source attributions remain readable.
+- The AIMH logo remains visible in the top-right corner for the full runtime at the established size, margins, and opacity.
+- No captions, source labels, motion graphics, or Version B host elements collide with the logo safe area.
 - Version B's host element is consistent but not intrusive.
 - Frame sampling and a complete real-time watch confirm that animations enter on cue.
 
