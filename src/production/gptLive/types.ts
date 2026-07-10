@@ -1,5 +1,14 @@
 export type GptLiveVariant = "dynamic_editorial" | "aimh_visual_host";
 
+export type GptLiveScene =
+  | "hook"
+  | "full_duplex"
+  | "use_cases"
+  | "evidence"
+  | "availability"
+  | "future"
+  | "cta";
+
 export type TimelineKind = "source_clip" | "narration";
 
 export interface ProductionSource {
@@ -30,8 +39,85 @@ export interface NarrationSpec {
   readonly kind: "narration";
   readonly text: string;
   readonly claimIds: readonly string[];
-  readonly scene: "hook" | "full_duplex" | "use_cases" | "evidence" | "availability" | "future" | "cta";
+  readonly scene: GptLiveScene;
 }
+
+interface VisualSceneBase<TScene extends GptLiveScene> {
+  readonly scene: TScene;
+  readonly sectionNumber: string;
+  readonly header: string;
+  readonly headline: string;
+  readonly narrationId: string;
+  readonly narrationText: string;
+  readonly claimIds: readonly string[];
+  readonly sourceLabels: readonly string[];
+}
+
+export interface HookSceneContent extends VisualSceneBase<"hook"> {
+  readonly listeningLabel: string;
+  readonly listeningValue: string;
+  readonly speakingLabel: string;
+  readonly speakingValue: string;
+  readonly inputLabel: string;
+  readonly simultaneousLabel: string;
+}
+
+export interface FullDuplexSceneContent extends VisualSceneBase<"full_duplex"> {
+  readonly legacyLabel: string;
+  readonly legacySteps: readonly string[];
+  readonly concurrentLabel: string;
+  readonly tracks: readonly string[];
+  readonly interruptionLabel: string;
+}
+
+export interface UseCasesSceneContent extends VisualSceneBase<"use_cases"> {
+  readonly progressLabel: string;
+  readonly items: readonly {
+    readonly number: string;
+    readonly label: string;
+    readonly detail: string;
+  }[];
+}
+
+export interface EvidenceSceneContent extends VisualSceneBase<"evidence"> {
+  readonly worldCupAttribution: string;
+  readonly worldCupHeadline: string;
+  readonly worldCupDetail: string;
+  readonly benchmarkAttribution: string;
+  readonly benchmarkComparison: string;
+  readonly benchmarkName: string;
+  readonly benchmarkStatement: string;
+  readonly qualification: string;
+}
+
+export interface AvailabilitySceneContent extends VisualSceneBase<"availability"> {
+  readonly tiers: readonly { readonly label: string; readonly value: string }[];
+  readonly limitsLabel: string;
+  readonly limits: readonly string[];
+}
+
+export interface FutureSceneContent extends VisualSceneBase<"future"> {
+  readonly flows: readonly { readonly from: string; readonly to: string }[];
+  readonly summary: string;
+}
+
+export interface CtaSceneContent extends VisualSceneBase<"cta"> {
+  readonly prompts: readonly string[];
+  readonly audiencePrompt: string;
+}
+
+export type SceneContent =
+  | HookSceneContent
+  | FullDuplexSceneContent
+  | UseCasesSceneContent
+  | EvidenceSceneContent
+  | AvailabilitySceneContent
+  | FutureSceneContent
+  | CtaSceneContent;
+
+export type GptLiveVisualContent = {
+  readonly [TScene in GptLiveScene]: Extract<SceneContent, { readonly scene: TScene }>;
+};
 
 export type TimelineItem = SourceClipSpec | NarrationSpec;
 

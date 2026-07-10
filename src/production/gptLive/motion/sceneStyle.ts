@@ -12,15 +12,6 @@ export const GPT_LIVE_SCENES = [
   "cta"
 ] as const satisfies readonly GptLiveScene[];
 
-export const EVIDENCE_BENCHMARK_COPY = Object.freeze({
-  attribution: "OPENAI-REPORTED / VENDOR-REPORTED",
-  comparison: "GPT-LIVE-1 VS ADVANCED VOICE MODE",
-  benchmark: "ON GPQA",
-  statement:
-    "OpenAI reports GPT-Live-1 substantially outperforms Advanced Voice Mode on GPQA.",
-  qualification: "Not independent validation."
-});
-
 export interface SceneRect {
   readonly x: number;
   readonly y: number;

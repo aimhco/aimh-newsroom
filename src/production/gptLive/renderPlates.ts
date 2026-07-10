@@ -1,5 +1,11 @@
-import { readFile as defaultReadFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import {
+  access as defaultAccess,
+  mkdtemp as defaultMakeTempDirectory,
+  readFile as defaultReadFile,
+  rename as defaultRenameDirectory,
+  rm as defaultRemoveDirectory
+} from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundle as defaultBundle } from "@remotion/bundler";
 import {
@@ -8,13 +14,13 @@ import {
 } from "@remotion/renderer";
 import { ensureDir as defaultEnsureDir } from "../../utils/fs";
 import { writeJsonAtomic as defaultWriteJsonAtomic } from "./atomicFiles";
-import { GPT_LIVE_CONTENT } from "./content";
+import { GPT_LIVE_CONTENT, GPT_LIVE_VISUAL_CONTENT } from "./content";
 import {
   assertNarrationSlateContract,
   inspectMediaFile as defaultInspectMediaFile,
   type MediaInspection
 } from "./mediaInspection";
-import type { GptLiveClaimLabel, GptLivePlateProps } from "./motion/Root";
+import type { GptLivePlateProps } from "./motion/Root";
 import { buildTellaPlan, type TellaPlan } from "./tellaPlan";
 import type { GptLiveVariant, NarrationSpec } from "./types";
 
@@ -62,10 +68,14 @@ interface RenderMediaOptions {
 }
 
 export interface RenderGptLivePlatesDependencies {
+  readonly access?: (path: string) => Promise<void>;
   readonly bundle?: (options: { readonly entryPoint: string }) => Promise<string>;
   readonly ensureDir?: (path: string) => Promise<void>;
   readonly inspectMediaFile?: typeof defaultInspectMediaFile;
+  readonly makeTempDirectory?: (prefix: string) => Promise<string>;
   readonly readFile?: (path: string, encoding: "utf8") => Promise<string>;
+  readonly removeDirectory?: (path: string) => Promise<void>;
+  readonly renameDirectory?: (from: string, to: string) => Promise<void>;
   readonly renderMedia?: (options: RenderMediaOptions) => Promise<unknown>;
   readonly selectComposition?: (options: {
     readonly serveUrl: string;
@@ -147,26 +157,6 @@ const narrationMap = (
   return byId;
 };
 
-const claimLabelsFor = (narration: NarrationSpec): readonly GptLiveClaimLabel[] => {
-  const claimById = new Map<string, (typeof GPT_LIVE_CONTENT.claims)[number]>(
-    GPT_LIVE_CONTENT.claims.map((claim) => [claim.id, claim])
-  );
-  const sourceById = new Map<string, (typeof GPT_LIVE_CONTENT.sources)[number]>(
-    GPT_LIVE_CONTENT.sources.map((source) => [source.id, source])
-  );
-  return narration.claimIds.map((claimId) => {
-    const claim = claimById.get(claimId);
-    if (!claim) throw new Error(`Missing plate claim: ${claimId}`);
-    return {
-      label: claim.text,
-      source: claim.sourceIds
-        .map((sourceId) => sourceById.get(sourceId)?.publisher)
-        .filter((publisher) => publisher !== undefined)
-        .join(" + ")
-    };
-  });
-};
-
 export function buildPlateRenderJobs(options: BuildPlateRenderJobsOptions): readonly PlateRenderJob[] {
   const records = narrationMap(options.narrationRecords);
   return GPT_LIVE_CONTENT.narration.flatMap((narration) => {
@@ -179,11 +169,8 @@ export function buildPlateRenderJobs(options: BuildPlateRenderJobsOptions): read
       outputPath: join(options.episodeDir, "plates", variant, `${narration.id}.mp4`),
       inputProps: {
         variant,
-        scene: narration.scene,
         durationSeconds: record.durationSeconds,
-        narrationId: narration.id,
-        text: record.text,
-        claimLabels: claimLabelsFor(narration)
+        sceneContent: GPT_LIVE_VISUAL_CONTENT[narration.scene]
       }
     }));
   });
@@ -224,6 +211,11 @@ export async function renderGptLivePlates(
   dependencies: RenderGptLivePlatesDependencies = {}
 ): Promise<RenderGptLivePlatesResult> {
   const ensureDir = dependencies.ensureDir ?? defaultEnsureDir;
+  const access = dependencies.access ?? defaultAccess;
+  const makeTempDirectory = dependencies.makeTempDirectory ?? defaultMakeTempDirectory;
+  const removeDirectory = dependencies.removeDirectory ??
+    ((path: string) => defaultRemoveDirectory(path, { recursive: true, force: true }));
+  const renameDirectory = dependencies.renameDirectory ?? defaultRenameDirectory;
   const inspectMediaFile = dependencies.inspectMediaFile ?? defaultInspectMediaFile;
   const bundle = dependencies.bundle ?? ((args) => defaultBundle(args));
   const selectComposition = dependencies.selectComposition ??
@@ -250,44 +242,73 @@ export async function renderGptLivePlates(
     }))
   });
   const planPath = join(options.episodeDir, "tella", "plan.json");
+  const platesPath = join(options.episodeDir, "plates");
+  await ensureDir(options.episodeDir);
+  const stagingPath = await makeTempDirectory(join(options.episodeDir, ".plates-staging-"));
+  const backupPath = `${stagingPath}.backup`;
   const narrationPlanById = new Map(
     plan.clips
       .filter((clip) => clip.kind === "narration")
       .map((clip) => [clip.id, clip])
   );
   const entryPoint = fileURLToPath(new URL("./motion/Root.tsx", import.meta.url));
-  const serveUrl = await bundle({ entryPoint });
-
-  for (const job of jobs) {
-    await ensureDir(dirname(job.outputPath));
-    const composition = await selectComposition({
-      serveUrl,
-      id: COMPOSITION_ID,
-      inputProps: job.inputProps
-    });
-    await renderMedia({
-      composition,
-      serveUrl,
-      codec: "h264",
-      outputLocation: job.outputPath,
-      inputProps: job.inputProps,
-      muted: true,
-      enforceAudioTrack: false,
-      overwrite: true,
-      pixelFormat: "yuv420p"
-    });
-    const narrationPlan = narrationPlanById.get(job.narrationId);
-    if (!narrationPlan) {
-      throw new Error(`Missing narration slate plan: ${job.narrationId}`);
+  const pathExists = async (path: string): Promise<boolean> => {
+    try {
+      await access(path);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
     }
-    const plateInspection = await inspectMediaFile(options.ffprobePath, job.outputPath);
-    const slateInspection = await inspectMediaFile(options.ffprobePath, narrationPlan.masterPath);
-    assertNarrationSlateContract(slateInspection, job.durationSeconds);
-    assertPlateContract(plateInspection, slateInspection);
-  }
+  };
 
-  if (options.publishPlan !== false) {
-    await writeJsonAtomic(planPath, plan);
+  try {
+    const serveUrl = await bundle({ entryPoint });
+
+    for (const job of jobs) {
+      const stagedOutputPath = join(stagingPath, relative(platesPath, job.outputPath));
+      await ensureDir(dirname(stagedOutputPath));
+      const composition = await selectComposition({
+        serveUrl,
+        id: COMPOSITION_ID,
+        inputProps: job.inputProps
+      });
+      await renderMedia({
+        composition,
+        serveUrl,
+        codec: "h264",
+        outputLocation: stagedOutputPath,
+        inputProps: job.inputProps,
+        muted: true,
+        enforceAudioTrack: false,
+        overwrite: true,
+        pixelFormat: "yuv420p"
+      });
+      const narrationPlan = narrationPlanById.get(job.narrationId);
+      if (!narrationPlan) {
+        throw new Error(`Missing narration slate plan: ${job.narrationId}`);
+      }
+      const plateInspection = await inspectMediaFile(options.ffprobePath, stagedOutputPath);
+      const slateInspection = await inspectMediaFile(options.ffprobePath, narrationPlan.masterPath);
+      assertNarrationSlateContract(slateInspection, job.durationSeconds);
+      assertPlateContract(plateInspection, slateInspection);
+    }
+
+    const hadPreviousPlateSet = await pathExists(platesPath);
+    if (hadPreviousPlateSet) await renameDirectory(platesPath, backupPath);
+    try {
+      await renameDirectory(stagingPath, platesPath);
+    } catch (error) {
+      if (hadPreviousPlateSet) await renameDirectory(backupPath, platesPath);
+      throw error;
+    }
+    if (hadPreviousPlateSet) await removeDirectory(backupPath);
+
+    if (options.publishPlan !== false) {
+      await writeJsonAtomic(planPath, plan);
+    }
+    return { jobs, plan, planPath };
+  } finally {
+    await removeDirectory(stagingPath);
   }
-  return { jobs, plan, planPath };
 }

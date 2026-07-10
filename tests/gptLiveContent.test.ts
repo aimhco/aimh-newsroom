@@ -164,6 +164,117 @@ const EXPECTED_NARRATION = [
   }
 ] as const;
 
+const visualNarration = (index: number, sourceLabels: readonly string[]) => ({
+  narrationId: EXPECTED_NARRATION[index]!.id,
+  narrationText: EXPECTED_NARRATION[index]!.text,
+  claimIds: EXPECTED_NARRATION[index]!.claimIds,
+  sourceLabels
+});
+
+const EXPECTED_VISUAL_CONTENT = {
+  hook: {
+    scene: "hook",
+    sectionNumber: "01",
+    header: "LIVE TRANSLATION",
+    headline: "LISTENING IN FRENCH / SPEAKING IN ENGLISH",
+    listeningLabel: "LISTENING",
+    listeningValue: "IN FRENCH",
+    speakingLabel: "SPEAKING",
+    speakingValue: "IN ENGLISH",
+    inputLabel: "LIVE INPUT",
+    simultaneousLabel: "AT THE SAME TIME",
+    ...visualNarration(0, ["OPENAI", "CHATGPT VOICE"])
+  },
+  full_duplex: {
+    scene: "full_duplex",
+    sectionNumber: "02",
+    header: "FULL DUPLEX",
+    headline: "LISTENING AND SPEAKING CAN OVERLAP.",
+    legacyLabel: "OLD / WALKIE-TALKIE QUEUE",
+    legacySteps: ["YOU SPEAK", "WAIT", "MODEL SPEAKS"],
+    concurrentLabel: "NOW / CONCURRENT TRACKS",
+    tracks: ["LISTEN", "SPEAK"],
+    interruptionLabel: "INTERRUPTION ACCEPTED / COURSE CORRECTED",
+    ...visualNarration(1, ["OPENAI", "CHATGPT VOICE"])
+  },
+  use_cases: {
+    scene: "use_cases",
+    sectionNumber: "03",
+    header: "SIX THINGS TO TRY",
+    headline: "SIX FAST REVEALS",
+    progressLabel: "FAST REVEAL",
+    items: [
+      { number: "01", label: "LIVE TRANSLATION", detail: "Language shifts without stopping." },
+      { number: "02", label: "LANGUAGE ROLE-PLAY", detail: "Practice the exchange, not the prompt." },
+      { number: "03", label: "MESSY IDEA", detail: "Think aloud before the structure exists." },
+      { number: "04", label: "INTERRUPT + SEARCH", detail: "Correct course and follow the thread." },
+      { number: "05", label: "VISUAL CARDS", detail: "Voice can surface something you can see." },
+      { number: "06", label: "DEEPER WORK", detail: "Keep talking while background work runs." }
+    ],
+    ...visualNarration(2, ["OPENAI PRODUCT MATERIALS"])
+  },
+  evidence: {
+    scene: "evidence",
+    sectionNumber: "04",
+    header: "REPORTED EVIDENCE",
+    headline: "REPORTED EVIDENCE",
+    worldCupAttribution: "TOM'S GUIDE REPORTED",
+    worldCupHeadline: "CONTINUOUS ENGLISH INTERPRETATION",
+    worldCupDetail: "Over rapid Spanish World Cup commentary in the publication's hands-on test.",
+    benchmarkAttribution: "OPENAI-REPORTED / VENDOR-REPORTED",
+    benchmarkComparison: "GPT-LIVE-1 VS ADVANCED VOICE MODE",
+    benchmarkName: "ON GPQA",
+    benchmarkStatement:
+      "OpenAI reports GPT-Live-1 substantially outperforms Advanced Voice Mode on GPQA.",
+    qualification: "Not independent validation.",
+    ...visualNarration(3, ["TOM'S GUIDE", "OPENAI'S OWN GPQA TESTS"])
+  },
+  availability: {
+    scene: "availability",
+    sectionNumber: "05",
+    header: "AVAILABILITY",
+    headline: "TRY IT NOW IN CHATGPT VOICE",
+    tiers: [
+      { label: "FREE", value: "GPT-LIVE-1 MINI" },
+      { label: "GO / PLUS / PRO", value: "GPT-LIVE-1" },
+      { label: "WHERE", value: "SETTINGS > VOICE > LIVE" }
+    ],
+    limitsLabel: "LAUNCH LIMITS",
+    limits: [
+      "NO LIVE VIDEO OR SCREEN SHARE",
+      "NO CONNECTED APPS OR PLUGINS",
+      "SOME WORKSPACES + TOOLS UNSUPPORTED"
+    ],
+    ...visualNarration(4, ["OPENAI HELP CENTER"])
+  },
+  future: {
+    scene: "future",
+    sectionNumber: "06",
+    header: "WHAT COMES NEXT",
+    headline: "VOICE AND SYSTEMS MOVE BOTH WAYS",
+    flows: [
+      { from: "VOICE", to: "ACTION" },
+      { from: "SYSTEMS", to: "VOICE" },
+      { from: "VOICE", to: "VOICE" }
+    ],
+    summary: "ACTIONS, PROACTIVE CONTEXT, AND CROSS-LANGUAGE CONVERSATION WITHOUT STOPPING.",
+    ...visualNarration(5, ["OPENAI", "OPENAI REALTIME"])
+  },
+  cta: {
+    scene: "cta",
+    sectionNumber: "07",
+    header: "THE TAKEAWAY",
+    headline: "YOU NO LONGER HAVE TO SPEAK LIKE A MACHINE.",
+    prompts: [
+      "TRANSLATE A CONVERSATION",
+      "TALK THROUGH A MESSY PROBLEM",
+      "INTERRUPT MID-ANSWER"
+    ],
+    audiencePrompt: "WHAT DID GPT-LIVE ENABLE FOR YOU — OR WHAT DO YOU THINK IT WILL ENABLE?",
+    ...visualNarration(6, ["OPENAI", "CHATGPT VOICE"])
+  }
+} as const;
+
 const EXPECTED_SOURCE_CLIPS = [
   {
     id: "clip_translation",
@@ -869,6 +980,12 @@ describe("GPT-Live preparation CLI", () => {
 });
 
 describe("GPT-Live controlled production content", () => {
+  it("pins all canonical visual scene content", () => {
+    expect((contentModule as Record<string, unknown>).GPT_LIVE_VISUAL_CONTENT).toEqual(
+      EXPECTED_VISUAL_CONTENT
+    );
+  });
+
   it("pins every approved production field", () => {
     expect(GPT_LIVE_CONTENT.id).toBe("2026-07-10-gpt-live-tella-ab");
     expect(GPT_LIVE_CONTENT.variants).toEqual(["dynamic_editorial", "aimh_visual_host"]);

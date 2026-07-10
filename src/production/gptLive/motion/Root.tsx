@@ -1,38 +1,33 @@
 import { Composition, registerRoot, type CalculateMetadataFunction } from "remotion";
-import type { GptLiveVariant } from "../types";
+import "./fonts";
+import { GPT_LIVE_VISUAL_CONTENT } from "../content";
+import type { GptLiveVariant, SceneContent } from "../types";
 import { GptLivePlate } from "./GptLivePlate";
-import type { GptLiveScene } from "./sceneStyle";
-
-export interface GptLiveClaimLabel {
-  readonly label: string;
-  readonly source: string;
-}
 
 export interface GptLivePlateProps extends Record<string, unknown> {
   readonly variant: GptLiveVariant;
-  readonly scene: GptLiveScene;
   readonly durationSeconds: number;
-  readonly narrationId: string;
-  readonly text: string;
-  readonly claimLabels: readonly GptLiveClaimLabel[];
+  readonly sceneContent: SceneContent;
 }
 
 const DEFAULT_PROPS: GptLivePlateProps = {
   variant: "dynamic_editorial",
-  scene: "hook",
   durationSeconds: 6,
-  narrationId: "narration_hook",
-  text: "GPT-Live listens and speaks at the same time.",
-  claimLabels: []
+  sceneContent: GPT_LIVE_VISUAL_CONTENT.hook
 };
 
-export const calculateGptLivePlateMetadata = async ({ props }: { props: GptLivePlateProps }) => ({
-  durationInFrames: Math.max(1, Math.round(props.durationSeconds * 30)),
-  fps: 30,
-  width: 1920,
-  height: 1080,
-  props
-});
+export const calculateGptLivePlateMetadata = async ({ props }: { props: GptLivePlateProps }) => {
+  if (!Number.isFinite(props.durationSeconds) || props.durationSeconds <= 0) {
+    throw new Error("durationSeconds must be finite and positive");
+  }
+  return {
+    durationInFrames: Math.max(1, Math.round(props.durationSeconds * 30)),
+    fps: 30,
+    width: 1920,
+    height: 1080,
+    props
+  };
+};
 
 const calculateMetadata: CalculateMetadataFunction<GptLivePlateProps> = calculateGptLivePlateMetadata;
 

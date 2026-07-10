@@ -1,16 +1,28 @@
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { GPT_LIVE_CONTENT } from "../src/production/gptLive/content";
+import { GPT_LIVE_CONTENT, GPT_LIVE_VISUAL_CONTENT } from "../src/production/gptLive/content";
+import {
+  SCENE_STATE_COUNTS,
+  normalizedBeatIndex,
+  normalizedBeatPlan,
+  sceneStateIndex
+} from "../src/production/gptLive/motion/beatState";
 import {
   calculateGptLivePlateMetadata,
   type GptLivePlateProps
 } from "../src/production/gptLive/motion/Root";
 import {
-  EVIDENCE_BENCHMARK_COPY,
   GPT_LIVE_SCENES,
   sceneStyle,
   type SceneRect
 } from "../src/production/gptLive/motion/sceneStyle";
+import {
+  assertUniformSafeAreaMetadata,
+  buildSmokeFramePlan,
+  useCaseTemporalFrames
+} from "../src/production/gptLive/motion/smokePlan";
 import {
   assertPlateContract,
   buildPlateRenderJobs,
@@ -55,13 +67,27 @@ const validSlateInspection = (durationSeconds = 8): MediaInspection => ({
 
 const isMasterPath = (path: string): boolean => path.includes(`${sep}master${sep}`);
 
+const virtualAtomicFs = (episodeDir: string, finalExists = false) => {
+  const stagingPath = join(episodeDir, ".plates-staging-test");
+  const platesPath = join(episodeDir, "plates");
+  return {
+    access: async (path: string) => {
+      if (finalExists && path === platesPath) return;
+      throw Object.assign(new Error("not found"), { code: "ENOENT" });
+    },
+    makeTempDirectory: async () => stagingPath,
+    removeDirectory: vi.fn(async (_path: string) => undefined),
+    renameDirectory: vi.fn(async (_from: string, _to: string) => undefined)
+  };
+};
+
 describe("GPT-Live scene styles", () => {
   it("pins the approved OpenAI-reported GPQA comparison for the evidence scene", () => {
-    expect(EVIDENCE_BENCHMARK_COPY).toEqual({
-      attribution: "OPENAI-REPORTED / VENDOR-REPORTED",
-      comparison: "GPT-LIVE-1 VS ADVANCED VOICE MODE",
-      benchmark: "ON GPQA",
-      statement:
+    expect(GPT_LIVE_VISUAL_CONTENT.evidence).toMatchObject({
+      benchmarkAttribution: "OPENAI-REPORTED / VENDOR-REPORTED",
+      benchmarkComparison: "GPT-LIVE-1 VS ADVANCED VOICE MODE",
+      benchmarkName: "ON GPQA",
+      benchmarkStatement:
         "OpenAI reports GPT-Live-1 substantially outperforms Advanced Voice Mode on GPQA.",
       qualification: "Not independent validation."
     });
@@ -133,11 +159,8 @@ describe("GPT-Live scene styles", () => {
 describe("GPT-Live Remotion composition metadata", () => {
   const props: GptLivePlateProps = {
     variant: "dynamic_editorial",
-    scene: "hook",
     durationSeconds: 4.51,
-    narrationId: "narration_hook",
-    text: "Test narration",
-    claimLabels: []
+    sceneContent: GPT_LIVE_VISUAL_CONTENT.hook
   };
 
   it("rounds measured seconds at 30fps", async () => {
@@ -149,10 +172,123 @@ describe("GPT-Live Remotion composition metadata", () => {
     });
   });
 
-  it("never returns fewer than one frame", async () => {
+  it("never returns fewer than one frame for a positive duration", async () => {
     await expect(
-      calculateGptLivePlateMetadata({ props: { ...props, durationSeconds: 0 } })
+      calculateGptLivePlateMetadata({ props: { ...props, durationSeconds: 0.001 } })
     ).resolves.toMatchObject({ durationInFrames: 1 });
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -1])(
+    "rejects invalid duration %s",
+    async (durationSeconds) => {
+      await expect(
+        calculateGptLivePlateMetadata({ props: { ...props, durationSeconds } })
+      ).rejects.toThrow("durationSeconds must be finite and positive");
+    }
+  );
+});
+
+describe("GPT-Live normalized beat scheduling", () => {
+  const durations = [
+    { name: "short", frames: 8 * 30 },
+    { name: "nominal", frames: 22 * 30 },
+    { name: "long", frames: 75 * 30 }
+  ] as const;
+
+  it.each(durations)("shows all six use cases during a $name plate", ({ frames }) => {
+    const seen = new Set<number>();
+    for (let frame = 0; frame < frames; frame += 1) {
+      seen.add(sceneStateIndex("use_cases", frame, frames, 180));
+    }
+    expect([...seen].sort()).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+
+  it.each(durations)("makes every required scene state reachable in a $name plate", ({ frames }) => {
+    for (const scene of GPT_LIVE_SCENES) {
+      const seen = new Set<number>();
+      for (let frame = 0; frame < frames; frame += 1) {
+        seen.add(sceneStateIndex(scene, frame, frames, 180));
+      }
+      expect(seen.size, scene).toBe(SCENE_STATE_COUNTS[scene]);
+    }
+  });
+
+  it("never holds a state longer than maxStaticFrames in a long plate", () => {
+    const durationInFrames = 120 * 30;
+    for (const scene of GPT_LIVE_SCENES) {
+      let longestRun = 0;
+      let currentRun = 0;
+      let previous = -1;
+      for (let frame = 0; frame < durationInFrames; frame += 1) {
+        const current = sceneStateIndex(scene, frame, durationInFrames, 180);
+        currentRun = current === previous ? currentRun + 1 : 1;
+        longestRun = Math.max(longestRun, currentRun);
+        previous = current;
+      }
+      expect(longestRun, scene).toBeLessThanOrEqual(180);
+    }
+  });
+
+  it("cycles deterministically after the first complete pass", () => {
+    const options = { durationInFrames: 75 * 30, itemCount: 6, maxStaticFrames: 180 };
+    const plan = normalizedBeatPlan(options);
+    expect(plan.firstPassFrames).toBe(plan.holdFrames * options.itemCount);
+    for (let offset = 0; offset < plan.firstPassFrames; offset += 1) {
+      expect(normalizedBeatIndex(plan.firstPassFrames + offset, options)).toBe(
+        normalizedBeatIndex(offset, options)
+      );
+    }
+  });
+});
+
+describe("GPT-Live rendered smoke planning", () => {
+  it("plans one safe-area-checked still per scene and variant", () => {
+    const plan = buildSmokeFramePlan(8 * 30);
+    expect(plan).toHaveLength(14);
+    expect(new Set(plan.map(({ outputName }) => outputName)).size).toBe(14);
+    expect(new Set(plan.map(({ sceneContent }) => sceneContent.scene))).toEqual(
+      new Set(GPT_LIVE_SCENES)
+    );
+    expect(new Set(plan.map(({ variant }) => variant))).toEqual(new Set(VARIANTS));
+  });
+
+  it("selects six 8-second use-case frames that render states zero through five", () => {
+    const durationInFrames = 8 * 30;
+    const frames = useCaseTemporalFrames(durationInFrames);
+    expect(frames).toHaveLength(6);
+    expect(frames.map((frame) => sceneStateIndex("use_cases", frame, durationInFrames, 180))).toEqual(
+      [0, 1, 2, 3, 4, 5]
+    );
+  });
+
+  it("accepts a uniform safe area and rejects visible pixel variance", () => {
+    expect(() =>
+      assertUniformSafeAreaMetadata(
+        [
+          "lavfi.signalstats.YMIN=26",
+          "lavfi.signalstats.YMAX=26",
+          "lavfi.signalstats.UMIN=129",
+          "lavfi.signalstats.UMAX=129",
+          "lavfi.signalstats.VMIN=127",
+          "lavfi.signalstats.VMAX=127"
+        ].join("\n")
+      )
+    ).not.toThrow();
+    expect(() =>
+      assertUniformSafeAreaMetadata(
+        [
+          "lavfi.signalstats.YMIN=26",
+          "lavfi.signalstats.YMAX=26",
+          "lavfi.signalstats.UMIN=129",
+          "lavfi.signalstats.UMAX=200",
+          "lavfi.signalstats.VMIN=127",
+          "lavfi.signalstats.VMAX=127"
+        ].join("\n")
+      )
+    ).toThrow("safe area is not uniform");
+    expect(() => assertUniformSafeAreaMetadata("missing metadata")).toThrow(
+      "safe area metadata is incomplete"
+    );
   });
 });
 
@@ -180,6 +316,9 @@ describe("GPT-Live plate render planning", () => {
         join(episodeDir, "plates", "aimh_visual_host", `${narration.id}.mp4`)
       ]);
       expect(new Set(matching.map(({ outputPath }) => outputPath)).size).toBe(2);
+      expect(matching[0]!.inputProps).toHaveProperty("sceneContent.scene", narration.scene);
+      expect(matching[0]!.inputProps).toHaveProperty("sceneContent.narrationText", narration.text);
+      expect(matching[0]!.inputProps).toHaveProperty("sceneContent.claimIds", narration.claimIds);
     }
   });
 
@@ -229,6 +368,7 @@ describe("GPT-Live plate render planning", () => {
     const writeJsonAtomic = vi.fn(async (path: string) => {
       events.push(`publish:${path}`);
     });
+    const atomicFs = virtualAtomicFs(episodeDir);
 
     const result = await renderGptLivePlates(
       { episodeDir, ffprobePath: "ffprobe", narrationRecords },
@@ -238,12 +378,18 @@ describe("GPT-Live plate render planning", () => {
         inspectMediaFile,
         renderMedia,
         selectComposition,
-        writeJsonAtomic
+        writeJsonAtomic,
+        ...atomicFs
       }
     );
 
     expect(bundle).toHaveBeenCalledTimes(1);
     expect(renderMedia).toHaveBeenCalledTimes(14);
+    expect(
+      renderMedia.mock.calls.every(([options]) =>
+        options.outputLocation.includes(`${sep}.plates-staging-test${sep}`)
+      )
+    ).toBe(true);
     expect(inspectMediaFile).toHaveBeenCalledTimes(28);
     for (const narration of narrationRecords) {
       expect(inspectMediaFile).toHaveBeenCalledWith(
@@ -254,6 +400,13 @@ describe("GPT-Live plate render planning", () => {
     expect(renderMedia.mock.calls.every(([options]) => options.codec === "h264")).toBe(true);
     expect(renderMedia.mock.calls.every(([options]) => options.muted === true)).toBe(true);
     expect(writeJsonAtomic).toHaveBeenCalledOnce();
+    expect(atomicFs.renameDirectory).toHaveBeenCalledWith(
+      join(episodeDir, ".plates-staging-test"),
+      join(episodeDir, "plates")
+    );
+    expect(atomicFs.renameDirectory.mock.invocationCallOrder.at(-1)).toBeLessThan(
+      writeJsonAtomic.mock.invocationCallOrder[0]!
+    );
     expect(writeJsonAtomic).toHaveBeenCalledWith(join(episodeDir, "tella", "plan.json"), result.plan);
     expect(events.at(-1)).toBe(`publish:${join(episodeDir, "tella", "plan.json")}`);
   });
@@ -281,7 +434,8 @@ describe("GPT-Live plate render planning", () => {
         readFile,
         renderMedia: async () => undefined,
         selectComposition: async () => ({ id: "GptLivePlate" }),
-        writeJsonAtomic: async () => undefined
+        writeJsonAtomic: async () => undefined,
+        ...virtualAtomicFs(episodeDir)
       }
     );
 
@@ -311,7 +465,8 @@ describe("GPT-Live plate render planning", () => {
           inspectMediaFile,
           renderMedia: async () => undefined,
           selectComposition: async () => ({ id: "GptLivePlate" }),
-          writeJsonAtomic
+          writeJsonAtomic,
+          ...virtualAtomicFs(episodeDir)
         }
       )
     ).rejects.toThrow("plate/slate duration mismatch");
@@ -336,10 +491,96 @@ describe("GPT-Live plate render planning", () => {
               : { ...validInspection(), audio: { codecName: "aac" } },
           renderMedia: async () => undefined,
           selectComposition: async () => ({ id: "GptLivePlate" }),
-          writeJsonAtomic
+          writeJsonAtomic,
+          ...virtualAtomicFs("/tmp/gpt-live-motion")
         }
       )
     ).rejects.toThrow("must not contain audio");
+    expect(writeJsonAtomic).not.toHaveBeenCalled();
+  });
+
+  it.each(["render", "validation"] as const)(
+    "preserves the prior plate set and removes staging when %s fails",
+    async (failurePoint) => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-atomic-plates-"));
+    const platesDir = join(episodeDir, "plates");
+    const oldDynamic = join(platesDir, "dynamic_editorial", "old.txt");
+    const oldHost = join(platesDir, "aimh_visual_host", "old.txt");
+    await mkdir(join(platesDir, "dynamic_editorial"), { recursive: true });
+    await mkdir(join(platesDir, "aimh_visual_host"), { recursive: true });
+    await writeFile(oldDynamic, "old-dynamic", "utf8");
+    await writeFile(oldHost, "old-host", "utf8");
+
+    try {
+      const rendering = renderGptLivePlates(
+        { episodeDir, ffprobePath: "ffprobe", narrationRecords },
+        {
+          bundle: async () => "serve-url",
+          inspectMediaFile: async (_ffprobe, outputPath) =>
+            isMasterPath(outputPath)
+              ? validSlateInspection(narrationRecords[0]!.durationSeconds)
+              : { ...validInspection(narrationRecords[0]!.durationSeconds), audio: { codecName: "aac" } },
+          renderMedia: async ({ outputLocation }) => {
+            await writeFile(outputLocation, "partial-new-plate", "utf8");
+            if (failurePoint === "render") throw new Error("injected render failure");
+          },
+          selectComposition: async () => ({ id: "GptLivePlate" }),
+          writeJsonAtomic: async () => undefined
+        }
+      );
+      await expect(rendering).rejects.toThrow(
+        failurePoint === "render" ? "injected render failure" : "must not contain audio"
+      );
+
+      expect(await readFile(oldDynamic, "utf8")).toBe("old-dynamic");
+      expect(await readFile(oldHost, "utf8")).toBe("old-host");
+      expect((await readdir(platesDir, { recursive: true })).filter((file) => file.endsWith(".mp4"))).toEqual([]);
+      expect((await readdir(episodeDir)).filter((file) => file.startsWith(".plates-staging-"))).toEqual([]);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+    }
+  );
+
+  it("rolls the previous plate set back when atomic promotion fails", async () => {
+    const episodeDir = "/tmp/gpt-live-promotion-failure";
+    const platesPath = join(episodeDir, "plates");
+    const stagingPath = join(episodeDir, ".plates-staging-test");
+    const backupPath = `${stagingPath}.backup`;
+    const atomicFs = virtualAtomicFs(episodeDir, true);
+    atomicFs.renameDirectory.mockImplementation(async (from, to) => {
+      if (from === stagingPath && to === platesPath) {
+        throw new Error("injected promotion failure");
+      }
+    });
+    const writeJsonAtomic = vi.fn(async () => undefined);
+
+    await expect(
+      renderGptLivePlates(
+        { episodeDir, ffprobePath: "ffprobe", narrationRecords },
+        {
+          bundle: async () => "serve-url",
+          ensureDir: async () => undefined,
+          inspectMediaFile: async (_ffprobe, outputPath) => {
+            const narration = narrationRecords.find(({ id }) => outputPath.includes(id))!;
+            return isMasterPath(outputPath)
+              ? validSlateInspection(narration.durationSeconds)
+              : validInspection(narration.durationSeconds);
+          },
+          renderMedia: async () => undefined,
+          selectComposition: async () => ({ id: "GptLivePlate" }),
+          writeJsonAtomic,
+          ...atomicFs
+        }
+      )
+    ).rejects.toThrow("injected promotion failure");
+
+    expect(atomicFs.renameDirectory.mock.calls).toEqual([
+      [platesPath, backupPath],
+      [stagingPath, platesPath],
+      [backupPath, platesPath]
+    ]);
+    expect(atomicFs.removeDirectory).toHaveBeenCalledWith(stagingPath);
     expect(writeJsonAtomic).not.toHaveBeenCalled();
   });
 });
