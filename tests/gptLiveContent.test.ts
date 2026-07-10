@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as contentModule from "../src/production/gptLive/content";
 import type { GptLiveProduction, SourceClipSpec } from "../src/production/gptLive/types";
 
-const { GPT_LIVE_CONTENT, GPT_LIVE_TIMELINE, validateGptLiveProduction } = contentModule;
+const { GPT_LIVE_CONTENT, GPT_LIVE_TIMELINE, validateProductionManifest } = contentModule;
 
 const EXPECTED_SOURCES = [
   {
@@ -281,9 +281,76 @@ describe("GPT-Live controlled production content", () => {
           )
         };
       }
+    },
+    {
+      name: "altered timeline narration",
+      expectedError:
+        'Invalid GPT-Live production: timeline narration "narration_hook" does not exactly match canonical narration',
+      build: () => {
+        const production = cloneProduction();
+        return {
+          ...production,
+          timeline: production.timeline.map((item) =>
+            item.id === "narration_hook" ? { ...item, text: "Altered narration." } : item
+          )
+        };
+      }
+    },
+    {
+      name: "missing timeline narration",
+      expectedError:
+        'Invalid GPT-Live production: canonical narration "narration_hook" must appear exactly once in timeline; found 0',
+      build: () => {
+        const production = cloneProduction();
+        return {
+          ...production,
+          timeline: production.timeline.filter((item) => item.id !== "narration_hook")
+        };
+      }
+    },
+    {
+      name: "duplicated timeline narration",
+      expectedError:
+        'Invalid GPT-Live production: canonical narration "narration_hook" must appear exactly once in timeline; found 2',
+      build: () => {
+        const production = cloneProduction();
+        const narration = production.timeline.find((item) => item.id === "narration_hook")!;
+        return { ...production, timeline: [...production.timeline, narration] };
+      }
+    },
+    {
+      name: "undeclared timeline narration",
+      expectedError:
+        'Invalid GPT-Live production: timeline narration "narration_extra" is not declared in canonical narration',
+      build: () => {
+        const production = cloneProduction();
+        const narration = production.narration[0]!;
+        return {
+          ...production,
+          timeline: [...production.timeline, { ...narration, id: "narration_extra" }]
+        };
+      }
+    },
+    {
+      name: "claims without sources",
+      expectedError: 'Invalid GPT-Live production: claim "claim_full_duplex" must reference at least one source',
+      build: () => {
+        const production = cloneProduction();
+        const [claim, ...claims] = production.claims;
+        return { ...production, claims: [{ ...claim!, sourceIds: [] }, ...claims] };
+      }
+    },
+    {
+      name: "narration without claims",
+      expectedError: 'Invalid GPT-Live production: narration "narration_hook" must reference at least one claim',
+      build: () => {
+        const production = cloneProduction();
+        const [narration, ...narrations] = production.narration;
+        return { ...production, narration: [{ ...narration!, claimIds: [] }, ...narrations] };
+      }
     }
   ])("rejects $name", ({ build, expectedError }) => {
-    expect(() => validateGptLiveProduction(build())).toThrow(expectedError);
+    expect(() => validateProductionManifest(build())).toThrow(expectedError);
   });
 
   it("recursively freezes the exported production graph", () => {

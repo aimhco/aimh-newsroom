@@ -27,6 +27,9 @@ const assertNarrationClaimsResolve = (
   claimIds: ReadonlySet<string>
 ): void => {
   for (const item of narration) {
+    if (item.claimIds.length === 0) {
+      invalidProduction(`narration "${item.id}" must reference at least one claim`);
+    }
     for (const claimId of item.claimIds) {
       if (!claimIds.has(claimId)) {
         invalidProduction(`narration "${item.id}" references unknown claim "${claimId}"`);
@@ -35,16 +38,26 @@ const assertNarrationClaimsResolve = (
   }
 };
 
-export const validateGptLiveProduction = (production: GptLiveProduction): void => {
+const narrationExactlyMatches = (timelineItem: NarrationSpec, canonical: NarrationSpec): boolean =>
+  timelineItem.id === canonical.id &&
+  timelineItem.kind === canonical.kind &&
+  timelineItem.text === canonical.text &&
+  timelineItem.scene === canonical.scene &&
+  timelineItem.claimIds.length === canonical.claimIds.length &&
+  timelineItem.claimIds.every((claimId, index) => claimId === canonical.claimIds[index]);
+
+export const validateProductionManifest = (production: GptLiveProduction): void => {
   assertUniqueIds("source", production.sources);
   assertUniqueIds("claim", production.claims);
   assertUniqueIds("narration", production.narration);
-  assertUniqueIds("timeline", production.timeline);
 
   const sourceIds = new Set(production.sources.map(({ id }) => id));
   const claimIds = new Set(production.claims.map(({ id }) => id));
 
   for (const claim of production.claims) {
+    if (claim.sourceIds.length === 0) {
+      invalidProduction(`claim "${claim.id}" must reference at least one source`);
+    }
     for (const sourceId of claim.sourceIds) {
       if (!sourceIds.has(sourceId)) {
         invalidProduction(`claim "${claim.id}" references unknown source "${sourceId}"`);
@@ -54,18 +67,38 @@ export const validateGptLiveProduction = (production: GptLiveProduction): void =
 
   assertNarrationClaimsResolve(production.narration, claimIds);
 
-  const timelineNarration: NarrationSpec[] = [];
+  const canonicalNarration = new Map(production.narration.map((item) => [item.id, item]));
+  const narrationOccurrences = new Map(production.narration.map((item) => [item.id, 0]));
+
   for (const item of production.timeline) {
     if (item.kind === "source_clip") {
       if (!sourceIds.has(item.sourceId)) {
         invalidProduction(`source clip "${item.id}" references unknown source "${item.sourceId}"`);
       }
     } else {
-      timelineNarration.push(item);
+      const canonical =
+        canonicalNarration.get(item.id) ??
+        invalidProduction(`timeline narration "${item.id}" is not declared in canonical narration`);
+      narrationOccurrences.set(item.id, narrationOccurrences.get(item.id)! + 1);
+      if (!narrationExactlyMatches(item, canonical)) {
+        invalidProduction(`timeline narration "${item.id}" does not exactly match canonical narration`);
+      }
     }
   }
-  assertNarrationClaimsResolve(timelineNarration, claimIds);
+
+  for (const narration of production.narration) {
+    const occurrences = narrationOccurrences.get(narration.id)!;
+    if (occurrences !== 1) {
+      invalidProduction(
+        `canonical narration "${narration.id}" must appear exactly once in timeline; found ${occurrences}`
+      );
+    }
+  }
+
+  assertUniqueIds("timeline", production.timeline);
 };
+
+export const validateGptLiveProduction = validateProductionManifest;
 
 const deepFreeze = <T>(value: T): T => {
   if (value === null || typeof value !== "object" || Object.isFrozen(value)) {
@@ -276,6 +309,6 @@ const GPT_LIVE_CONTENT_MANIFEST = {
   musicPath: "/Users/dennywii/Documents/dev/aimh-video-engine/assets/music/Body_Komorebi_Futuremono.mp3"
 } as const satisfies GptLiveProduction;
 
-validateGptLiveProduction(GPT_LIVE_CONTENT_MANIFEST);
+validateProductionManifest(GPT_LIVE_CONTENT_MANIFEST);
 
 export const GPT_LIVE_CONTENT = deepFreeze(GPT_LIVE_CONTENT_MANIFEST);
