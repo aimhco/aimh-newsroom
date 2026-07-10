@@ -18,16 +18,26 @@
     "newsroom:upload": "tsx src/cli/index.ts upload",
     "newsroom:overnight": "tsx src/cli/index.ts overnight",
     "newsroom:resume": "tsx src/cli/index.ts resume",
-    "newsroom:dry-run": "tsx src/cli/index.ts overnight --dry-run --fixtures --date 2026-07-09 --no-upload"
+    "newsroom:dry-run": "tsx src/cli/index.ts overnight --dry-run --fixtures --date 2026-07-09 --no-upload",
+    "gpt-live:prepare": "tsx src/production/gptLive/cli.ts prepare",
+    "gpt-live:finish": "tsx src/production/gptLive/cli.ts finish",
+    "gpt-live:qa": "tsx src/production/gptLive/cli.ts qa"
   },
   "dependencies": {
+    "@remotion/bundler": "4.0.487",
+    "@remotion/renderer": "4.0.487",
     "@resvg/resvg-js": "^2.6.2",
     "@resvg/resvg-js-darwin-x64": "2.6.2",
-    "playwright": "1.61.0"
+    "playwright": "1.61.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "remotion": "4.0.487"
   },
   "devDependencies": {
     "@rollup/rollup-darwin-x64": "4.62.2",
     "@types/node": "^24.0.10",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
