@@ -1,5 +1,9 @@
 import { pathToFileURL } from "node:url";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import {
+  lstat as defaultLstat,
+  realpath as defaultRealpath
+} from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   loadEnvSnapshotFromFiles as defaultLoadEnvSnapshotFromFiles,
   type EnvSnapshot
@@ -15,14 +19,22 @@ const DEFAULT_VIDEO_ENGINE_PATH = "/Users/dennywii/Documents/dev/aimh-video-engi
 type PrepareGptLiveProductionFunction<TResult> = (
   options: Parameters<typeof defaultPrepareGptLiveProduction>[0]
 ) => Promise<TResult>;
+interface PathStat {
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+}
+type Lstat = (path: string) => Promise<PathStat>;
+type Realpath = (path: string) => Promise<string>;
 
 export interface GptLiveCliDependencies<TResult = PrepareGptLiveProductionResult> {
   readonly cwd?: () => string;
+  readonly lstat?: Lstat;
   readonly loadEnvSnapshotFromFiles?: (
     projectRoot: string,
     videoEnginePath: string
   ) => Promise<EnvSnapshot>;
   readonly prepareGptLiveProduction?: PrepareGptLiveProductionFunction<TResult>;
+  readonly realpath?: Realpath;
 }
 
 const parsePrepareArgs = (rawArgs: readonly string[]): { readonly episodeDir?: string } => {
@@ -86,6 +98,63 @@ const resolveEpisodeDirectory = (projectRoot: string, value: string): string => 
   return episodeDir;
 };
 
+const isWithin = (root: string, candidate: string, allowRoot: boolean): boolean => {
+  const childPath = relative(root, candidate);
+  if (!childPath) return allowRoot;
+  return childPath !== ".." && !childPath.startsWith(`..${sep}`) && !isAbsolute(childPath);
+};
+
+const validateRealEpisodeDirectory = async (
+  projectRoot: string,
+  episodeDir: string,
+  lstat: Lstat,
+  realpath: Realpath
+): Promise<void> => {
+  const episodesRoot = resolve(projectRoot, "episodes");
+  const realProjectRoot = await realpath(projectRoot);
+  const episodesRootStat = await lstat(episodesRoot);
+  if (episodesRootStat.isSymbolicLink()) {
+    throw new Error(`Episode directory path contains a symlink: ${episodesRoot}`);
+  }
+  if (!episodesRootStat.isDirectory()) {
+    throw new Error(`Episodes root is not a directory: ${episodesRoot}`);
+  }
+
+  const realEpisodesRoot = await realpath(episodesRoot);
+  if (!isWithin(realProjectRoot, realEpisodesRoot, false)) {
+    throw new Error(`Real episodes root escapes the project: ${realEpisodesRoot}`);
+  }
+
+  const childPath = relative(episodesRoot, episodeDir);
+  let currentPath = episodesRoot;
+  let nearestExistingRealPath = realEpisodesRoot;
+  for (const component of childPath.split(sep)) {
+    currentPath = join(currentPath, component);
+    let componentStat: PathStat;
+    try {
+      componentStat = await lstat(currentPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
+      throw error;
+    }
+
+    if (componentStat.isSymbolicLink()) {
+      throw new Error(`Episode directory path contains a symlink: ${currentPath}`);
+    }
+    if (!componentStat.isDirectory()) {
+      throw new Error(`Episode directory path component is not a directory: ${currentPath}`);
+    }
+    nearestExistingRealPath = await realpath(currentPath);
+    if (!isWithin(realEpisodesRoot, nearestExistingRealPath, false)) {
+      throw new Error(`Episode directory real path escapes episodes root: ${currentPath}`);
+    }
+  }
+
+  if (!isWithin(realEpisodesRoot, nearestExistingRealPath, true)) {
+    throw new Error(`Episode directory ancestor escapes episodes root: ${episodeDir}`);
+  }
+};
+
 export async function runGptLiveCli<TResult = PrepareGptLiveProductionResult>(
   rawArgs: readonly string[],
   dependencies: GptLiveCliDependencies<TResult> = {}
@@ -108,6 +177,10 @@ export async function runGptLiveCli<TResult = PrepareGptLiveProductionResult>(
   const env = await loadCliEnv(projectRoot, dependencies.loadEnvSnapshotFromFiles);
   const prepareGptLiveProduction = dependencies.prepareGptLiveProduction ??
     (defaultPrepareGptLiveProduction as PrepareGptLiveProductionFunction<TResult>);
+  const lstat = dependencies.lstat ?? defaultLstat;
+  const realpath = dependencies.realpath ?? defaultRealpath;
+
+  await validateRealEpisodeDirectory(projectRoot, episodeDir, lstat, realpath);
 
   return prepareGptLiveProduction({
     episodeDir,

@@ -1,4 +1,12 @@
-import { mkdir, mkdtemp, readFile, rm, stat as fsStat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat as fsStat,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -714,6 +722,16 @@ describe("GPT-Live production preparation", () => {
 });
 
 describe("GPT-Live preparation CLI", () => {
+  const virtualCliFileSystem = {
+    lstat: async (path: string) => {
+      if (path === "/project/episodes") {
+        return { isDirectory: () => true, isSymbolicLink: () => false };
+      }
+      throw Object.assign(new Error("not found"), { code: "ENOENT" });
+    },
+    realpath: async (path: string) => path
+  };
+
   it("accepts pnpm's extra separator and resolves preparation paths from cwd", async () => {
     const loadEnvSnapshotFromFiles = vi.fn(async () => ({
       values: {
@@ -728,7 +746,8 @@ describe("GPT-Live preparation CLI", () => {
     await runGptLiveCli(["prepare", "--", "--episode-dir", "episodes/custom"], {
       cwd: () => "/project",
       loadEnvSnapshotFromFiles,
-      prepareGptLiveProduction
+      prepareGptLiveProduction,
+      ...virtualCliFileSystem
     });
 
     expect(loadEnvSnapshotFromFiles).toHaveBeenCalledWith(
@@ -749,7 +768,8 @@ describe("GPT-Live preparation CLI", () => {
     await runGptLiveCli(["prepare"], {
       cwd: () => "/project",
       loadEnvSnapshotFromFiles: async () => ({ values: {}, status: {} }),
-      prepareGptLiveProduction
+      prepareGptLiveProduction,
+      ...virtualCliFileSystem
     });
 
     expect(prepareGptLiveProduction).toHaveBeenCalledWith(
@@ -813,6 +833,28 @@ describe("GPT-Live preparation CLI", () => {
     ).rejects.toThrow("Episode directory must be a child of /project/episodes");
     expect(loadEnvSnapshotFromFiles).not.toHaveBeenCalled();
     expect(prepareGptLiveProduction).not.toHaveBeenCalled();
+  });
+
+  it("rejects an existing symlink component that escapes the episodes root", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "gpt-live-cli-project-"));
+    const outsideRoot = await mkdtemp(join(tmpdir(), "gpt-live-cli-outside-"));
+    const prepareGptLiveProduction = vi.fn(async () => ({ ok: true }));
+    await mkdir(join(projectRoot, "episodes"), { recursive: true });
+    await symlink(outsideRoot, join(projectRoot, "episodes", "linked"), "dir");
+
+    try {
+      await expect(
+        runGptLiveCli(["prepare", "--episode-dir", "episodes/linked/run"], {
+          cwd: () => projectRoot,
+          loadEnvSnapshotFromFiles: async () => ({ values: {}, status: {} }),
+          prepareGptLiveProduction
+        })
+      ).rejects.toThrow(/symlink/i);
+      expect(prepareGptLiveProduction).not.toHaveBeenCalled();
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
   });
 });
 
