@@ -137,7 +137,7 @@ const EXPECTED_NARRATION = [
   {
     id: "narration_evidence",
     kind: "narration",
-    text: "This is already moving beyond staged demos. Tom's Guide played rapid Spanish World Cup commentary and reported that GPT-Live delivered a continuous English interpretation over the broadcast. OpenAI's own tests also show a large jump in expert science reasoning, although those remain vendor-reported results.",
+    text: "Tom's Guide played rapid Spanish World Cup commentary and reported that GPT-Live delivered a continuous English interpretation over the broadcast. OpenAI's own tests also show a large jump in expert science reasoning, although those remain vendor-reported results.",
     claimIds: ["claim_world_cup", "claim_benchmark"],
     scene: "evidence"
   },
