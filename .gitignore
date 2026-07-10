@@ -9,3 +9,4 @@ reports/**
 !reports/*.md
 *.log
 .DS_Store
+.worktrees/
