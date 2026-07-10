@@ -20,6 +20,8 @@ export const DEFAULT_ENV_KEYS = [
   "AIMH_TIMEZONE",
   "AIMH_BRAND_NAME",
   "AIMH_VIDEO_ENGINE_PATH",
+  "AIMH_LOGO_PATH",
+  "AIMH_BODY_MUSIC_PATH",
   "OPENAI_API_KEY",
   "ANTHROPIC_API_KEY",
   "GOOGLE_API_KEY",
@@ -107,6 +109,8 @@ export function loadEnvSnapshot(options: LoadEnvSnapshotOptions = {}): EnvSnapsh
   values.AIMH_TIMEZONE ??= "America/New_York";
   values.AIMH_BRAND_NAME ??= "AIMH";
   values.AIMH_VIDEO_ENGINE_PATH ??= "/Users/dennywii/Documents/dev/aimh-video-engine";
+  values.AIMH_LOGO_PATH ??= `${values.AIMH_VIDEO_ENGINE_PATH}/assets/logo.png`;
+  values.AIMH_BODY_MUSIC_PATH ??= `${values.AIMH_VIDEO_ENGINE_PATH}/assets/music/Body_Komorebi_Futuremono.mp3`;
   values.YOUTUBE_DEFAULT_PRIVACY_STATUS ??= "private";
   values.YOUTUBE_UPLOAD_ENABLED ??= "false";
   values.PLAYWRIGHT_MCP_URL ??= "http://localhost:8931/mcp";

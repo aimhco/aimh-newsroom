@@ -1,5 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, readFile, rm, stat as fsStat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_ENV_KEYS, loadEnvSnapshot } from "../src/config/env";
 import * as contentModule from "../src/production/gptLive/content";
+import { runGptLiveCli } from "../src/production/gptLive/cli";
+import {
+  buildNarrationSlateArgs,
+  prepareGptLiveProduction
+} from "../src/production/gptLive/prepare";
+import { buildTellaPlan } from "../src/production/gptLive/tellaPlan";
 import type { GptLiveProduction, SourceClipSpec } from "../src/production/gptLive/types";
 
 const { GPT_LIVE_CONTENT, GPT_LIVE_TIMELINE, validateProductionManifest } = contentModule;
@@ -160,6 +170,367 @@ const EXPECTED_SOURCE_CLIPS = [
 ] as const;
 
 const cloneProduction = (): GptLiveProduction => structuredClone(GPT_LIVE_CONTENT);
+
+const EPISODE_DIR = "/tmp/gpt-live-episode";
+const narrationAssets = GPT_LIVE_CONTENT.narration.map((item, index) => ({
+  id: item.id,
+  audioPath: join(EPISODE_DIR, "voice", `${item.id}.mp3`),
+  durationSeconds: 10 + index / 10
+}));
+
+describe("GPT-Live Tella plan", () => {
+  it("preserves the exact nine-item timeline order and kinds", () => {
+    const plan = buildTellaPlan({ episodeDir: EPISODE_DIR, narrationAssets });
+
+    expect(plan.clips.map(({ id }) => id)).toEqual(GPT_LIVE_CONTENT.timeline.map(({ id }) => id));
+    expect(plan.clips.map(({ kind }) => kind)).toEqual(
+      GPT_LIVE_CONTENT.timeline.map(({ kind }) => kind)
+    );
+    expect(plan.clips).toHaveLength(9);
+  });
+
+  it("preserves original audio for source clips", () => {
+    const plan = buildTellaPlan({ episodeDir: EPISODE_DIR, narrationAssets });
+    const sourceClips = plan.clips.filter((clip) => clip.kind === "source_clip");
+
+    expect(sourceClips).toHaveLength(2);
+    expect(sourceClips.every((clip) => clip.preserveOriginalAudio === true)).toBe(true);
+  });
+
+  it("maps each narration to distinct A/B plates with one shared audio file", () => {
+    const plan = buildTellaPlan({ episodeDir: EPISODE_DIR, narrationAssets });
+    const narrationClips = plan.clips.filter((clip) => clip.kind === "narration");
+
+    expect(narrationClips).toHaveLength(7);
+    for (const [index, clip] of narrationClips.entries()) {
+      expect(Object.keys(clip.variants)).toEqual(["dynamic_editorial", "aimh_visual_host"]);
+      expect(clip.variants.dynamic_editorial.platePath).toBe(
+        join(EPISODE_DIR, "plates", "dynamic_editorial", `${clip.id}.mp4`)
+      );
+      expect(clip.variants.aimh_visual_host.platePath).toBe(
+        join(EPISODE_DIR, "plates", "aimh_visual_host", `${clip.id}.mp4`)
+      );
+      expect(clip.variants.dynamic_editorial.platePath).not.toBe(
+        clip.variants.aimh_visual_host.platePath
+      );
+      expect(clip.variants.dynamic_editorial.narrationAudioPath).toBe(
+        clip.variants.aimh_visual_host.narrationAudioPath
+      );
+      expect(clip.variants.dynamic_editorial.narrationAudioPath).toBe(
+        narrationAssets[index]?.audioPath
+      );
+      expect(clip.durationSeconds).toBe(narrationAssets[index]?.durationSeconds);
+    }
+  });
+
+  it("serializes without undefined values, placeholders, or dynamic Tella IDs", () => {
+    const serialized = JSON.stringify(
+      buildTellaPlan({ episodeDir: EPISODE_DIR, narrationAssets })
+    );
+
+    expect(serialized).not.toContain("undefined");
+    expect(serialized).not.toMatch(/placeholder/i);
+    expect(serialized).not.toMatch(/(?:video|clip|source)Id/);
+    expect(JSON.parse(serialized)).toEqual(
+      buildTellaPlan({ episodeDir: EPISODE_DIR, narrationAssets })
+    );
+  });
+});
+
+describe("GPT-Live production environment", () => {
+  it("defaults logo and music paths from the resolved video-engine path", () => {
+    const snapshot = loadEnvSnapshot({
+      shellEnv: { AIMH_VIDEO_ENGINE_PATH: "/opt/aimh-video-engine" }
+    });
+
+    expect(DEFAULT_ENV_KEYS).toContain("AIMH_LOGO_PATH");
+    expect(DEFAULT_ENV_KEYS).toContain("AIMH_BODY_MUSIC_PATH");
+    expect(snapshot.values.AIMH_LOGO_PATH).toBe("/opt/aimh-video-engine/assets/logo.png");
+    expect(snapshot.values.AIMH_BODY_MUSIC_PATH).toBe(
+      "/opt/aimh-video-engine/assets/music/Body_Komorebi_Futuremono.mp3"
+    );
+  });
+
+  it("preserves shell, local, and fallback precedence for explicit asset paths", () => {
+    const snapshot = loadEnvSnapshot({
+      shellEnv: { AIMH_LOGO_PATH: "/shell/logo.png" },
+      localEnvText: "AIMH_LOGO_PATH=/local/logo.png\nAIMH_BODY_MUSIC_PATH=/local/music.mp3\n",
+      fallbackEnvText:
+        "AIMH_LOGO_PATH=/fallback/logo.png\nAIMH_BODY_MUSIC_PATH=/fallback/music.mp3\n"
+    });
+
+    expect(snapshot.values.AIMH_LOGO_PATH).toBe("/shell/logo.png");
+    expect(snapshot.values.AIMH_BODY_MUSIC_PATH).toBe("/local/music.mp3");
+    expect(snapshot.status.AIMH_LOGO_PATH).toEqual({ present: true, source: "shell" });
+    expect(snapshot.status.AIMH_BODY_MUSIC_PATH).toEqual({ present: true, source: "local" });
+  });
+});
+
+describe("GPT-Live production preparation", () => {
+  const durationById = new Map<string, number>(
+    GPT_LIVE_CONTENT.narration.map((item, index) => [item.id, 8.25 + index / 10])
+  );
+
+  const successfulVoiceResult = (voiceDir: string) => ({
+    provider: "elevenlabs" as const,
+    warnings: [],
+    chunks: GPT_LIVE_CONTENT.narration.map((item) => ({
+      id: item.id,
+      text: item.text,
+      file: join(voiceDir, `${item.id}.mp3`),
+      durationSeconds: durationById.get(item.id)!,
+      provider: "elevenlabs" as const,
+      cached: false
+    }))
+  });
+
+  it("builds a black 1080p H.264/AAC slate command around the exact voice duration", () => {
+    expect(
+      buildNarrationSlateArgs({
+        audioPath: "/episode/voice/narration_hook.mp3",
+        durationSeconds: 8.25,
+        outputPath: "/episode/master/narration_hook.mp4"
+      })
+    ).toEqual([
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=black:s=1920x1080:r=30:d=8.250",
+      "-i",
+      "/episode/voice/narration_hook.mp3",
+      "-map",
+      "0:v:0",
+      "-map",
+      "1:a:0",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-r",
+      "30",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "-t",
+      "8.250",
+      "-movflags",
+      "+faststart",
+      "/episode/master/narration_hook.mp4"
+    ]);
+  });
+
+  it("prepares media and persists only deterministic, secret-free production records", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-prepare-"));
+    const extractSourceClip = vi.fn(async () => undefined);
+    const synthesizeNarration = vi.fn(async ({ outDir }: { outDir: string }) =>
+      successfulVoiceResult(outDir)
+    );
+    const runCommand = vi.fn(async (_command: string, _args: string[]) => ({
+      stdout: "",
+      stderr: ""
+    }));
+    const ffprobeDurationSeconds = vi.fn(async (_ffprobePath: string, file: string) => {
+      const id = basename(file, ".mp4");
+      return durationById.get(id)!;
+    });
+
+    try {
+      const result = await prepareGptLiveProduction(
+        {
+          episodeDir,
+          env: {
+            ELEVENLABS_API_KEY: "eleven-secret-do-not-write",
+            ELEVENLABS_VOICE_ID: "voice-secret-do-not-write",
+            AIMH_LOGO_PATH: "/assets/logo.png",
+            AIMH_BODY_MUSIC_PATH: "/assets/music.mp3"
+          },
+          ffmpegPath: "/tools/ffmpeg",
+          ffprobePath: "/tools/ffprobe"
+        },
+        {
+          extractSourceClip,
+          synthesizeNarration: synthesizeNarration as never,
+          runCommand,
+          ffprobeDurationSeconds,
+          stat: async () => ({ size: 100, isFile: () => true })
+        }
+      );
+
+      for (const name of [
+        "source",
+        "voice",
+        "master",
+        "plates",
+        "tella",
+        "exports",
+        "final",
+        "reports"
+      ]) {
+        expect((await fsStat(join(episodeDir, name))).isDirectory()).toBe(true);
+      }
+      expect(extractSourceClip).toHaveBeenCalledTimes(2);
+      expect(extractSourceClip).toHaveBeenNthCalledWith(1, {
+        playerConfigUrl: EXPECTED_SOURCE_CLIPS[0].playerConfigUrl,
+        startSeconds: EXPECTED_SOURCE_CLIPS[0].startSeconds,
+        endSeconds: EXPECTED_SOURCE_CLIPS[0].endSeconds,
+        outputPath: join(episodeDir, "source", "clip_translation.mp4"),
+        ffmpegPath: "/tools/ffmpeg",
+        ffprobePath: "/tools/ffprobe"
+      });
+      expect(synthesizeNarration).toHaveBeenCalledWith(
+        expect.objectContaining({
+          outDir: join(episodeDir, "voice"),
+          ffprobePath: "/tools/ffprobe",
+          allowElevenLabs: true
+        })
+      );
+      expect(runCommand).toHaveBeenCalledTimes(7);
+      expect(runCommand.mock.calls.every(([command]) => command === "/tools/ffmpeg")).toBe(true);
+      expect(ffprobeDurationSeconds).toHaveBeenCalledTimes(7);
+
+      const productionText = await readFile(result.productionPath, "utf8");
+      const voiceText = await readFile(result.voicePath, "utf8");
+      const planText = await readFile(result.planPath, "utf8");
+      const matrixText = await readFile(result.sourceMatrixPath, "utf8");
+      const persistedText = [productionText, voiceText, planText, matrixText].join("\n");
+
+      expect(JSON.parse(productionText)).toMatchObject({
+        id: GPT_LIVE_CONTENT.id,
+        branding: { logoPath: "/assets/logo.png" },
+        musicPath: "/assets/music.mp3"
+      });
+      expect(JSON.parse(voiceText)).toEqual(successfulVoiceResult(join(episodeDir, "voice")));
+      expect(JSON.parse(planText)).toEqual(result.plan);
+      expect(result.plan.clips.map(({ id }) => id)).toEqual(
+        GPT_LIVE_CONTENT.timeline.map(({ id }) => id)
+      );
+      for (const source of GPT_LIVE_CONTENT.sources) {
+        expect(matrixText).toContain(source.title);
+        expect(matrixText).toContain(source.url);
+      }
+      expect(persistedText).not.toMatch(/eleven-secret|voice-secret|playlist\.m3u8\?/);
+      expect(result.episodeDir).toBe(episodeDir);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: "top-level fallback provider",
+      mutate: (result: ReturnType<typeof successfulVoiceResult>) => ({
+        ...result,
+        provider: "silent_placeholder" as const
+      }),
+      expected: "ElevenLabs narration required"
+    },
+    {
+      name: "synthesis warnings",
+      mutate: (result: ReturnType<typeof successfulVoiceResult>) => ({
+        ...result,
+        warnings: ["fallback was attempted"]
+      }),
+      expected: "Narration synthesis returned warnings"
+    },
+    {
+      name: "invalid chunk file",
+      mutate: (result: ReturnType<typeof successfulVoiceResult>) => ({
+        ...result,
+        chunks: [{ ...result.chunks[0]!, file: "" }, ...result.chunks.slice(1)]
+      }),
+      expected: "Invalid ElevenLabs narration chunk"
+    }
+  ])("rejects $name instead of silently falling back", async ({ mutate, expected }) => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-reject-"));
+
+    try {
+      const preparation = prepareGptLiveProduction(
+        {
+          episodeDir,
+          env: {},
+          ffmpegPath: "ffmpeg",
+          ffprobePath: "ffprobe"
+        },
+        {
+          extractSourceClip: async () => undefined,
+          synthesizeNarration: (async ({ outDir }: { outDir: string }) =>
+            mutate(successfulVoiceResult(outDir))) as never,
+          runCommand: async () => ({ stdout: "", stderr: "" }),
+          ffprobeDurationSeconds: async () => 1,
+          stat: async () => ({ size: 100, isFile: () => true })
+        }
+      );
+
+      await expect(preparation).rejects.toThrow(expected);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("GPT-Live preparation CLI", () => {
+  it("accepts pnpm's extra separator and resolves preparation paths from cwd", async () => {
+    const loadEnvSnapshotFromFiles = vi.fn(async () => ({
+      values: {
+        AIMH_VIDEO_ENGINE_PATH: "/video-engine",
+        FFMPEG_PATH: "/tools/ffmpeg",
+        FFPROBE_PATH: "/tools/ffprobe"
+      },
+      status: {}
+    }));
+    const prepareGptLiveProduction = vi.fn(async () => ({ ok: true }));
+
+    await runGptLiveCli(["prepare", "--", "--episode-dir", "episodes/custom"], {
+      cwd: () => "/project",
+      loadEnvSnapshotFromFiles,
+      prepareGptLiveProduction: prepareGptLiveProduction as never
+    });
+
+    expect(loadEnvSnapshotFromFiles).toHaveBeenCalledWith(
+      "/project",
+      "/Users/dennywii/Documents/dev/aimh-video-engine"
+    );
+    expect(prepareGptLiveProduction).toHaveBeenCalledWith({
+      episodeDir: resolve("/project", "episodes/custom"),
+      env: expect.objectContaining({ AIMH_VIDEO_ENGINE_PATH: "/video-engine" }),
+      ffmpegPath: "/tools/ffmpeg",
+      ffprobePath: "/tools/ffprobe"
+    });
+  });
+
+  it("uses the manifest ID for the default episode directory", async () => {
+    const prepareGptLiveProduction = vi.fn(async () => ({ ok: true }));
+
+    await runGptLiveCli(["prepare"], {
+      cwd: () => "/project",
+      loadEnvSnapshotFromFiles: async () => ({ values: {}, status: {} }),
+      prepareGptLiveProduction: prepareGptLiveProduction as never
+    });
+
+    expect(prepareGptLiveProduction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        episodeDir: "/project/episodes/2026-07-10-gpt-live-tella-ab",
+        ffmpegPath: "ffmpeg",
+        ffprobePath: "ffprobe"
+      })
+    );
+  });
+
+  it.each([
+    { args: ["prepare", "--episode-dir"], error: "Missing value for --episode-dir" },
+    { args: ["finish"], error: "Command not yet implemented: finish" },
+    { args: ["qa"], error: "Command not yet implemented: qa" },
+    { args: ["unexpected"], error: "Unknown command: unexpected" }
+  ])("rejects invalid command input: $args", async ({ args, error }) => {
+    await expect(runGptLiveCli(args)).rejects.toThrow(error);
+  });
+});
 
 describe("GPT-Live controlled production content", () => {
   it("pins every approved production field", () => {
