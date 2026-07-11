@@ -1,13 +1,16 @@
-import { randomUUID as defaultRandomUUID } from "node:crypto";
+import { createHash, randomUUID as defaultRandomUUID } from "node:crypto";
 import {
   access as defaultAccess,
   constants,
+  copyFile as defaultCopyFile,
+  lstat as defaultLstat,
   mkdir as defaultMkdir,
   readFile as defaultReadFile,
+  realpath as defaultRealpath,
   rename as defaultRename,
   rm as defaultRm
 } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { runCommand as defaultRunCommand } from "../../render/process";
 import { writeJsonAtomic as defaultWriteJsonAtomic } from "./atomicFiles";
 
@@ -17,6 +20,13 @@ const DIALOGUE_VOLUME = 1;
 const DURATION_TOLERANCE_SECONDS = 0.25;
 const VARIANT_DURATION_TOLERANCE_SECONDS = 0.5;
 const FRAME_RATE_TOLERANCE = 0.001;
+const AUDIO_DURATION_TOLERANCE_SECONDS = 0.05;
+const AUDIO_BITRATE_TARGET = 192_000;
+const AUDIO_BITRATE_TOLERANCE = 32_000;
+const SOURCE_TARGET_LUFS = -23;
+const SOURCE_GAIN_CLAMP_DB = 12;
+const SOURCE_LOUDNESS_TOLERANCE_LU = 2;
+const GAIN_RAMP_SECONDS = 0.1;
 
 export interface FinishPlanClip {
   readonly id: string;
@@ -35,6 +45,28 @@ export interface DuckInterval {
   readonly endSeconds: number;
 }
 
+export interface SourceIntervalGain extends DuckInterval {
+  readonly measuredLufsA: number;
+  readonly measuredLufsB: number;
+  readonly averageMeasuredLufs: number;
+  readonly targetLufs: number;
+  readonly gainDb: number;
+}
+
+export interface SourceIntervalResult extends SourceIntervalGain {
+  readonly outputLufsA: number;
+  readonly outputLufsB: number;
+}
+
+export interface LogoEvidence {
+  readonly name: "version-a" | "version-b";
+  readonly samples: readonly {
+    readonly timeSeconds: number;
+    readonly inputSha256: string;
+    readonly outputSha256: string;
+  }[];
+}
+
 export interface FinalMediaInspection {
   readonly durationSeconds: number;
   readonly video: {
@@ -42,11 +74,18 @@ export interface FinalMediaInspection {
     readonly width: number;
     readonly height: number;
     readonly framesPerSecond: number;
+    readonly durationSeconds: number;
+    readonly pixelFormat: string;
+    readonly colorSpace: string;
+    readonly colorTransfer: string;
+    readonly colorPrimaries: string;
   };
   readonly audio: {
     readonly codecName: string;
     readonly sampleRate: number;
     readonly channels: number;
+    readonly durationSeconds: number;
+    readonly bitRate: number;
   };
 }
 
@@ -57,6 +96,7 @@ export interface BuildFinishFfmpegArgsOptions {
   readonly outputPath: string;
   readonly durationSeconds: number;
   readonly duckIntervals: readonly DuckInterval[];
+  readonly sourceGains: readonly SourceIntervalGain[];
 }
 
 export interface PostProductionVariant {
@@ -71,7 +111,10 @@ export interface BuildPostProductionManifestOptions {
   readonly productionId: string;
   readonly logoPath: string;
   readonly musicPath: string;
+  readonly logoSha256: string;
   readonly duckIntervals: readonly DuckInterval[];
+  readonly sourceGains: readonly SourceIntervalResult[];
+  readonly logoEvidence: readonly LogoEvidence[];
   readonly variants: readonly PostProductionVariant[];
 }
 
@@ -94,16 +137,39 @@ type InspectFinalMediaFile = (
   ffprobePath: string,
   file: string
 ) => Promise<FinalMediaInspection>;
+type MeasureIntervalLoudness = (
+  ffmpegPath: string,
+  file: string,
+  interval: DuckInterval
+) => Promise<number>;
+type SampleLogoCornerFrameHash = (
+  ffmpegPath: string,
+  file: string,
+  timeSeconds: number
+) => Promise<string>;
+type ReadBytes = (path: string) => Promise<Uint8Array>;
+interface PathStat {
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+}
+type Lstat = (path: string) => Promise<PathStat>;
+type Realpath = (path: string) => Promise<string>;
 
 export interface FinishGptLiveDependencies {
   readonly access?: typeof defaultAccess;
+  readonly copyFile?: typeof defaultCopyFile;
   readonly inspectFinalMediaFile?: InspectFinalMediaFile;
+  readonly lstat?: Lstat;
+  readonly measureIntervalLoudness?: MeasureIntervalLoudness;
   readonly mkdir?: typeof defaultMkdir;
   readonly randomUUID?: typeof defaultRandomUUID;
   readonly readFile?: ReadText;
+  readonly readFileBytes?: ReadBytes;
+  readonly realpath?: Realpath;
   readonly rename?: typeof defaultRename;
   readonly rm?: typeof defaultRm;
   readonly runCommand?: typeof defaultRunCommand;
+  readonly sampleLogoCornerFrameHash?: SampleLogoCornerFrameHash;
   readonly writeJsonAtomic?: typeof defaultWriteJsonAtomic;
 }
 
@@ -115,6 +181,12 @@ interface ProbeStream {
   readonly r_frame_rate?: unknown;
   readonly sample_rate?: unknown;
   readonly channels?: unknown;
+  readonly duration?: unknown;
+  readonly bit_rate?: unknown;
+  readonly pix_fmt?: unknown;
+  readonly color_space?: unknown;
+  readonly color_transfer?: unknown;
+  readonly color_primaries?: unknown;
 }
 
 const fixedSeconds = (seconds: number): string => seconds.toFixed(3);
@@ -130,6 +202,55 @@ const requirePositiveDuration = (durationSeconds: number, label: string): void =
 const requireConfiguredValue = (value: string | undefined, label: string): string => {
   if (!value?.trim()) throw new Error(`Missing ${label}`);
   return value;
+};
+
+const isWithin = (root: string, candidate: string, allowRoot = false): boolean => {
+  const childPath = relative(root, candidate);
+  if (!childPath) return allowRoot;
+  return childPath !== ".." && !childPath.startsWith(`..${sep}`) && !isAbsolute(childPath);
+};
+
+const validateContainedPaths = async (
+  episodeDir: string,
+  candidates: readonly string[],
+  lstat: Lstat,
+  realpath: Realpath
+): Promise<void> => {
+  const resolvedEpisodeDir = resolve(episodeDir);
+  const episodeStat = await lstat(resolvedEpisodeDir);
+  if (episodeStat.isSymbolicLink()) {
+    throw new Error(`GPT-Live finish path contains a symlink: ${resolvedEpisodeDir}`);
+  }
+  if (!episodeStat.isDirectory()) {
+    throw new Error(`GPT-Live episode path is not a directory: ${resolvedEpisodeDir}`);
+  }
+  const realEpisodeDir = await realpath(resolvedEpisodeDir);
+
+  for (const candidate of candidates) {
+    const resolvedCandidate = resolve(candidate);
+    if (!isWithin(resolvedEpisodeDir, resolvedCandidate)) {
+      throw new Error(`GPT-Live finish path escapes episode directory: ${resolvedCandidate}`);
+    }
+    const childPath = relative(resolvedEpisodeDir, resolvedCandidate);
+    let currentPath = resolvedEpisodeDir;
+    for (const component of childPath.split(sep)) {
+      currentPath = join(currentPath, component);
+      let stat: PathStat;
+      try {
+        stat = await lstat(currentPath);
+      } catch (error) {
+        if (isMissingPathError(error)) break;
+        throw error;
+      }
+      if (stat.isSymbolicLink()) {
+        throw new Error(`GPT-Live finish path contains a symlink: ${currentPath}`);
+      }
+      const realCurrentPath = await realpath(currentPath);
+      if (!isWithin(realEpisodeDir, realCurrentPath)) {
+        throw new Error(`GPT-Live finish path escapes episode directory: ${currentPath}`);
+      }
+    }
+  }
 };
 
 export function buildLogoFilter(): string {
@@ -155,24 +276,97 @@ export function deriveSourceDuckIntervals(plan: FinishPlan): DuckInterval[] {
   return intervals;
 }
 
-export function buildMusicVolumeExpression(intervals: readonly DuckInterval[]): string {
-  if (intervals.length === 0) return NORMAL_MUSIC_VOLUME.toFixed(3);
-  const condition = intervals
-    .map(
-      ({ startSeconds, endSeconds }) =>
-        `between(t,${fixedSeconds(startSeconds)},${fixedSeconds(endSeconds)})`
-    )
-    .join("+");
-  return `if(${condition},${DUCKED_MUSIC_VOLUME.toFixed(3)},${NORMAL_MUSIC_VOLUME.toFixed(3)})`;
+const clamp = (value: number, minimum: number, maximum: number): number =>
+  Math.min(maximum, Math.max(minimum, value));
+
+export function deriveSharedSourceGains(
+  intervals: readonly DuckInterval[],
+  measurementsA: readonly number[],
+  measurementsB: readonly number[]
+): SourceIntervalGain[] {
+  if (measurementsA.length !== intervals.length || measurementsB.length !== intervals.length) {
+    throw new Error("Source loudness measurement count mismatch");
+  }
+  return intervals.map((interval, index) => {
+    const measuredLufsA = measurementsA[index]!;
+    const measuredLufsB = measurementsB[index]!;
+    if (!Number.isFinite(measuredLufsA) || !Number.isFinite(measuredLufsB)) {
+      throw new Error("Invalid source loudness measurement");
+    }
+    const averageMeasuredLufs = roundedSeconds((measuredLufsA + measuredLufsB) / 2);
+    return {
+      ...interval,
+      measuredLufsA,
+      measuredLufsB,
+      averageMeasuredLufs,
+      targetLufs: SOURCE_TARGET_LUFS,
+      gainDb: roundedSeconds(
+        clamp(SOURCE_TARGET_LUFS - averageMeasuredLufs, -SOURCE_GAIN_CLAMP_DB, SOURCE_GAIN_CLAMP_DB)
+      )
+    };
+  });
 }
 
-export function buildFinishFilterGraph(intervals: readonly DuckInterval[]): string {
+const musicIntervalExpression = ({ startSeconds, endSeconds }: DuckInterval): string => {
+  const rampStart = Math.max(0, startSeconds - GAIN_RAMP_SECONDS);
+  const rampEnd = endSeconds + GAIN_RAMP_SECONDS;
+  const afterRamp =
+    `if(between(t,${fixedSeconds(endSeconds)},${fixedSeconds(rampEnd)}),` +
+    `${DUCKED_MUSIC_VOLUME.toFixed(3)}+(${NORMAL_MUSIC_VOLUME.toFixed(3)}-${DUCKED_MUSIC_VOLUME.toFixed(3)})*` +
+    `(t-${fixedSeconds(endSeconds)})/${GAIN_RAMP_SECONDS.toFixed(3)},${NORMAL_MUSIC_VOLUME.toFixed(3)})`;
+  const beforeRamp = startSeconds > 0
+    ? `if(between(t,${fixedSeconds(rampStart)},${fixedSeconds(startSeconds)}),` +
+      `${NORMAL_MUSIC_VOLUME.toFixed(3)}+(${DUCKED_MUSIC_VOLUME.toFixed(3)}-${NORMAL_MUSIC_VOLUME.toFixed(3)})*` +
+      `(t-${fixedSeconds(rampStart)})/${GAIN_RAMP_SECONDS.toFixed(3)},${afterRamp})`
+    : afterRamp;
+  return `if(between(t,${fixedSeconds(startSeconds)},${fixedSeconds(endSeconds)}),${DUCKED_MUSIC_VOLUME.toFixed(3)},${beforeRamp})`;
+};
+
+export function buildMusicVolumeExpression(intervals: readonly DuckInterval[]): string {
+  if (intervals.length === 0) return NORMAL_MUSIC_VOLUME.toFixed(3);
+  return intervals
+    .map(musicIntervalExpression)
+    .reduce((combined, expression) => `min(${combined},${expression})`);
+}
+
+export function buildSourceDialogueGainExpression(
+  sourceGains: readonly SourceIntervalGain[]
+): string {
+  if (sourceGains.length === 0) return DIALOGUE_VOLUME.toFixed(6);
+  return sourceGains
+    .map(({ startSeconds, endSeconds, gainDb }) => {
+      const factor = 10 ** (gainDb / 20);
+      const rampSeconds = Math.min(GAIN_RAMP_SECONDS, (endSeconds - startSeconds) / 2);
+      const rampInEnd = startSeconds + rampSeconds;
+      const rampOutStart = endSeconds - rampSeconds;
+      const factorText = factor.toFixed(6);
+      const unity = DIALOGUE_VOLUME.toFixed(6);
+      return `if(between(t,${fixedSeconds(startSeconds)},${fixedSeconds(endSeconds)}),` +
+        `if(lt(t,${fixedSeconds(rampInEnd)}),${unity}+(${factorText}-${unity})*` +
+        `(t-${fixedSeconds(startSeconds)})/${fixedSeconds(rampSeconds)},` +
+        `if(gt(t,${fixedSeconds(rampOutStart)}),${unity}+(${factorText}-${unity})*` +
+        `(${fixedSeconds(endSeconds)}-t)/${fixedSeconds(rampSeconds)},${factorText})),${unity})`;
+    })
+    .join("*");
+}
+
+export function buildFinishFilterGraph(
+  durationSeconds: number,
+  intervals: readonly DuckInterval[],
+  sourceGains: readonly SourceIntervalGain[]
+): string {
   const volumeExpression = buildMusicVolumeExpression(intervals);
+  const dialogueGainExpression = buildSourceDialogueGainExpression(sourceGains);
+  const duration = fixedSeconds(durationSeconds);
   return [
     `${buildLogoFilter()}[vout]`,
-    `[0:a]volume=${DIALOGUE_VOLUME.toFixed(1)}[dialogue]`,
-    `[2:a]volume='${volumeExpression}':eval=frame[music]`,
-    "[dialogue][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]"
+    `[0:a]apad=whole_dur=${duration},atrim=duration=${duration},asetpts=PTS-STARTPTS,` +
+      `volume='${dialogueGainExpression}':eval=frame[dialogue]`,
+    `[2:a]volume='${volumeExpression}':eval=frame,atrim=duration=${duration},` +
+      "asetpts=PTS-STARTPTS[music]",
+    `[dialogue][music]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,` +
+      `alimiter=limit=0.95:attack=5:release=50:level=false:latency=true,` +
+      `atrim=duration=${duration},asetpts=PTS-STARTPTS[aout]`
   ].join(";");
 }
 
@@ -189,7 +383,7 @@ export function buildFinishFfmpegArgs(options: BuildFinishFfmpegArgsOptions): st
     "-i",
     options.musicPath,
     "-filter_complex",
-    buildFinishFilterGraph(options.duckIntervals),
+    buildFinishFilterGraph(options.durationSeconds, options.duckIntervals, options.sourceGains),
     "-map",
     "[vout]",
     "-map",
@@ -204,6 +398,12 @@ export function buildFinishFfmpegArgs(options: BuildFinishFfmpegArgsOptions): st
     "yuv420p",
     "-r",
     "30",
+    "-colorspace",
+    "bt709",
+    "-color_primaries",
+    "bt709",
+    "-color_trc",
+    "bt709",
     "-c:a",
     "aac",
     "-b:a",
@@ -228,11 +428,85 @@ const frameRate = (value: unknown): number => {
   return denominator === 0 ? Number.NaN : numerator / denominator;
 };
 
+export const buildLoudnessMeasurementArgs = (
+  file: string,
+  interval: DuckInterval
+): string[] => [
+  "-hide_banner",
+  "-nostats",
+  "-ss",
+  fixedSeconds(interval.startSeconds),
+  "-t",
+  fixedSeconds(interval.endSeconds - interval.startSeconds),
+  "-i",
+  file,
+  "-map",
+  "0:a:0",
+  "-af",
+  "ebur128=peak=true",
+  "-f",
+  "null",
+  "-"
+];
+
+export function parseEbur128IntegratedLufs(text: string): number {
+  const values = [...text.matchAll(/I:\s*(-?\d+(?:\.\d+)?)\s+LUFS/g)].map((match) =>
+    Number(match[1])
+  );
+  const value = values.at(-1);
+  if (!Number.isFinite(value)) throw new Error("Could not measure integrated source loudness");
+  return value!;
+}
+
+export async function measureIntervalLoudness(
+  ffmpegPath: string,
+  file: string,
+  interval: DuckInterval,
+  runCommand: typeof defaultRunCommand = defaultRunCommand
+): Promise<number> {
+  const result = await runCommand(ffmpegPath, buildLoudnessMeasurementArgs(file, interval));
+  return parseEbur128IntegratedLufs(`${result.stdout}\n${result.stderr}`);
+}
+
+export const buildLogoCornerSampleArgs = (file: string, timeSeconds: number): string[] => [
+  "-v",
+  "error",
+  "-ss",
+  fixedSeconds(timeSeconds),
+  "-i",
+  file,
+  "-frames:v",
+  "1",
+  "-vf",
+  "crop=198:198:iw-198:0",
+  "-f",
+  "hash",
+  "-hash",
+  "sha256",
+  "-"
+];
+
+const parseSha256Output = (text: string): string => {
+  const match = text.match(/SHA256=([a-f0-9]{64})/i);
+  if (!match) throw new Error("Could not sample logo corner frame hash");
+  return match[1]!.toLowerCase();
+};
+
+export async function sampleLogoCornerFrameHash(
+  ffmpegPath: string,
+  file: string,
+  timeSeconds: number,
+  runCommand: typeof defaultRunCommand = defaultRunCommand
+): Promise<string> {
+  const result = await runCommand(ffmpegPath, buildLogoCornerSampleArgs(file, timeSeconds));
+  return parseSha256Output(`${result.stdout}\n${result.stderr}`);
+}
+
 export const buildFinalFfprobeArgs = (file: string): string[] => [
   "-v",
   "error",
   "-show_entries",
-  "stream=codec_type,codec_name,width,height,r_frame_rate,sample_rate,channels:format=duration",
+  "stream=codec_type,codec_name,width,height,r_frame_rate,sample_rate,channels,duration,bit_rate,pix_fmt,color_space,color_transfer,color_primaries:format=duration",
   "-of",
   "json",
   file
@@ -256,12 +530,19 @@ export function parseFinalFfprobeJson(text: string): FinalMediaInspection {
       codecName: typeof video?.codec_name === "string" ? video.codec_name : "",
       width: Number(video?.width),
       height: Number(video?.height),
-      framesPerSecond: frameRate(video?.r_frame_rate)
+      framesPerSecond: frameRate(video?.r_frame_rate),
+      durationSeconds: Number(video?.duration),
+      pixelFormat: typeof video?.pix_fmt === "string" ? video.pix_fmt : "",
+      colorSpace: typeof video?.color_space === "string" ? video.color_space : "",
+      colorTransfer: typeof video?.color_transfer === "string" ? video.color_transfer : "",
+      colorPrimaries: typeof video?.color_primaries === "string" ? video.color_primaries : ""
     },
     audio: {
       codecName: typeof audio?.codec_name === "string" ? audio.codec_name : "",
       sampleRate: Number(audio?.sample_rate),
-      channels: Number(audio?.channels)
+      channels: Number(audio?.channels),
+      durationSeconds: Number(audio?.duration),
+      bitRate: Number(audio?.bit_rate)
     }
   };
 
@@ -272,8 +553,11 @@ export function parseFinalFfprobeJson(text: string): FinalMediaInspection {
     !Number.isFinite(inspection.video.width) ||
     !Number.isFinite(inspection.video.height) ||
     !Number.isFinite(inspection.video.framesPerSecond) ||
+    !Number.isFinite(inspection.video.durationSeconds) ||
     !Number.isFinite(inspection.audio.sampleRate) ||
-    !Number.isFinite(inspection.audio.channels)
+    !Number.isFinite(inspection.audio.channels) ||
+    !Number.isFinite(inspection.audio.durationSeconds) ||
+    !Number.isFinite(inspection.audio.bitRate)
   ) {
     throw new Error("Invalid final ffprobe values");
   }
@@ -300,9 +584,20 @@ export function assertFinalMediaContract(
   if (Math.abs(inspection.video.framesPerSecond - 30) > FRAME_RATE_TOLERANCE) {
     throw new Error("Final must be 30fps");
   }
+  if (inspection.video.pixelFormat !== "yuv420p") throw new Error("Final must use yuv420p");
+  if (
+    inspection.video.colorSpace !== "bt709" ||
+    inspection.video.colorTransfer !== "bt709" ||
+    inspection.video.colorPrimaries !== "bt709"
+  ) {
+    throw new Error("Final must use BT.709 color tags");
+  }
   if (inspection.audio.codecName !== "aac") throw new Error("Final must use AAC audio");
   if (inspection.audio.sampleRate !== 48_000) throw new Error("Final audio must be 48kHz");
   if (inspection.audio.channels !== 2) throw new Error("Final audio must be stereo");
+  if (Math.abs(inspection.audio.bitRate - AUDIO_BITRATE_TARGET) > AUDIO_BITRATE_TOLERANCE) {
+    throw new Error("Final audio bitrate is outside AAC 192k tolerance");
+  }
   if (
     !Number.isFinite(inspection.durationSeconds) ||
     Math.abs(inspection.durationSeconds - inputDurationSeconds) > DURATION_TOLERANCE_SECONDS
@@ -310,6 +605,14 @@ export function assertFinalMediaContract(
     throw new Error(
       `Final duration mismatch: input ${inputDurationSeconds.toFixed(3)}s, output ${inspection.durationSeconds.toFixed(3)}s`
     );
+  }
+  if (
+    Math.abs(inspection.audio.durationSeconds - inspection.durationSeconds) >
+      AUDIO_DURATION_TOLERANCE_SECONDS ||
+    Math.abs(inspection.video.durationSeconds - inspection.durationSeconds) >
+      AUDIO_DURATION_TOLERANCE_SECONDS
+  ) {
+    throw new Error("Final audio duration must be within 0.050s of video/container duration");
   }
 }
 
@@ -323,6 +626,31 @@ export function assertVariantDurationParity(
   }
 }
 
+export function assertSourceOutputLoudness(
+  sourceGains: readonly SourceIntervalGain[],
+  outputLufsA: readonly number[],
+  outputLufsB: readonly number[]
+): void {
+  if (outputLufsA.length !== sourceGains.length || outputLufsB.length !== sourceGains.length) {
+    throw new Error("Output source loudness measurement count mismatch");
+  }
+  for (const [index, gain] of sourceGains.entries()) {
+    const a = outputLufsA[index]!;
+    const b = outputLufsB[index]!;
+    if (
+      !Number.isFinite(a) ||
+      !Number.isFinite(b) ||
+      Math.abs(a - gain.targetLufs) > SOURCE_LOUDNESS_TOLERANCE_LU ||
+      Math.abs(b - gain.targetLufs) > SOURCE_LOUDNESS_TOLERANCE_LU
+    ) {
+      throw new Error(`Output source loudness misses ${gain.targetLufs} LUFS target`);
+    }
+    if (Math.abs(a - b) > SOURCE_LOUDNESS_TOLERANCE_LU) {
+      throw new Error("A/B source loudness treatment differs by more than 2 LU");
+    }
+  }
+}
+
 const safeVariantPath = (directory: "exports" | "final", file: string): string =>
   `${directory}/${basename(file)}`;
 
@@ -333,6 +661,7 @@ export function buildPostProductionManifest(options: BuildPostProductionManifest
     productionId: options.productionId,
     assets: {
       logo: basename(options.logoPath),
+      logoSha256: options.logoSha256,
       music: basename(options.musicPath)
     },
     duckIntervals: options.duckIntervals.map(({ startSeconds, endSeconds }) => ({
@@ -345,7 +674,9 @@ export function buildPostProductionManifest(options: BuildPostProductionManifest
       normalMusicVolume: NORMAL_MUSIC_VOLUME,
       duckedMusicVolume: DUCKED_MUSIC_VOLUME,
       musicLoop: true,
-      audioMixDuration: "first" as const,
+      audioMixDuration: "longest" as const,
+      exactAudioDuration: true,
+      limiter: "limit=0.95:attack=5:release=50:level=false:latency=true" as const,
       videoCodec: "libx264" as const,
       crf: 18,
       preset: "medium" as const,
@@ -359,6 +690,17 @@ export function buildPostProductionManifest(options: BuildPostProductionManifest
       durationToleranceSeconds: DURATION_TOLERANCE_SECONDS,
       variantDurationToleranceSeconds: VARIANT_DURATION_TOLERANCE_SECONDS
     },
+    sourceDialogue: {
+      targetLufs: SOURCE_TARGET_LUFS,
+      gainClampDb: SOURCE_GAIN_CLAMP_DB,
+      rampSeconds: GAIN_RAMP_SECONDS,
+      toleranceLu: SOURCE_LOUDNESS_TOLERANCE_LU,
+      intervals: options.sourceGains.map((gain) => ({ ...gain }))
+    },
+    logoEvidence: options.logoEvidence.map((evidence) => ({
+      name: evidence.name,
+      samples: evidence.samples.map((sample) => ({ ...sample }))
+    })),
     variants: options.variants.map((variant) => ({
       name: variant.name,
       inputPath: safeVariantPath("exports", variant.inputPath),
@@ -404,7 +746,7 @@ export function parseFinishPlan(text: string): FinishPlan {
 interface Promotion {
   readonly stagedPath: string;
   readonly targetPath: string;
-  readonly backupPath: string;
+  readonly rollbackPath: string;
 }
 
 const isMissingPathError = (error: unknown): boolean =>
@@ -412,17 +754,18 @@ const isMissingPathError = (error: unknown): boolean =>
 
 const promoteFilesAtomically = async (
   promotions: readonly Promotion[],
+  copyFile: typeof defaultCopyFile,
   rename: typeof defaultRename,
   rm: typeof defaultRm
 ): Promise<void> => {
-  const backedUp: Promotion[] = [];
+  const rollbackCopies = new Set<Promotion>();
   const promoted: Promotion[] = [];
   try {
     for (const promotion of promotions) {
-      await rm(promotion.backupPath, { force: true });
+      await rm(promotion.rollbackPath, { force: true });
       try {
-        await rename(promotion.targetPath, promotion.backupPath);
-        backedUp.push(promotion);
+        await copyFile(promotion.targetPath, promotion.rollbackPath);
+        rollbackCopies.add(promotion);
       } catch (error) {
         if (!isMissingPathError(error)) throw error;
       }
@@ -432,17 +775,28 @@ const promoteFilesAtomically = async (
       promoted.push(promotion);
     }
   } catch (error) {
+    let rollbackError: unknown;
     for (const promotion of promoted.reverse()) {
-      await rm(promotion.targetPath, { force: true });
+      try {
+        if (rollbackCopies.has(promotion)) {
+          await rename(promotion.rollbackPath, promotion.targetPath);
+          rollbackCopies.delete(promotion);
+        } else {
+          await rm(promotion.targetPath, { force: true });
+        }
+      } catch (restoreError) {
+        rollbackError ??= restoreError;
+      }
     }
-    for (const promotion of backedUp.reverse()) {
-      await rename(promotion.backupPath, promotion.targetPath);
+    for (const promotion of rollbackCopies) {
+      await rm(promotion.rollbackPath, { force: true });
     }
+    if (rollbackError) throw rollbackError;
     throw error;
   }
 
-  for (const promotion of backedUp) {
-    await rm(promotion.backupPath, { force: true });
+  for (const promotion of rollbackCopies) {
+    await rm(promotion.rollbackPath, { force: true });
   }
 };
 
@@ -451,12 +805,23 @@ export async function finishGptLiveProduction(
   dependencies: FinishGptLiveDependencies = {}
 ): Promise<FinishGptLiveProductionResult> {
   const access = dependencies.access ?? defaultAccess;
+  const copyFile = dependencies.copyFile ?? defaultCopyFile;
+  const lstat = dependencies.lstat ?? defaultLstat;
   const mkdir = dependencies.mkdir ?? defaultMkdir;
   const randomUUID = dependencies.randomUUID ?? defaultRandomUUID;
   const readFile = dependencies.readFile ?? (defaultReadFile as ReadText);
+  const readFileBytes = dependencies.readFileBytes ??
+    ((path: string) => defaultReadFile(path) as Promise<Uint8Array>);
+  const realpath = dependencies.realpath ?? defaultRealpath;
   const rename = dependencies.rename ?? defaultRename;
   const rm = dependencies.rm ?? defaultRm;
   const runCommand = dependencies.runCommand ?? defaultRunCommand;
+  const measure = dependencies.measureIntervalLoudness ??
+    ((ffmpeg: string, file: string, interval: DuckInterval) =>
+      measureIntervalLoudness(ffmpeg, file, interval, runCommand));
+  const sampleCornerHash = dependencies.sampleLogoCornerFrameHash ??
+    ((ffmpeg: string, file: string, timeSeconds: number) =>
+      sampleLogoCornerFrameHash(ffmpeg, file, timeSeconds, runCommand));
   const writeJsonAtomic = dependencies.writeJsonAtomic ?? defaultWriteJsonAtomic;
   const inspect = dependencies.inspectFinalMediaFile ??
     ((ffprobePath: string, file: string) => inspectFinalMediaFile(ffprobePath, file));
@@ -480,46 +845,92 @@ export async function finishGptLiveProduction(
   }
 
   const planPath = join(options.episodeDir, "tella", "plan.json");
-  const plan = parseFinishPlan(await readFile(planPath, "utf8"));
-  const duckIntervals = deriveSourceDuckIntervals(plan);
+  const exportsDirectory = join(options.episodeDir, "exports");
   const finalDirectory = join(options.episodeDir, "final");
   const reportsDirectory = join(options.episodeDir, "reports");
+  const inputPaths = [join(exportsDirectory, "tella-a.mp4"), join(exportsDirectory, "tella-b.mp4")];
+  const finalPaths = [join(finalDirectory, "version-a.mp4"), join(finalDirectory, "version-b.mp4")];
+  const reportPath = join(reportsDirectory, "post-production.json");
+  await validateContainedPaths(
+    options.episodeDir,
+    [
+      planPath,
+      exportsDirectory,
+      ...inputPaths,
+      finalDirectory,
+      ...finalPaths,
+      reportsDirectory,
+      reportPath
+    ],
+    lstat,
+    realpath
+  );
+  const plan = parseFinishPlan(await readFile(planPath, "utf8"));
+  const duckIntervals = deriveSourceDuckIntervals(plan);
   await mkdir(finalDirectory, { recursive: true });
   await mkdir(reportsDirectory, { recursive: true });
+  await validateContainedPaths(
+    options.episodeDir,
+    [exportsDirectory, ...inputPaths, finalDirectory, ...finalPaths, reportsDirectory, reportPath],
+    lstat,
+    realpath
+  );
+  const logoSha256 = createHash("sha256").update(await readFileBytes(logoPath)).digest("hex");
 
   const transactionId = randomUUID();
   const definitions = [
     {
       name: "version-a" as const,
-      inputPath: join(options.episodeDir, "exports", "tella-a.mp4"),
-      outputPath: join(finalDirectory, "version-a.mp4")
+      inputPath: inputPaths[0]!,
+      outputPath: finalPaths[0]!
     },
     {
       name: "version-b" as const,
-      inputPath: join(options.episodeDir, "exports", "tella-b.mp4"),
-      outputPath: join(finalDirectory, "version-b.mp4")
+      inputPath: inputPaths[1]!,
+      outputPath: finalPaths[1]!
     }
   ];
   const stagedPaths = definitions.map((definition) =>
     join(finalDirectory, `${definition.name}.tmp-${transactionId}.mp4`)
   );
-  const reportPath = join(reportsDirectory, "post-production.json");
   const stagedReportPath = join(reportsDirectory, `post-production.tmp-${transactionId}.json`);
   const temporaryPaths = [...stagedPaths, stagedReportPath];
-  const backupPaths = [
-    ...definitions.map((definition) => `${definition.outputPath}.backup-${transactionId}`),
-    `${reportPath}.backup-${transactionId}`
+  const rollbackPaths = [
+    ...definitions.map((definition) => `${definition.outputPath}.rollback-${transactionId}`),
+    `${reportPath}.rollback-${transactionId}`
   ];
 
   try {
+    await validateContainedPaths(
+      options.episodeDir,
+      [exportsDirectory, ...inputPaths, finalDirectory, ...finalPaths, reportsDirectory, reportPath],
+      lstat,
+      realpath
+    );
     const inputInspections = await Promise.all(
       definitions.map((definition) => inspect(ffprobePath, definition.inputPath))
     );
     for (const inspection of inputInspections) {
       requirePositiveDuration(inspection.durationSeconds, "Tella export");
     }
+    const inputLoudness = await Promise.all(
+      definitions.map((definition) =>
+        Promise.all(duckIntervals.map((interval) => measure(ffmpegPath, definition.inputPath, interval)))
+      )
+    );
+    const sourceGains = deriveSharedSourceGains(
+      duckIntervals,
+      inputLoudness[0]!,
+      inputLoudness[1]!
+    );
 
     for (const [index, definition] of definitions.entries()) {
+      await validateContainedPaths(
+        options.episodeDir,
+        [definition.inputPath, finalDirectory, stagedPaths[index]!],
+        lstat,
+        realpath
+      );
       await runCommand(
         ffmpegPath,
         buildFinishFfmpegArgs({
@@ -528,11 +939,18 @@ export async function finishGptLiveProduction(
           musicPath,
           outputPath: stagedPaths[index]!,
           durationSeconds: inputInspections[index]!.durationSeconds,
-          duckIntervals
+          duckIntervals,
+          sourceGains
         })
       );
     }
 
+    await validateContainedPaths(
+      options.episodeDir,
+      [finalDirectory, ...stagedPaths],
+      lstat,
+      realpath
+    );
     const outputInspections = await Promise.all(
       stagedPaths.map((path) => inspect(ffprobePath, path))
     );
@@ -543,6 +961,39 @@ export async function finishGptLiveProduction(
       outputInspections[0]!.durationSeconds,
       outputInspections[1]!.durationSeconds
     );
+    const outputLoudness = await Promise.all(
+      stagedPaths.map((path) =>
+        Promise.all(duckIntervals.map((interval) => measure(ffmpegPath, path, interval)))
+      )
+    );
+    assertSourceOutputLoudness(sourceGains, outputLoudness[0]!, outputLoudness[1]!);
+    const sourceResults: SourceIntervalResult[] = sourceGains.map((gain, index) => ({
+      ...gain,
+      outputLufsA: outputLoudness[0]![index]!,
+      outputLufsB: outputLoudness[1]![index]!
+    }));
+
+    const logoEvidence: LogoEvidence[] = [];
+    for (const [index, definition] of definitions.entries()) {
+      const durationSeconds = outputInspections[index]!.durationSeconds;
+      const sampleTimes = [
+        Math.min(0.5, durationSeconds / 4),
+        durationSeconds / 2,
+        Math.max(0, durationSeconds - 0.5)
+      ].map(roundedSeconds);
+      const samples = [];
+      for (const timeSeconds of sampleTimes) {
+        const [inputSha256, outputSha256] = await Promise.all([
+          sampleCornerHash(ffmpegPath, definition.inputPath, timeSeconds),
+          sampleCornerHash(ffmpegPath, stagedPaths[index]!, timeSeconds)
+        ]);
+        if (inputSha256 === outputSha256) {
+          throw new Error(`AIMH logo corner evidence is unchanged: ${definition.name}`);
+        }
+        samples.push({ timeSeconds, inputSha256, outputSha256 });
+      }
+      logoEvidence.push({ name: definition.name, samples });
+    }
 
     const variants: PostProductionVariant[] = definitions.map((definition, index) => ({
       ...definition,
@@ -553,24 +1004,43 @@ export async function finishGptLiveProduction(
       productionId: plan.productionId,
       logoPath,
       musicPath,
+      logoSha256,
       duckIntervals,
+      sourceGains: sourceResults,
+      logoEvidence,
       variants
     });
+    await validateContainedPaths(
+      options.episodeDir,
+      [reportsDirectory, stagedReportPath, reportPath],
+      lstat,
+      realpath
+    );
     await writeJsonAtomic(stagedReportPath, manifest);
 
     const promotions: Promotion[] = [
       ...definitions.map((definition, index) => ({
         stagedPath: stagedPaths[index]!,
         targetPath: definition.outputPath,
-        backupPath: backupPaths[index]!
+        rollbackPath: rollbackPaths[index]!
       })),
       {
         stagedPath: stagedReportPath,
         targetPath: reportPath,
-        backupPath: backupPaths[2]!
+        rollbackPath: rollbackPaths[2]!
       }
     ];
-    await promoteFilesAtomically(promotions, rename, rm);
+    await validateContainedPaths(
+      options.episodeDir,
+      promotions.flatMap(({ stagedPath, targetPath, rollbackPath }) => [
+        stagedPath,
+        targetPath,
+        rollbackPath
+      ]),
+      lstat,
+      realpath
+    );
+    await promoteFilesAtomically(promotions, copyFile, rename, rm);
 
     return {
       episodeDir: options.episodeDir,

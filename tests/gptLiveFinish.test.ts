@@ -1,16 +1,30 @@
-import { mkdtemp, mkdir, readFile, rename as fsRename, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rename as fsRename,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   assertFinalMediaContract,
+  assertSourceOutputLoudness,
   assertVariantDurationParity,
   buildFinishFfmpegArgs,
+  buildLogoCornerSampleArgs,
   buildLogoFilter,
   buildMusicVolumeExpression,
   buildPostProductionManifest,
+  buildSourceDialogueGainExpression,
+  deriveSharedSourceGains,
   deriveSourceDuckIntervals,
   finishGptLiveProduction,
+  parseEbur128IntegratedLufs,
   type FinalMediaInspection,
   type FinishPlan
 } from "../src/production/gptLive/finish";
@@ -32,14 +46,27 @@ const validInspection = (durationSeconds: number): FinalMediaInspection => ({
     codecName: "h264",
     width: 1920,
     height: 1080,
-    framesPerSecond: 30
+    framesPerSecond: 30,
+    durationSeconds,
+    pixelFormat: "yuv420p",
+    colorSpace: "bt709",
+    colorTransfer: "bt709",
+    colorPrimaries: "bt709"
   },
   audio: {
     codecName: "aac",
     sampleRate: 48_000,
-    channels: 2
+    channels: 2,
+    durationSeconds: durationSeconds - 0.01,
+    bitRate: 192_000
   }
 });
+
+const sourceGains = deriveSharedSourceGains(
+  deriveSourceDuckIntervals(plan()),
+  [-20, -25],
+  [-20, -25]
+);
 
 describe("GPT-Live finishing filters", () => {
   it("returns the exact AIMH logo treatment", () => {
@@ -56,22 +83,62 @@ describe("GPT-Live finishing filters", () => {
   });
 
   it("builds a conservative music expression covering both source intervals", () => {
-    expect(buildMusicVolumeExpression(deriveSourceDuckIntervals(plan()))).toBe(
-      "if(between(t,0.000,3.000)+between(t,8.500,10.750),0.020,0.070)"
-    );
+    const expression = buildMusicVolumeExpression(deriveSourceDuckIntervals(plan()));
+    expect(expression).toContain("between(t,0.000,3.000)");
+    expect(expression).toContain("between(t,3.000,3.100)");
+    expect(expression).toContain("between(t,8.400,8.500)");
+    expect(expression).toContain("between(t,10.750,10.850)");
+    expect(expression).toContain("0.020");
+    expect(expression).toContain("0.070");
+  });
+
+  it("derives one clamped shared gain policy from A/B interval measurements", () => {
+    expect(sourceGains).toEqual([
+      expect.objectContaining({
+        startSeconds: 0,
+        endSeconds: 3,
+        measuredLufsA: -20,
+        measuredLufsB: -20,
+        averageMeasuredLufs: -20,
+        targetLufs: -23,
+        gainDb: -3
+      }),
+      expect.objectContaining({
+        startSeconds: 8.5,
+        endSeconds: 10.75,
+        gainDb: 2
+      })
+    ]);
+    expect(deriveSharedSourceGains([{ startSeconds: 0, endSeconds: 1 }], [-50], [-50])[0]?.gainDb)
+      .toBe(12);
+  });
+
+  it("ramps source gain only inside source intervals", () => {
+    const expression = buildSourceDialogueGainExpression(sourceGains);
+    expect(expression).toContain("between(t,0.000,3.000)");
+    expect(expression).toContain("0.707946");
+    expect(expression).toContain("between(t,8.500,10.750)");
+    expect(expression).toContain("1.258925");
+    expect(expression).toContain("1.000000");
+  });
+
+  it("parses the final integrated ebur128 summary value", () => {
+    expect(
+      parseEbur128IntegratedLufs("I: -18.2 LUFS\nIntegrated loudness:\n  I: -22.9 LUFS\n")
+    ).toBe(-22.9);
   });
 
   it("uses exact input ordering, shared graph, maps, and encoding settings", () => {
-    expect(
-      buildFinishFfmpegArgs({
+    const args = buildFinishFfmpegArgs({
         inputPath: "/episode/exports/tella-a.mp4",
         logoPath: "/assets/logo.png",
         musicPath: "/assets/Body_Komorebi_Futuremono.mp3",
         outputPath: "/episode/final/version-a.tmp.mp4",
         durationSeconds: 10.75,
-        duckIntervals: deriveSourceDuckIntervals(plan())
-      })
-    ).toEqual([
+        duckIntervals: deriveSourceDuckIntervals(plan()),
+        sourceGains
+      });
+    expect(args.slice(0, 9)).toEqual([
       "-y",
       "-i",
       "/episode/exports/tella-a.mp4",
@@ -80,9 +147,14 @@ describe("GPT-Live finishing filters", () => {
       "-stream_loop",
       "-1",
       "-i",
-      "/assets/Body_Komorebi_Futuremono.mp3",
-      "-filter_complex",
-      "[1:v]scale=150:-1,format=rgba,colorchannelmixer=aa=0.85[lg];[0:v][lg]overlay=W-w-24:24[vout];[0:a]volume=1.0[dialogue];[2:a]volume='if(between(t,0.000,3.000)+between(t,8.500,10.750),0.020,0.070)':eval=frame[music];[dialogue][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]",
+      "/assets/Body_Komorebi_Futuremono.mp3"
+    ]);
+    const graph = args[args.indexOf("-filter_complex") + 1]!;
+    expect(graph).toContain("apad=whole_dur=10.750");
+    expect(graph).toContain("atrim=duration=10.750");
+    expect(graph).toContain("amix=inputs=2:duration=longest");
+    expect(graph).toContain("alimiter=limit=0.95:attack=5:release=50:level=false:latency=true");
+    expect(args.slice(args.indexOf("-map"))).toEqual([
       "-map",
       "[vout]",
       "-map",
@@ -97,6 +169,12 @@ describe("GPT-Live finishing filters", () => {
       "yuv420p",
       "-r",
       "30",
+      "-colorspace",
+      "bt709",
+      "-color_primaries",
+      "bt709",
+      "-color_trc",
+      "bt709",
       "-c:a",
       "aac",
       "-b:a",
@@ -118,7 +196,8 @@ describe("GPT-Live finishing filters", () => {
       logoPath: "/assets/logo.png",
       musicPath: "/assets/music.mp3",
       durationSeconds: 10.75,
-      duckIntervals: deriveSourceDuckIntervals(plan())
+      duckIntervals: deriveSourceDuckIntervals(plan()),
+      sourceGains
     };
     const a = buildFinishFfmpegArgs({
       ...shared,
@@ -135,6 +214,26 @@ describe("GPT-Live finishing filters", () => {
       b.slice(b.indexOf("-filter_complex"), -1)
     );
   });
+
+  it("samples the fixed top-right logo corner as a SHA-256 frame hash", () => {
+    expect(buildLogoCornerSampleArgs("/episode/final/version-a.mp4", 5.25)).toEqual([
+      "-v",
+      "error",
+      "-ss",
+      "5.250",
+      "-i",
+      "/episode/final/version-a.mp4",
+      "-frames:v",
+      "1",
+      "-vf",
+      "crop=198:198:iw-198:0",
+      "-f",
+      "hash",
+      "-hash",
+      "sha256",
+      "-"
+    ]);
+  });
 });
 
 describe("GPT-Live final validation", () => {
@@ -145,6 +244,10 @@ describe("GPT-Live final validation", () => {
     ["audio codec", { audio: { codecName: "mp3" } }, "AAC"],
     ["sample rate", { audio: { sampleRate: 44_100 } }, "48kHz"],
     ["channels", { audio: { channels: 1 } }, "stereo"],
+    ["pixel format", { video: { pixelFormat: "yuv444p" } }, "yuv420p"],
+    ["color tags", { video: { colorSpace: "unknown" } }, "BT.709"],
+    ["audio bitrate", { audio: { bitRate: 128_000 } }, "bitrate"],
+    ["audio duration", { audio: { durationSeconds: 9.94 } }, "audio duration"],
     ["duration", { durationSeconds: 10.3 }, "duration mismatch"]
   ])("rejects wrong final %s", (_name, mutation, error) => {
     const valid = validInspection(10);
@@ -162,15 +265,141 @@ describe("GPT-Live final validation", () => {
     expect(() => assertVariantDurationParity(20, 20.501)).toThrow("A/B duration delta");
     expect(() => assertVariantDurationParity(20, 20.5)).not.toThrow();
   });
+
+  it("rejects source excerpts outside the target loudness or A/B parity tolerance", () => {
+    expect(() => assertSourceOutputLoudness(sourceGains, [-22.5, -23.5], [-22.4, -23.4]))
+      .not.toThrow();
+    expect(() => assertSourceOutputLoudness(sourceGains, [-20.9, -23], [-23, -23]))
+      .toThrow("source loudness");
+    expect(() => assertSourceOutputLoudness(sourceGains, [-22, -23], [-24.1, -23]))
+      .toThrow("A/B source loudness");
+  });
 });
 
 describe("GPT-Live post-production publication", () => {
+  const createContainedEpisode = async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-finish-contained-"));
+    await Promise.all(
+      ["tella", "exports", "final", "reports"].map((directory) =>
+        mkdir(join(episodeDir, directory), { recursive: true })
+      )
+    );
+    await Promise.all([
+      writeFile(join(episodeDir, "tella", "plan.json"), JSON.stringify(plan()), "utf8"),
+      writeFile(join(episodeDir, "exports", "tella-a.mp4"), "export-a", "utf8"),
+      writeFile(join(episodeDir, "exports", "tella-b.mp4"), "export-b", "utf8"),
+      writeFile(join(episodeDir, "final", "version-a.mp4"), "approved-a", "utf8"),
+      writeFile(join(episodeDir, "final", "version-b.mp4"), "approved-b", "utf8"),
+      writeFile(join(episodeDir, "reports", "post-production.json"), "{}\n", "utf8")
+    ]);
+    return episodeDir;
+  };
+
+  const finishOptions = (episodeDir: string) => ({
+    episodeDir,
+    env: {
+      AIMH_LOGO_PATH: "/assets/logo.png",
+      AIMH_BODY_MUSIC_PATH: "/assets/music.mp3"
+    },
+    ffmpegPath: "ffmpeg",
+    ffprobePath: "ffprobe"
+  });
+
+  it.each([
+    {
+      name: "exports directory",
+      replace: async (episodeDir: string, outsideDir: string) => {
+        await rm(join(episodeDir, "exports"), { recursive: true });
+        await symlink(outsideDir, join(episodeDir, "exports"), "dir");
+      }
+    },
+    {
+      name: "export file",
+      replace: async (episodeDir: string, outsideDir: string) => {
+        const outsideFile = join(outsideDir, "outside-export.mp4");
+        await writeFile(outsideFile, "outside", "utf8");
+        await rm(join(episodeDir, "exports", "tella-a.mp4"));
+        await symlink(outsideFile, join(episodeDir, "exports", "tella-a.mp4"));
+      }
+    },
+    {
+      name: "final directory",
+      replace: async (episodeDir: string, outsideDir: string) => {
+        await rm(join(episodeDir, "final"), { recursive: true });
+        await symlink(outsideDir, join(episodeDir, "final"), "dir");
+      }
+    },
+    {
+      name: "final file",
+      replace: async (episodeDir: string, outsideDir: string) => {
+        const outsideFile = join(outsideDir, "outside-final.mp4");
+        await writeFile(outsideFile, "outside", "utf8");
+        await rm(join(episodeDir, "final", "version-a.mp4"));
+        await symlink(outsideFile, join(episodeDir, "final", "version-a.mp4"));
+      }
+    },
+    {
+      name: "reports directory",
+      replace: async (episodeDir: string, outsideDir: string) => {
+        await rm(join(episodeDir, "reports"), { recursive: true });
+        await symlink(outsideDir, join(episodeDir, "reports"), "dir");
+      }
+    },
+    {
+      name: "report file",
+      replace: async (episodeDir: string, outsideDir: string) => {
+        const outsideFile = join(outsideDir, "outside-report.json");
+        await writeFile(outsideFile, "outside", "utf8");
+        await rm(join(episodeDir, "reports", "post-production.json"));
+        await symlink(outsideFile, join(episodeDir, "reports", "post-production.json"));
+      }
+    }
+  ])("rejects a symlinked $name before running commands or writing reports", async ({ replace }) => {
+    const episodeDir = await createContainedEpisode();
+    const outsideDir = await mkdtemp(join(tmpdir(), "gpt-live-finish-outside-"));
+    const runCommand = vi.fn(async () => ({ stdout: "", stderr: "" }));
+    const writeJsonAtomic = vi.fn(async () => undefined);
+    await replace(episodeDir, outsideDir);
+
+    try {
+      await expect(
+        finishGptLiveProduction(finishOptions(episodeDir), {
+          access: async () => undefined,
+          inspectFinalMediaFile: async () => validInspection(10.75),
+          runCommand,
+          writeJsonAtomic
+        })
+      ).rejects.toThrow(/symlink/i);
+      expect(runCommand).not.toHaveBeenCalled();
+      expect(writeJsonAtomic).not.toHaveBeenCalled();
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
   it("creates a secret-free manifest with only safe relative asset and media paths", () => {
     const manifest = buildPostProductionManifest({
       productionId: "test-production",
       logoPath: "/Users/editor/private/logo.png",
       musicPath: "/Users/editor/private/Body_Komorebi_Futuremono.mp3",
+      logoSha256: "a".repeat(64),
       duckIntervals: deriveSourceDuckIntervals(plan()),
+      sourceGains: sourceGains.map((gain, index) => ({
+        ...gain,
+        outputLufsA: [-22.9, -23.1][index]!,
+        outputLufsB: [-22.8, -23.0][index]!
+      })),
+      logoEvidence: [
+        {
+          name: "version-a",
+          samples: [{ timeSeconds: 1, inputSha256: "b".repeat(64), outputSha256: "c".repeat(64) }]
+        },
+        {
+          name: "version-b",
+          samples: [{ timeSeconds: 1, inputSha256: "d".repeat(64), outputSha256: "e".repeat(64) }]
+        }
+      ],
       variants: [
         {
           name: "version-a",
@@ -194,7 +423,16 @@ describe("GPT-Live post-production publication", () => {
       status: "finished",
       assets: {
         logo: "logo.png",
+        logoSha256: "a".repeat(64),
         music: "Body_Komorebi_Futuremono.mp3"
+      },
+      sourceDialogue: {
+        targetLufs: -23,
+        gainClampDb: 12,
+        rampSeconds: 0.1,
+        intervals: expect.arrayContaining([
+          expect.objectContaining({ gainDb: -3, outputLufsA: -22.9, outputLufsB: -22.8 })
+        ])
       },
       settings: {
         dialogueVolume: 1,
@@ -232,9 +470,11 @@ describe("GPT-Live post-production publication", () => {
           },
           {
             access: async () => undefined,
+            readFileBytes: async () => new Uint8Array([1, 2, 3]),
             readFile: async () => JSON.stringify(plan()),
             inspectFinalMediaFile: async (_ffprobePath, path) =>
               validInspection(path.includes("tella-b") ? 10.75 : 10.75),
+            measureIntervalLoudness: async () => -23,
             runCommand: async () => {
               throw new Error("injected ffmpeg failure");
             },
@@ -250,53 +490,67 @@ describe("GPT-Live post-production publication", () => {
     }
   });
 
-  it("retains the previous final backup if promotion and rollback both fail", async () => {
+  it.each([
+    { name: "version A", failPattern: "version-a.tmp-" },
+    { name: "version B", failPattern: "version-b.tmp-" },
+    { name: "post-production manifest", failPattern: "post-production.tmp-" }
+  ])("keeps canonical targets present and restores them when $name promotion fails", async ({ failPattern }) => {
     const transactionId = "00000000-0000-4000-8000-000000000000";
-    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-finish-rollback-"));
+    const episodeDir = await createContainedEpisode();
     const finalDirectory = join(episodeDir, "final");
     const versionAPath = join(finalDirectory, "version-a.mp4");
     const versionBPath = join(finalDirectory, "version-b.mp4");
-    const versionABackupPath = `${versionAPath}.backup-${transactionId}`;
-    await mkdir(finalDirectory, { recursive: true });
-    await writeFile(versionAPath, "approved-a", "utf8");
-    await writeFile(versionBPath, "approved-b", "utf8");
+    const reportPath = join(episodeDir, "reports", "post-production.json");
+    const canonicalPaths = [versionAPath, versionBPath, reportPath];
+    const renameCalls: Array<[string, string]> = [];
+    let missingCanonicalObserved = false;
 
     try {
       await expect(
         finishGptLiveProduction(
-          {
-            episodeDir,
-            env: {
-              AIMH_LOGO_PATH: "/assets/logo.png",
-              AIMH_BODY_MUSIC_PATH: "/assets/music.mp3"
-            },
-            ffmpegPath: "ffmpeg",
-            ffprobePath: "ffprobe"
-          },
+          finishOptions(episodeDir),
           {
             access: async () => undefined,
             randomUUID: () => transactionId,
-            readFile: async () => JSON.stringify(plan()),
+            readFileBytes: async () => new Uint8Array([1, 2, 3]),
             inspectFinalMediaFile: async () => validInspection(10.75),
+            measureIntervalLoudness: async () => -23,
+            sampleLogoCornerFrameHash: async (_ffmpeg, path) =>
+              path.includes("exports") ? "a".repeat(64) : "b".repeat(64),
             runCommand: async (_command, args) => {
               await writeFile(args.at(-1)!, "new-final", "utf8");
               return { stdout: "", stderr: "" };
             },
             rename: async (from, to) => {
-              if (String(from).includes(`version-b.tmp-${transactionId}`)) {
-                throw new Error("injected promotion failure");
+              renameCalls.push([String(from), String(to)]);
+              if (String(from).includes(".tmp-")) {
+                const presence = await Promise.all(
+                  canonicalPaths.map(async (path) => {
+                    try {
+                      await readFile(path);
+                      return true;
+                    } catch {
+                      return false;
+                    }
+                  })
+                );
+                missingCanonicalObserved ||= presence.includes(false);
               }
-              if (from === versionABackupPath) {
-                throw new Error("injected rollback failure");
+              if (String(from).includes(failPattern)) {
+                throw new Error("injected promotion failure");
               }
               await fsRename(from, to);
             }
           }
         )
-      ).rejects.toThrow("injected rollback failure");
+      ).rejects.toThrow("injected promotion failure");
 
-      expect(await readFile(versionABackupPath, "utf8")).toBe("approved-a");
+      expect(await readFile(versionAPath, "utf8")).toBe("approved-a");
       expect(await readFile(versionBPath, "utf8")).toBe("approved-b");
+      expect(await readFile(reportPath, "utf8")).toBe("{}\n");
+      expect(missingCanonicalObserved).toBe(false);
+      expect(renameCalls.some(([from]) => canonicalPaths.includes(from))).toBe(false);
+      expect((await readdir(finalDirectory)).some((name) => name.includes(".backup-"))).toBe(false);
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
     }
