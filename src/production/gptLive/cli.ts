@@ -17,6 +17,10 @@ import {
   finishGptLiveProduction as defaultFinishGptLiveProduction,
   type FinishGptLiveProductionResult
 } from "./finish";
+import {
+  runGptLiveQa as defaultRunGptLiveQa,
+  type GptLiveQaResult
+} from "./qa";
 
 const DEFAULT_VIDEO_ENGINE_PATH = "/Users/dennywii/Documents/dev/aimh-video-engine";
 
@@ -25,6 +29,9 @@ type PrepareGptLiveProductionFunction<TResult> = (
 ) => Promise<TResult>;
 type FinishGptLiveProductionFunction<TResult> = (
   options: Parameters<typeof defaultFinishGptLiveProduction>[0]
+) => Promise<TResult>;
+type QaGptLiveProductionFunction<TResult> = (
+  options: Parameters<typeof defaultRunGptLiveQa>[0]
 ) => Promise<TResult>;
 interface PathStat {
   isDirectory(): boolean;
@@ -42,6 +49,7 @@ export interface GptLiveCliDependencies<TResult = PrepareGptLiveProductionResult
   ) => Promise<EnvSnapshot>;
   readonly finishGptLiveProduction?: FinishGptLiveProductionFunction<TResult>;
   readonly prepareGptLiveProduction?: PrepareGptLiveProductionFunction<TResult>;
+  readonly qaGptLiveProduction?: QaGptLiveProductionFunction<TResult>;
   readonly realpath?: Realpath;
 }
 
@@ -164,17 +172,14 @@ const validateRealEpisodeDirectory = async (
 };
 
 export async function runGptLiveCli<
-  TResult = PrepareGptLiveProductionResult | FinishGptLiveProductionResult
+  TResult = PrepareGptLiveProductionResult | FinishGptLiveProductionResult | GptLiveQaResult
 >(
   rawArgs: readonly string[],
   dependencies: GptLiveCliDependencies<TResult> = {}
 ): Promise<TResult> {
   const command = rawArgs[0];
 
-  if (command === "qa") {
-    throw new Error(`Command not yet implemented: ${command}`);
-  }
-  if (command !== "prepare" && command !== "finish") {
+  if (command !== "prepare" && command !== "finish" && command !== "qa") {
     throw new Error(`Unknown command: ${command ?? "<missing>"}`);
   }
 
@@ -201,6 +206,11 @@ export async function runGptLiveCli<
       (defaultFinishGptLiveProduction as FinishGptLiveProductionFunction<TResult>);
     return finishGptLiveProduction(productionOptions);
   }
+  if (command === "qa") {
+    const qaGptLiveProduction = dependencies.qaGptLiveProduction ??
+      (defaultRunGptLiveQa as QaGptLiveProductionFunction<TResult>);
+    return qaGptLiveProduction(productionOptions);
+  }
   const prepareGptLiveProduction = dependencies.prepareGptLiveProduction ??
     (defaultPrepareGptLiveProduction as PrepareGptLiveProductionFunction<TResult>);
   return prepareGptLiveProduction(productionOptions);
@@ -218,6 +228,11 @@ if (isDirectExecution()) {
   runGptLiveCli(process.argv.slice(2))
     .then((result) => {
       console.log(`episode: ${result.episodeDir}`);
+      if ("ok" in result && result.ok === true) {
+        console.log("ok: true");
+        console.log(`qa: ${result.reportPath}`);
+        console.log(`visual: ${result.visualDirectory}`);
+      }
     })
     .catch((error: unknown) => {
       console.error(error instanceof Error ? error.message : String(error));

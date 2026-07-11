@@ -904,7 +904,6 @@ describe("GPT-Live preparation CLI", () => {
 
   it.each([
     { args: ["prepare", "--episode-dir"], error: "Missing value for --episode-dir" },
-    { args: ["qa"], error: "Command not yet implemented: qa" },
     { args: ["unexpected"], error: "Unknown command: unexpected" }
   ])("rejects invalid command input: $args", async ({ args, error }) => {
     await expect(runGptLiveCli(args)).rejects.toThrow(error);
@@ -931,6 +930,34 @@ describe("GPT-Live preparation CLI", () => {
     expect(finishGptLiveProduction).toHaveBeenCalledWith({
       episodeDir: "/project/episodes/custom",
       env: expect.objectContaining({ AIMH_LOGO_PATH: "/assets/logo.png" }),
+      ffmpegPath: "/tools/ffmpeg",
+      ffprobePath: "/tools/ffprobe"
+    });
+  });
+
+  it("dispatches QA with the same contained episode path and loaded environment", async () => {
+    const qaGptLiveProduction = vi.fn(async () => ({
+      episodeDir: "/project/episodes/custom",
+      ok: true
+    }));
+
+    await runGptLiveCli(["qa", "--", "--episode-dir", "episodes/custom"], {
+      cwd: () => "/project",
+      loadEnvSnapshotFromFiles: async () => ({
+        values: {
+          YOUTUBE_UPLOAD_ENABLED: "false",
+          FFMPEG_PATH: "/tools/ffmpeg",
+          FFPROBE_PATH: "/tools/ffprobe"
+        },
+        status: {}
+      }),
+      qaGptLiveProduction,
+      ...virtualCliFileSystem
+    });
+
+    expect(qaGptLiveProduction).toHaveBeenCalledWith({
+      episodeDir: "/project/episodes/custom",
+      env: expect.objectContaining({ YOUTUBE_UPLOAD_ENABLED: "false" }),
       ffmpegPath: "/tools/ffmpeg",
       ffprobePath: "/tools/ffprobe"
     });
