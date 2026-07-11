@@ -13,11 +13,18 @@ import {
   prepareGptLiveProduction as defaultPrepareGptLiveProduction,
   type PrepareGptLiveProductionResult
 } from "./prepare";
+import {
+  finishGptLiveProduction as defaultFinishGptLiveProduction,
+  type FinishGptLiveProductionResult
+} from "./finish";
 
 const DEFAULT_VIDEO_ENGINE_PATH = "/Users/dennywii/Documents/dev/aimh-video-engine";
 
 type PrepareGptLiveProductionFunction<TResult> = (
   options: Parameters<typeof defaultPrepareGptLiveProduction>[0]
+) => Promise<TResult>;
+type FinishGptLiveProductionFunction<TResult> = (
+  options: Parameters<typeof defaultFinishGptLiveProduction>[0]
 ) => Promise<TResult>;
 interface PathStat {
   isDirectory(): boolean;
@@ -33,6 +40,7 @@ export interface GptLiveCliDependencies<TResult = PrepareGptLiveProductionResult
     projectRoot: string,
     videoEnginePath: string
   ) => Promise<EnvSnapshot>;
+  readonly finishGptLiveProduction?: FinishGptLiveProductionFunction<TResult>;
   readonly prepareGptLiveProduction?: PrepareGptLiveProductionFunction<TResult>;
   readonly realpath?: Realpath;
 }
@@ -155,16 +163,18 @@ const validateRealEpisodeDirectory = async (
   }
 };
 
-export async function runGptLiveCli<TResult = PrepareGptLiveProductionResult>(
+export async function runGptLiveCli<
+  TResult = PrepareGptLiveProductionResult | FinishGptLiveProductionResult
+>(
   rawArgs: readonly string[],
   dependencies: GptLiveCliDependencies<TResult> = {}
 ): Promise<TResult> {
   const command = rawArgs[0];
 
-  if (command === "finish" || command === "qa") {
+  if (command === "qa") {
     throw new Error(`Command not yet implemented: ${command}`);
   }
-  if (command !== "prepare") {
+  if (command !== "prepare" && command !== "finish") {
     throw new Error(`Unknown command: ${command ?? "<missing>"}`);
   }
 
@@ -175,19 +185,25 @@ export async function runGptLiveCli<TResult = PrepareGptLiveProductionResult>(
     parsed.episodeDir ?? joinDefaultEpisodeDirectory(GPT_LIVE_CONTENT.id)
   );
   const env = await loadCliEnv(projectRoot, dependencies.loadEnvSnapshotFromFiles);
-  const prepareGptLiveProduction = dependencies.prepareGptLiveProduction ??
-    (defaultPrepareGptLiveProduction as PrepareGptLiveProductionFunction<TResult>);
   const lstat = dependencies.lstat ?? defaultLstat;
   const realpath = dependencies.realpath ?? defaultRealpath;
 
   await validateRealEpisodeDirectory(projectRoot, episodeDir, lstat, realpath);
 
-  return prepareGptLiveProduction({
+  const productionOptions = {
     episodeDir,
     env: env.values,
     ffmpegPath: env.values.FFMPEG_PATH ?? "ffmpeg",
     ffprobePath: env.values.FFPROBE_PATH ?? "ffprobe"
-  });
+  };
+  if (command === "finish") {
+    const finishGptLiveProduction = dependencies.finishGptLiveProduction ??
+      (defaultFinishGptLiveProduction as FinishGptLiveProductionFunction<TResult>);
+    return finishGptLiveProduction(productionOptions);
+  }
+  const prepareGptLiveProduction = dependencies.prepareGptLiveProduction ??
+    (defaultPrepareGptLiveProduction as PrepareGptLiveProductionFunction<TResult>);
+  return prepareGptLiveProduction(productionOptions);
 }
 
 const joinDefaultEpisodeDirectory = (productionId: string): string =>

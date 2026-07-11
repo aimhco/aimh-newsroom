@@ -904,11 +904,36 @@ describe("GPT-Live preparation CLI", () => {
 
   it.each([
     { args: ["prepare", "--episode-dir"], error: "Missing value for --episode-dir" },
-    { args: ["finish"], error: "Command not yet implemented: finish" },
     { args: ["qa"], error: "Command not yet implemented: qa" },
     { args: ["unexpected"], error: "Unknown command: unexpected" }
   ])("rejects invalid command input: $args", async ({ args, error }) => {
     await expect(runGptLiveCli(args)).rejects.toThrow(error);
+  });
+
+  it("dispatches finish with the same contained episode path and loaded environment", async () => {
+    const finishGptLiveProduction = vi.fn(async () => ({ episodeDir: "/project/episodes/custom" }));
+
+    await runGptLiveCli(["finish", "--", "--episode-dir", "episodes/custom"], {
+      cwd: () => "/project",
+      loadEnvSnapshotFromFiles: async () => ({
+        values: {
+          AIMH_LOGO_PATH: "/assets/logo.png",
+          AIMH_BODY_MUSIC_PATH: "/assets/music.mp3",
+          FFMPEG_PATH: "/tools/ffmpeg",
+          FFPROBE_PATH: "/tools/ffprobe"
+        },
+        status: {}
+      }),
+      finishGptLiveProduction,
+      ...virtualCliFileSystem
+    });
+
+    expect(finishGptLiveProduction).toHaveBeenCalledWith({
+      episodeDir: "/project/episodes/custom",
+      env: expect.objectContaining({ AIMH_LOGO_PATH: "/assets/logo.png" }),
+      ffmpegPath: "/tools/ffmpeg",
+      ffprobePath: "/tools/ffprobe"
+    });
   });
 
   it.each([
