@@ -28,6 +28,11 @@ export interface QaPathDependencies {
   realpath?: (path: string) => Promise<string>;
 }
 
+export interface EpisodePathValidationOptions extends QaPathDependencies {
+  context?: string;
+  allowMissingEpisodeDir?: boolean;
+}
+
 const isWithin = (root: string, candidate: string, allowRoot = false): boolean => {
   const child = relative(root, candidate);
   if (!child) return allowRoot;
@@ -95,34 +100,60 @@ export function validateSerializedQaPaths(input: QaSerializedPathInput): string[
   ];
 }
 
-export async function validateNoSymlinkPaths(
+export async function validateContainedEpisodePaths(
   episodeDir: string,
   paths: readonly string[],
-  dependencies: QaPathDependencies = {}
+  options: EpisodePathValidationOptions = {}
 ): Promise<void> {
-  const lstat = dependencies.lstat ?? defaultLstat;
-  const realpath = dependencies.realpath ?? defaultRealpath;
+  const lstat = options.lstat ?? defaultLstat;
+  const realpath = options.realpath ?? defaultRealpath;
+  const context = options.context ?? "GPT-Live QA";
   const root = resolve(episodeDir);
+  let rootStat: PathStat;
+  try {
+    rootStat = await lstat(root);
+  } catch (error) {
+    if (options.allowMissingEpisodeDir && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  if (rootStat.isSymbolicLink()) {
+    throw new Error(`${context} path contains a symlink: ${root}`);
+  }
+  if (!rootStat.isDirectory()) {
+    throw new Error(`${context} episode path is not a directory: ${root}`);
+  }
   const realRoot = await realpath(root);
   for (const path of paths) {
     const candidate = resolve(path);
-    if (!isWithin(root, candidate, true)) {
-      throw new Error(`GPT-Live QA path escapes episode directory: ${candidate}`);
+    if (!isWithin(root, candidate)) {
+      throw new Error(`${context} path escapes episode directory: ${candidate}`);
     }
     let current = root;
     for (const component of relative(root, candidate).split(sep).filter(Boolean)) {
       current = join(current, component);
       try {
         const stat = await lstat(current);
-        if (stat.isSymbolicLink()) throw new Error(`GPT-Live QA path contains a symlink: ${current}`);
+        if (stat.isSymbolicLink()) throw new Error(`${context} path contains a symlink: ${current}`);
         const real = await realpath(current);
-        if (!isWithin(realRoot, real, true)) throw new Error(`GPT-Live QA path escapes episode directory: ${current}`);
+        if (!isWithin(realRoot, real, true)) {
+          throw new Error(`${context} path escapes episode directory: ${current}`);
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
         throw error;
       }
     }
   }
+}
+
+export async function validateNoSymlinkPaths(
+  episodeDir: string,
+  paths: readonly string[],
+  dependencies: QaPathDependencies = {}
+): Promise<void> {
+  await validateContainedEpisodePaths(episodeDir, paths, dependencies);
 }
 
 export async function withValidatedQaArtifactPaths<T>(

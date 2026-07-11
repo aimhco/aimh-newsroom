@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import {
   access as defaultAccess,
+  lstat as defaultLstat,
+  realpath as defaultRealpath,
   rm as defaultRm,
   stat as defaultStat
 } from "node:fs/promises";
@@ -27,6 +29,7 @@ import {
   renderGptLivePlates as defaultRenderGptLivePlates,
   type RenderGptLivePlatesOptions
 } from "./renderPlates";
+import { validateContainedEpisodePaths } from "./qa/paths";
 import { buildTellaPlan, type TellaPlan } from "./tellaPlan";
 
 const EPISODE_SUBDIRECTORIES = [
@@ -71,6 +74,8 @@ export interface PrepareGptLiveProductionDependencies {
   readonly synthesizeNarration?: SynthesizeNarration;
   readonly runCommand?: typeof defaultRunCommand;
   readonly inspectMediaFile?: typeof defaultInspectMediaFile;
+  readonly lstat?: typeof defaultLstat;
+  readonly realpath?: typeof defaultRealpath;
   readonly removeFile?: (path: string) => Promise<void>;
   readonly renderPlates?: RenderPlates;
   readonly stat?: (path: string) => Promise<FileStat>;
@@ -287,6 +292,8 @@ export async function prepareGptLiveProduction(
   const synthesizeNarration = dependencies.synthesizeNarration ?? defaultSynthesizeNarration;
   const runCommand = dependencies.runCommand ?? defaultRunCommand;
   const inspectMediaFile = dependencies.inspectMediaFile ?? defaultInspectMediaFile;
+  const lstat = dependencies.lstat ?? defaultLstat;
+  const realpath = dependencies.realpath ?? defaultRealpath;
   const removeFile =
     dependencies.removeFile ?? ((path: string) => defaultRm(path, { force: true }));
   const renderPlates = dependencies.renderPlates ?? ((renderOptions) =>
@@ -294,14 +301,40 @@ export async function prepareGptLiveProduction(
   const stat = dependencies.stat ?? defaultStat;
   const writeJsonAtomic = dependencies.writeJsonAtomic ?? defaultWriteJsonAtomic;
   const writeTextAtomic = dependencies.writeTextAtomic ?? defaultWriteTextAtomic;
+  const fixedDescendantPaths = [
+    ...EPISODE_SUBDIRECTORIES.map((directory) => join(options.episodeDir, directory)),
+    join(options.episodeDir, "production.json"),
+    ...GPT_LIVE_CONTENT.timeline.flatMap((item) => item.kind === "source_clip"
+      ? [join(options.episodeDir, "source", `${item.id}.mp4`)]
+      : [
+          join(options.episodeDir, "voice", `${item.id}.mp3`),
+          join(options.episodeDir, "voice", `${item.id}.mp3.json`),
+          join(options.episodeDir, "master", `${item.id}.mp4`)
+        ]),
+    join(options.episodeDir, "voice", "narration.json"),
+    join(options.episodeDir, "tella", "plan.json"),
+    join(options.episodeDir, "reports", "source-matrix.md"),
+    join(options.episodeDir, "reports", "prepared.json")
+  ];
   const preparedPath = join(options.episodeDir, "reports", "prepared.json");
 
+  await validateContainedEpisodePaths(options.episodeDir, fixedDescendantPaths, {
+    lstat,
+    realpath,
+    context: "GPT-Live preparation",
+    allowMissingEpisodeDir: true
+  });
   await runPreflight(options, access);
-  await removeFile(preparedPath);
 
   await Promise.all(
     EPISODE_SUBDIRECTORIES.map((directory) => ensureDir(join(options.episodeDir, directory)))
   );
+  await validateContainedEpisodePaths(options.episodeDir, fixedDescendantPaths, {
+    lstat,
+    realpath,
+    context: "GPT-Live preparation"
+  });
+  await removeFile(preparedPath);
 
   for (const item of GPT_LIVE_CONTENT.timeline) {
     if (item.kind !== "source_clip") continue;

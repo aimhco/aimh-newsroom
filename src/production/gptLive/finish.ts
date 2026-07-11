@@ -10,9 +10,10 @@ import {
   rename as defaultRename,
   rm as defaultRm
 } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import { runCommand as defaultRunCommand } from "../../render/process";
 import { writeJsonAtomic as defaultWriteJsonAtomic } from "./atomicFiles";
+import { validateContainedEpisodePaths } from "./qa/paths";
 
 const NORMAL_MUSIC_VOLUME = 0.07;
 const DUCKED_MUSIC_VOLUME = 0.02;
@@ -144,6 +145,11 @@ export interface PublishedGenerationPaths {
 
 export interface PublishedGenerationValidation {
   readonly generationId: string;
+  readonly variants: readonly {
+    readonly name: "version-a" | "version-b";
+    readonly sha256: string;
+    readonly byteSize: number;
+  }[];
   readonly finalPaths: readonly [string, string];
   readonly reportPath: string;
 }
@@ -224,53 +230,17 @@ const requireConfiguredValue = (value: string | undefined, label: string): strin
   return value;
 };
 
-const isWithin = (root: string, candidate: string, allowRoot = false): boolean => {
-  const childPath = relative(root, candidate);
-  if (!childPath) return allowRoot;
-  return childPath !== ".." && !childPath.startsWith(`..${sep}`) && !isAbsolute(childPath);
-};
-
 const validateContainedPaths = async (
   episodeDir: string,
   candidates: readonly string[],
   lstat: Lstat,
   realpath: Realpath
 ): Promise<void> => {
-  const resolvedEpisodeDir = resolve(episodeDir);
-  const episodeStat = await lstat(resolvedEpisodeDir);
-  if (episodeStat.isSymbolicLink()) {
-    throw new Error(`GPT-Live finish path contains a symlink: ${resolvedEpisodeDir}`);
-  }
-  if (!episodeStat.isDirectory()) {
-    throw new Error(`GPT-Live episode path is not a directory: ${resolvedEpisodeDir}`);
-  }
-  const realEpisodeDir = await realpath(resolvedEpisodeDir);
-
-  for (const candidate of candidates) {
-    const resolvedCandidate = resolve(candidate);
-    if (!isWithin(resolvedEpisodeDir, resolvedCandidate)) {
-      throw new Error(`GPT-Live finish path escapes episode directory: ${resolvedCandidate}`);
-    }
-    const childPath = relative(resolvedEpisodeDir, resolvedCandidate);
-    let currentPath = resolvedEpisodeDir;
-    for (const component of childPath.split(sep)) {
-      currentPath = join(currentPath, component);
-      let stat: PathStat;
-      try {
-        stat = await lstat(currentPath);
-      } catch (error) {
-        if (isMissingPathError(error)) break;
-        throw error;
-      }
-      if (stat.isSymbolicLink()) {
-        throw new Error(`GPT-Live finish path contains a symlink: ${currentPath}`);
-      }
-      const realCurrentPath = await realpath(currentPath);
-      if (!isWithin(realEpisodeDir, realCurrentPath)) {
-        throw new Error(`GPT-Live finish path escapes episode directory: ${currentPath}`);
-      }
-    }
-  }
+  await validateContainedEpisodePaths(episodeDir, candidates, {
+    lstat,
+    realpath,
+    context: "GPT-Live finish"
+  });
 };
 
 export function buildLogoFilter(): string {
@@ -847,6 +817,10 @@ export async function validatePublishedGeneration(
 
   return {
     generationId: manifest.generationId,
+    variants: (["version-a", "version-b"] as const).map((name) => {
+      const variant = manifest.variants.find((record) => record.name === name)!;
+      return { name, sha256: variant.sha256, byteSize: variant.byteSize };
+    }),
     finalPaths: [finalPaths[0], finalPaths[1]],
     reportPath
   };
@@ -1030,6 +1004,12 @@ export async function finishGptLiveProduction(
   const inputPaths = [join(exportsDirectory, "tella-a.mp4"), join(exportsDirectory, "tella-b.mp4")];
   const finalPaths = [join(finalDirectory, "version-a.mp4"), join(finalDirectory, "version-b.mp4")];
   const reportPath = join(reportsDirectory, "post-production.json");
+  const priorQaPaths = [
+    join(reportsDirectory, "qa.json"),
+    join(reportsDirectory, "comparison.md"),
+    join(reportsDirectory, "visual"),
+    join(reportsDirectory, "human-playback.json")
+  ];
   await validateContainedPaths(
     options.episodeDir,
     [
@@ -1234,10 +1214,13 @@ export async function finishGptLiveProduction(
           await writeJsonAtomic(stagedReportPath, manifest);
           await validateContainedPaths(
             options.episodeDir,
-            [stagedReportPath, reportPath],
+            [stagedReportPath, reportPath, ...priorQaPaths],
             lstat,
             realpath
           );
+          for (const path of priorQaPaths) {
+            await rm(path, { recursive: true, force: true });
+          }
           await rename(stagedReportPath, reportPath);
           const validation = await validateGeneration(options.episodeDir);
           if (validation.generationId !== transactionId) {

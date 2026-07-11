@@ -731,6 +731,70 @@ describe("GPT-Live production preparation", () => {
     }
   });
 
+  it.each(["reports", "source", "voice", "plates"])(
+    "rejects a symlinked %s descendant before preparation side effects",
+    async (directory) => {
+      const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-prepare-contained-"));
+      const outsideDir = await mkdtemp(join(tmpdir(), "gpt-live-prepare-outside-"));
+      const sentinelPath = join(outsideDir, "sentinel.txt");
+      await writeFile(sentinelPath, "outside-unchanged", "utf8");
+      await symlink(outsideDir, join(episodeDir, directory), "dir");
+
+      const access = vi.fn(async () => undefined);
+      const ensureDir = vi.fn(async () => undefined);
+      const extractSourceClip = vi.fn(async () => undefined);
+      const synthesizeNarration = vi.fn(async () => successfulVoiceResult(join(episodeDir, "voice")));
+      const runCommand = vi.fn(async () => ({ stdout: "", stderr: "" }));
+      const renderPlates = vi.fn(async () => ({ jobs: [] }));
+      const removeFile = vi.fn(async () => undefined);
+      const writeJsonAtomic = vi.fn(async () => undefined);
+      const writeTextAtomic = vi.fn(async () => undefined);
+
+      try {
+        await expect(
+          prepareGptLiveProduction(
+            {
+              episodeDir,
+              env: {
+                ELEVENLABS_API_KEY: "test-key",
+                ELEVENLABS_VOICE_ID: "test-voice",
+                AIMH_LOGO_PATH: "/assets/logo.png",
+                AIMH_BODY_MUSIC_PATH: "/assets/music.mp3"
+              },
+              ffmpegPath: "ffmpeg",
+              ffprobePath: "ffprobe"
+            },
+            {
+              access,
+              ensureDir,
+              extractSourceClip,
+              synthesizeNarration,
+              runCommand,
+              renderPlates,
+              removeFile,
+              writeJsonAtomic,
+              writeTextAtomic
+            }
+          )
+        ).rejects.toThrow(/symlink/i);
+
+        expect(access).not.toHaveBeenCalled();
+        expect(ensureDir).not.toHaveBeenCalled();
+        expect(extractSourceClip).not.toHaveBeenCalled();
+        expect(synthesizeNarration).not.toHaveBeenCalled();
+        expect(runCommand).not.toHaveBeenCalled();
+        expect(renderPlates).not.toHaveBeenCalled();
+        expect(removeFile).not.toHaveBeenCalled();
+        expect(writeJsonAtomic).not.toHaveBeenCalled();
+        expect(writeTextAtomic).not.toHaveBeenCalled();
+        await expect(readFile(sentinelPath, "utf8")).resolves.toBe("outside-unchanged");
+      } finally {
+        await rm(episodeDir, { recursive: true, force: true });
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    }
+  );
+
   it.each([
     {
       name: "missing ElevenLabs credentials",

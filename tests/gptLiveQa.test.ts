@@ -27,7 +27,8 @@ import {
   qaReportPaths,
   runGptLiveQa,
   validateGptLiveQaSnapshot,
-  type GptLiveQaSnapshot
+  type GptLiveQaSnapshot,
+  type RunGptLiveQaDependencies
 } from "../src/production/gptLive/qa";
 import type { QaProduction } from "../src/production/gptLive/qa";
 import {
@@ -304,6 +305,114 @@ const validSnapshot = (): GptLiveQaSnapshot => {
   } as unknown as GptLiveQaSnapshot;
 };
 
+const createQaRunHarness = async () => {
+  const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-qa-race-"));
+  const snapshot = JSON.parse(
+    JSON.stringify(validSnapshot()).replaceAll(EPISODE_DIR, episodeDir)
+  ) as GptLiveQaSnapshot;
+  const logoBytes = new TextEncoder().encode("qa-logo");
+  const logoSha256 = createHash("sha256").update(logoBytes).digest("hex");
+  (snapshot.postProduction.assets as Record<string, unknown>).logoSha256 = logoSha256;
+  snapshot.logo.sha256 = logoSha256;
+  snapshot.prepared.manifestFingerprint = createHash("sha256")
+    .update(JSON.stringify({
+      production: snapshot.production,
+      voice: snapshot.voice,
+      plan: snapshot.plan,
+      sourceMatrix: snapshot.sourceMatrix
+    }))
+    .digest("hex");
+
+  const postVariants = snapshot.postProduction.variants as Array<{
+    name: "version-a" | "version-b";
+    sha256: string;
+    byteSize: number;
+  }>;
+  const generation = {
+    ...snapshot.generation,
+    variants: postVariants.map(({ name, sha256, byteSize }) => ({ name, sha256, byteSize }))
+  };
+  snapshot.generation = generation as typeof snapshot.generation;
+
+  const paths = qaReportPaths(episodeDir);
+  await mkdir(paths.visualDirectory, { recursive: true });
+  await Promise.all([
+    writeFile(paths.reportPath, "old-qa", "utf8"),
+    writeFile(paths.comparisonPath, "old-comparison", "utf8"),
+    writeFile(join(paths.visualDirectory, "old-frame.png"), "old-visual", "utf8")
+  ]);
+
+  const serializedFiles = new Map<string, string>([
+    [join(episodeDir, "production.json"), JSON.stringify(snapshot.production)],
+    [join(episodeDir, "voice", "narration.json"), JSON.stringify(snapshot.voice)],
+    [join(episodeDir, "tella", "plan.json"), JSON.stringify(snapshot.plan)],
+    [join(episodeDir, "tella", "state.json"), JSON.stringify(snapshot.tellaState)],
+    [generation.reportPath, JSON.stringify(snapshot.postProduction)],
+    [join(episodeDir, "reports", "prepared.json"), JSON.stringify(snapshot.prepared)],
+    [join(episodeDir, "reports", "source-matrix.md"), snapshot.sourceMatrix],
+    ...snapshot.voice.chunks.map((chunk) => [
+      `${chunk.file}.json`,
+      JSON.stringify(snapshot.voiceCacheMetadata[chunk.id])
+    ] as [string, string])
+  ]);
+  const preparedInspections = new Map<string, PreparedMediaInspection>([
+    ...Object.entries(snapshot.media.sources).map(([id, inspection]) => [
+      join(episodeDir, "source", `${id}.mp4`),
+      inspection
+    ] as [string, PreparedMediaInspection]),
+    ...snapshot.plan.clips.flatMap((clip) => clip.kind === "narration"
+      ? [
+          [clip.masterPath, snapshot.media.masters[clip.id]] as [string, PreparedMediaInspection],
+          ...Object.entries(clip.variants).map(([variant, record]) => [
+            record.platePath,
+            snapshot.media.plates[`${variant}:${clip.id}`]
+          ] as [string, PreparedMediaInspection])
+        ]
+      : [])
+  ]);
+  const artifacts = {
+    contactSheets: { "version-a": "reports/visual/a.png", "version-b": "reports/visual/b.png" },
+    transitionFrames: { "version-a": [], "version-b": [] },
+    tailAudio: { "version-a": "reports/visual/a.wav", "version-b": "reports/visual/b.wav" },
+    contactSampleTimesSeconds: { "version-a": [], "version-b": [] },
+    checkedFrameCount: 58,
+    contentMetrics: {
+      minimumChangedPixelProportion: 0.07,
+      minimumLumaVariance: 100,
+      minimumNormalizedEntropy: 0.1
+    }
+  };
+
+  return {
+    episodeDir,
+    snapshot,
+    generation,
+    paths,
+    artifacts,
+    dependencies: {
+      readFile: async (path: string) => {
+        const value = serializedFiles.get(path);
+        if (value !== undefined) return value;
+        throw Object.assign(new Error(`missing ${path}`), { code: "ENOENT" });
+      },
+      readFileBytes: async (path: string) =>
+        path === snapshot.production.branding.logoPath
+          ? logoBytes
+          : new TextEncoder().encode(path),
+      stat: async () => ({ isFile: () => true, size: 100 }),
+      lstat: async () => ({ isDirectory: () => true, isSymbolicLink: () => false }) as any,
+      realpath: async (path: any) => String(path),
+      runCommand: async () => ({ stdout: "", stderr: "max_volume: -8.0 dB" }),
+      inspectMediaFile: async (_ffprobePath: string, path: string) => preparedInspections.get(path)!,
+      inspectFinalMediaFile: async (_ffprobePath: string, path: string) =>
+        path.endsWith("version-a.mp4")
+          ? snapshot.media.finals["version-a"]
+          : snapshot.media.finals["version-b"],
+      generateVisualArtifacts: async () => artifacts
+    } as unknown as RunGptLiveQaDependencies
+  };
+};
+
 describe("GPT-Live full production QA", () => {
   it("keeps machine success separate from pending human playback", () => {
     const humanPlayback = parseHumanPlaybackReview(undefined, validSnapshot().postProduction);
@@ -525,6 +634,104 @@ describe("GPT-Live full production QA", () => {
         .resolves.toBe("old-visual");
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("aborts when the published generation changes during visual sampling", async () => {
+    const harness = await createQaRunHarness();
+    const changedGeneration = {
+      ...harness.generation,
+      generationId: "33333333-3333-4333-8333-333333333333"
+    };
+    let currentGeneration = harness.generation;
+
+    try {
+      await expect(runGptLiveQa(
+        {
+          episodeDir: harness.episodeDir,
+          env: harness.snapshot.env,
+          ffmpegPath: "ffmpeg",
+          ffprobePath: "ffprobe"
+        },
+        {
+          ...harness.dependencies,
+          validatePublishedGeneration: async () => currentGeneration,
+          generateVisualArtifacts: async () => {
+            currentGeneration = changedGeneration;
+            return harness.artifacts;
+          }
+        }
+      )).rejects.toThrow(/generation.*changed|changed.*generation/i);
+
+      await expect(readFile(harness.paths.reportPath, "utf8")).resolves.toBe("old-qa");
+      await expect(readFile(harness.paths.comparisonPath, "utf8")).resolves.toBe("old-comparison");
+      await expect(readFile(join(harness.paths.visualDirectory, "old-frame.png"), "utf8"))
+        .resolves.toBe("old-visual");
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("aborts when generation hashes change immediately before QA publication", async () => {
+    const harness = await createQaRunHarness();
+    let currentGeneration = harness.generation;
+
+    try {
+      await expect(runGptLiveQa(
+        {
+          episodeDir: harness.episodeDir,
+          env: harness.snapshot.env,
+          ffmpegPath: "ffmpeg",
+          ffprobePath: "ffprobe"
+        },
+        {
+          ...harness.dependencies,
+          validatePublishedGeneration: async () => currentGeneration,
+          writeJsonAtomic: async (path, value) => {
+            currentGeneration = {
+              ...harness.generation,
+              variants: harness.generation.variants.map((variant, index) => index === 0
+                ? { ...variant, sha256: sha("9"), byteSize: variant.byteSize + 1 }
+                : variant)
+            };
+            await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+          }
+        }
+      )).rejects.toThrow(/generation.*changed|changed.*generation/i);
+
+      await expect(readFile(harness.paths.reportPath, "utf8")).resolves.toBe("old-qa");
+      await expect(readFile(harness.paths.comparisonPath, "utf8")).resolves.toBe("old-comparison");
+      await expect(readFile(join(harness.paths.visualDirectory, "old-frame.png"), "utf8"))
+        .resolves.toBe("old-visual");
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("records the stable validated generation identity in qa.json", async () => {
+    const harness = await createQaRunHarness();
+
+    try {
+      await runGptLiveQa(
+        {
+          episodeDir: harness.episodeDir,
+          env: harness.snapshot.env,
+          ffmpegPath: "ffmpeg",
+          ffprobePath: "ffprobe"
+        },
+        {
+          ...harness.dependencies,
+          validatePublishedGeneration: async () => harness.generation
+        }
+      );
+
+      const report = JSON.parse(await readFile(harness.paths.reportPath, "utf8"));
+      expect(report.generation).toEqual({
+        generationId: harness.generation.generationId,
+        variants: harness.generation.variants
+      });
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
     }
   });
 

@@ -505,6 +505,10 @@ const buildSafeQaReport = (
     ...status,
     productionId: GPT_LIVE_CONTENT.id,
     generationId: snapshot.generation.generationId,
+    generation: {
+      generationId: snapshot.generation.generationId,
+      variants: snapshot.generation.variants
+    },
     youtubeUploadEnabled: false,
     checks: {
       editorialAndSourceCoverage: true,
@@ -543,6 +547,24 @@ const buildSafeQaReport = (
       }))
     }
   };
+};
+
+const assertUnchangedPublishedGeneration = (
+  initial: PublishedGenerationValidation,
+  current: PublishedGenerationValidation
+): void => {
+  const sameIdentity =
+    initial.generationId === current.generationId &&
+    initial.variants.length === current.variants.length &&
+    initial.variants.every((variant, index) => {
+      const currentVariant = current.variants[index];
+      return currentVariant?.name === variant.name &&
+        currentVariant.sha256 === variant.sha256 &&
+        currentVariant.byteSize === variant.byteSize;
+    });
+  if (!sameIdentity) {
+    throw new Error("GPT-Live QA aborted: published generation changed during QA");
+  }
 };
 
 export async function runGptLiveQa(
@@ -643,6 +665,8 @@ export async function runGptLiveQa(
       const reportText = `${JSON.stringify(report, null, 2)}\n`;
       assertSafeReportText(reportText, "QA report");
       await writeJsonAtomic(join(stagingDirectory, "qa.json"), report);
+      const currentGeneration = await validatePublishedGeneration(options.episodeDir);
+      assertUnchangedPublishedGeneration(generation, currentGeneration);
       await publishQaReportSet({ stagingDirectory, paths });
       return artifacts;
     }
