@@ -105,10 +105,13 @@ export interface PostProductionVariant {
   readonly outputPath: string;
   readonly inputDurationSeconds: number;
   readonly outputDurationSeconds: number;
+  readonly sha256: string;
+  readonly byteSize: number;
 }
 
 export interface BuildPostProductionManifestOptions {
   readonly productionId: string;
+  readonly generationId: string;
   readonly logoPath: string;
   readonly musicPath: string;
   readonly logoSha256: string;
@@ -130,6 +133,19 @@ export interface FinishGptLiveProductionResult {
   readonly finalPaths: readonly [string, string];
   readonly reportPath: string;
   readonly manifest: ReturnType<typeof buildPostProductionManifest>;
+  readonly cleanupWarnings: readonly string[];
+}
+
+export interface PublishedGenerationPaths {
+  readonly episodeDir: string;
+  readonly finalPaths?: readonly [string, string];
+  readonly reportPath?: string;
+}
+
+export interface PublishedGenerationValidation {
+  readonly generationId: string;
+  readonly finalPaths: readonly [string, string];
+  readonly reportPath: string;
 }
 
 type ReadText = (path: string, encoding: "utf8") => Promise<string>;
@@ -148,6 +164,9 @@ type SampleLogoCornerFrameHash = (
   timeSeconds: number
 ) => Promise<string>;
 type ReadBytes = (path: string) => Promise<Uint8Array>;
+type ValidatePublishedGeneration = (
+  input: string | PublishedGenerationPaths
+) => Promise<PublishedGenerationValidation>;
 interface PathStat {
   isDirectory(): boolean;
   isSymbolicLink(): boolean;
@@ -170,6 +189,7 @@ export interface FinishGptLiveDependencies {
   readonly rm?: typeof defaultRm;
   readonly runCommand?: typeof defaultRunCommand;
   readonly sampleLogoCornerFrameHash?: SampleLogoCornerFrameHash;
+  readonly validatePublishedGeneration?: ValidatePublishedGeneration;
   readonly writeJsonAtomic?: typeof defaultWriteJsonAtomic;
 }
 
@@ -656,9 +676,10 @@ const safeVariantPath = (directory: "exports" | "final", file: string): string =
 
 export function buildPostProductionManifest(options: BuildPostProductionManifestOptions) {
   return {
-    schemaVersion: "0.1.0" as const,
+    schemaVersion: "0.2.0" as const,
     status: "finished" as const,
     productionId: options.productionId,
+    generationId: options.generationId,
     assets: {
       logo: basename(options.logoPath),
       logoSha256: options.logoSha256,
@@ -706,8 +727,128 @@ export function buildPostProductionManifest(options: BuildPostProductionManifest
       inputPath: safeVariantPath("exports", variant.inputPath),
       outputPath: safeVariantPath("final", variant.outputPath),
       inputDurationSeconds: variant.inputDurationSeconds,
-      outputDurationSeconds: variant.outputDurationSeconds
+      outputDurationSeconds: variant.outputDurationSeconds,
+      sha256: variant.sha256,
+      byteSize: variant.byteSize
     }))
+  };
+}
+
+interface PublishedVariantRecord {
+  readonly name: "version-a" | "version-b";
+  readonly outputPath: string;
+  readonly sha256: string;
+  readonly byteSize: number;
+}
+
+interface PublishedGenerationManifest {
+  readonly schemaVersion: "0.2.0";
+  readonly status: "finished";
+  readonly generationId: string;
+  readonly variants: readonly PublishedVariantRecord[];
+}
+
+const parsePublishedGenerationManifest = (text: string): PublishedGenerationManifest => {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error("Invalid published generation manifest JSON");
+  }
+  if (!value || typeof value !== "object") {
+    throw new Error("Invalid published generation manifest");
+  }
+  const candidate = value as Partial<PublishedGenerationManifest>;
+  if (
+    candidate.schemaVersion !== "0.2.0" ||
+    candidate.status !== "finished" ||
+    typeof candidate.generationId !== "string" ||
+    !candidate.generationId ||
+    !Array.isArray(candidate.variants) ||
+    candidate.variants.length !== 2
+  ) {
+    throw new Error("Invalid published generation manifest");
+  }
+  const expected = [
+    { name: "version-a", outputPath: "final/version-a.mp4" },
+    { name: "version-b", outputPath: "final/version-b.mp4" }
+  ] as const;
+  for (const expectation of expected) {
+    const variant = candidate.variants.find(({ name }) => name === expectation.name);
+    if (
+      !variant ||
+      variant.outputPath !== expectation.outputPath ||
+      typeof variant.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(variant.sha256) ||
+      !Number.isSafeInteger(variant.byteSize) ||
+      variant.byteSize <= 0
+    ) {
+      throw new Error(`Invalid published generation manifest variant: ${expectation.name}`);
+    }
+  }
+  return candidate as PublishedGenerationManifest;
+};
+
+export async function validatePublishedGeneration(
+  input: string | PublishedGenerationPaths,
+  dependencies: Pick<
+    FinishGptLiveDependencies,
+    "lstat" | "readFile" | "readFileBytes" | "realpath"
+  > = {}
+): Promise<PublishedGenerationValidation> {
+  const options = typeof input === "string" ? { episodeDir: input } : input;
+  const episodeDir = resolve(options.episodeDir);
+  const finalPaths = options.finalPaths ?? [
+    join(episodeDir, "final", "version-a.mp4"),
+    join(episodeDir, "final", "version-b.mp4")
+  ];
+  const reportPath = options.reportPath ?? join(episodeDir, "reports", "post-production.json");
+  const lstat = dependencies.lstat ?? defaultLstat;
+  const realpath = dependencies.realpath ?? defaultRealpath;
+  const readFile = dependencies.readFile ?? (defaultReadFile as ReadText);
+  const readFileBytes = dependencies.readFileBytes ??
+    ((path: string) => defaultReadFile(path) as Promise<Uint8Array>);
+
+  await validateContainedPaths(
+    episodeDir,
+    [finalPaths[0], finalPaths[1], reportPath],
+    lstat,
+    realpath
+  );
+  let manifestText: string;
+  try {
+    manifestText = await readFile(reportPath, "utf8");
+  } catch (error) {
+    throw new Error(
+      `Published generation manifest is missing or unreadable: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const manifest = parsePublishedGenerationManifest(manifestText);
+
+  await validateContainedPaths(episodeDir, [finalPaths[0], finalPaths[1]], lstat, realpath);
+  for (const [index, name] of (["version-a", "version-b"] as const).entries()) {
+    let bytes: Uint8Array;
+    try {
+      bytes = await readFileBytes(finalPaths[index]!);
+    } catch (error) {
+      throw new Error(
+        `Published generation file is missing: ${name} (${error instanceof Error ? error.message : String(error)})`
+      );
+    }
+    const expected = manifest.variants.find((variant) => variant.name === name)!;
+    const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+    if (bytes.byteLength !== expected.byteSize || actualSha256 !== expected.sha256) {
+      throw new Error(
+        `Published generation mismatch for ${name}: expected ${expected.byteSize} bytes/${expected.sha256}, ` +
+        `received ${bytes.byteLength} bytes/${actualSha256}`
+      );
+    }
+  }
+
+  return {
+    generationId: manifest.generationId,
+    finalPaths: [finalPaths[0], finalPaths[1]],
+    reportPath
   };
 }
 
@@ -752,16 +893,24 @@ interface Promotion {
 const isMissingPathError = (error: unknown): boolean =>
   (error as NodeJS.ErrnoException).code === "ENOENT";
 
-const promoteFilesAtomically = async (
-  promotions: readonly Promotion[],
+const safeCleanupPath = (episodeDir: string, path: string): string =>
+  relative(episodeDir, path).split(sep).join("/");
+
+const publishGenerationAtomically = async (
+  episodeDir: string,
+  mediaPromotions: readonly Promotion[],
+  markerPromotion: Promotion,
+  commitMarker: () => Promise<void>,
   copyFile: typeof defaultCopyFile,
   rename: typeof defaultRename,
   rm: typeof defaultRm
-): Promise<void> => {
+): Promise<string[]> => {
+  const allPromotions = [...mediaPromotions, markerPromotion];
   const rollbackCopies = new Set<Promotion>();
   const promoted: Promotion[] = [];
+  let markerAttempted = false;
   try {
-    for (const promotion of promotions) {
+    for (const promotion of allPromotions) {
       await rm(promotion.rollbackPath, { force: true });
       try {
         await copyFile(promotion.targetPath, promotion.rollbackPath);
@@ -770,13 +919,19 @@ const promoteFilesAtomically = async (
         if (!isMissingPathError(error)) throw error;
       }
     }
-    for (const promotion of promotions) {
+    for (const promotion of mediaPromotions) {
       await rename(promotion.stagedPath, promotion.targetPath);
       promoted.push(promotion);
     }
+    markerAttempted = true;
+    await commitMarker();
   } catch (error) {
     const failedRestorations: Array<{ promotion: Promotion; error: unknown }> = [];
-    for (const promotion of promoted.reverse()) {
+    const restorations = [
+      ...(markerAttempted ? [markerPromotion] : []),
+      ...promoted.reverse()
+    ];
+    for (const promotion of restorations) {
       try {
         if (rollbackCopies.has(promotion)) {
           await rename(promotion.rollbackPath, promotion.targetPath);
@@ -807,9 +962,18 @@ const promoteFilesAtomically = async (
     throw error;
   }
 
+  const cleanupWarnings: string[] = [];
   for (const promotion of rollbackCopies) {
-    await rm(promotion.rollbackPath, { force: true });
+    try {
+      await rm(promotion.rollbackPath, { force: true });
+    } catch (error) {
+      cleanupWarnings.push(
+        `${safeCleanupPath(episodeDir, promotion.rollbackPath)}: ` +
+        `${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
+  return cleanupWarnings;
 };
 
 export async function finishGptLiveProduction(
@@ -837,6 +1001,9 @@ export async function finishGptLiveProduction(
   const writeJsonAtomic = dependencies.writeJsonAtomic ?? defaultWriteJsonAtomic;
   const inspect = dependencies.inspectFinalMediaFile ??
     ((ffprobePath: string, file: string) => inspectFinalMediaFile(ffprobePath, file));
+  const validateGeneration = dependencies.validatePublishedGeneration ??
+    ((input: string | PublishedGenerationPaths) =>
+      validatePublishedGeneration(input, { lstat, readFile, readFileBytes, realpath }));
 
   const ffmpegPath = requireConfiguredValue(options.ffmpegPath, "ffmpeg path");
   const ffprobePath = requireConfiguredValue(options.ffprobePath, "ffprobe path");
@@ -911,6 +1078,8 @@ export async function finishGptLiveProduction(
     ...definitions.map((definition) => `${definition.outputPath}.rollback-${transactionId}`),
     `${reportPath}.rollback-${transactionId}`
   ];
+  const cleanupWarnings: string[] = [];
+  let generationCommitted = false;
 
   try {
     await validateContainedPaths(
@@ -1007,44 +1176,25 @@ export async function finishGptLiveProduction(
       logoEvidence.push({ name: definition.name, samples });
     }
 
-    const variants: PostProductionVariant[] = definitions.map((definition, index) => ({
+    const variantMetadata = definitions.map((definition, index) => ({
       ...definition,
       inputDurationSeconds: inputInspections[index]!.durationSeconds,
       outputDurationSeconds: outputInspections[index]!.durationSeconds
     }));
-    const manifest = buildPostProductionManifest({
-      productionId: plan.productionId,
-      logoPath,
-      musicPath,
-      logoSha256,
-      duckIntervals,
-      sourceGains: sourceResults,
-      logoEvidence,
-      variants
-    });
-    await validateContainedPaths(
-      options.episodeDir,
-      [reportsDirectory, stagedReportPath, reportPath],
-      lstat,
-      realpath
-    );
-    await writeJsonAtomic(stagedReportPath, manifest);
-
-    const promotions: Promotion[] = [
-      ...definitions.map((definition, index) => ({
+    const mediaPromotions: Promotion[] = definitions.map((definition, index) => ({
         stagedPath: stagedPaths[index]!,
         targetPath: definition.outputPath,
         rollbackPath: rollbackPaths[index]!
-      })),
-      {
-        stagedPath: stagedReportPath,
-        targetPath: reportPath,
-        rollbackPath: rollbackPaths[2]!
-      }
-    ];
+      }));
+    const markerPromotion: Promotion = {
+      stagedPath: stagedReportPath,
+      targetPath: reportPath,
+      rollbackPath: rollbackPaths[2]!
+    };
+    let manifest: ReturnType<typeof buildPostProductionManifest> | undefined;
     await validateContainedPaths(
       options.episodeDir,
-      promotions.flatMap(({ stagedPath, targetPath, rollbackPath }) => [
+      [...mediaPromotions, markerPromotion].flatMap(({ stagedPath, targetPath, rollbackPath }) => [
         stagedPath,
         targetPath,
         rollbackPath
@@ -1052,15 +1202,77 @@ export async function finishGptLiveProduction(
       lstat,
       realpath
     );
-    await promoteFilesAtomically(promotions, copyFile, rename, rm);
+    cleanupWarnings.push(
+      ...await publishGenerationAtomically(
+        options.episodeDir,
+        mediaPromotions,
+        markerPromotion,
+        async () => {
+          await validateContainedPaths(
+            options.episodeDir,
+            [finalDirectory, ...finalPaths, reportsDirectory, stagedReportPath, reportPath],
+            lstat,
+            realpath
+          );
+          const canonicalBytes = await Promise.all(finalPaths.map((path) => readFileBytes(path)));
+          const variants: PostProductionVariant[] = variantMetadata.map((variant, index) => ({
+            ...variant,
+            sha256: createHash("sha256").update(canonicalBytes[index]!).digest("hex"),
+            byteSize: canonicalBytes[index]!.byteLength
+          }));
+          manifest = buildPostProductionManifest({
+            productionId: plan.productionId,
+            generationId: transactionId,
+            logoPath,
+            musicPath,
+            logoSha256,
+            duckIntervals,
+            sourceGains: sourceResults,
+            logoEvidence,
+            variants
+          });
+          await writeJsonAtomic(stagedReportPath, manifest);
+          await validateContainedPaths(
+            options.episodeDir,
+            [stagedReportPath, reportPath],
+            lstat,
+            realpath
+          );
+          await rename(stagedReportPath, reportPath);
+          const validation = await validateGeneration(options.episodeDir);
+          if (validation.generationId !== transactionId) {
+            throw new Error(
+              `Published generation validator returned stale generation: ${validation.generationId}`
+            );
+          }
+          generationCommitted = true;
+        },
+        copyFile,
+        rename,
+        rm
+      )
+    );
+    if (!manifest) throw new Error("Post-production manifest was not committed");
 
     return {
       episodeDir: options.episodeDir,
       finalPaths: [definitions[0]!.outputPath, definitions[1]!.outputPath],
       reportPath,
-      manifest
+      manifest,
+      cleanupWarnings
     };
   } finally {
-    await Promise.all(temporaryPaths.map((path) => rm(path, { force: true })));
+    for (const path of temporaryPaths) {
+      try {
+        await rm(path, { force: true });
+      } catch (error) {
+        if (generationCommitted) {
+          cleanupWarnings.push(
+            `${safeCleanupPath(options.episodeDir, path)}: ` +
+            `${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+      }
+    }
   }
 }

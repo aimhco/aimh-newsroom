@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   mkdtemp,
   mkdir,
@@ -25,6 +26,7 @@ import {
   deriveSourceDuckIntervals,
   finishGptLiveProduction,
   parseEbur128IntegratedLufs,
+  validatePublishedGeneration,
   type FinalMediaInspection,
   type FinishPlan
 } from "../src/production/gptLive/finish";
@@ -305,6 +307,42 @@ describe("GPT-Live post-production publication", () => {
     ffprobePath: "ffprobe"
   });
 
+  const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
+
+  const writeGenerationMarker = async (
+    episodeDir: string,
+    expectedA: string,
+    expectedB: string,
+    generationId = "00000000-0000-4000-8000-000000000000"
+  ) => {
+    const report = {
+      schemaVersion: "0.2.0",
+      status: "finished",
+      productionId: "test-production",
+      generationId,
+      variants: [
+        {
+          name: "version-a",
+          outputPath: "final/version-a.mp4",
+          sha256: sha256(expectedA),
+          byteSize: Buffer.byteLength(expectedA)
+        },
+        {
+          name: "version-b",
+          outputPath: "final/version-b.mp4",
+          sha256: sha256(expectedB),
+          byteSize: Buffer.byteLength(expectedB)
+        }
+      ]
+    };
+    await writeFile(
+      join(episodeDir, "reports", "post-production.json"),
+      `${JSON.stringify(report, null, 2)}\n`,
+      "utf8"
+    );
+    return report;
+  };
+
   it.each([
     {
       name: "exports directory",
@@ -381,6 +419,7 @@ describe("GPT-Live post-production publication", () => {
   it("creates a secret-free manifest with only safe relative asset and media paths", () => {
     const manifest = buildPostProductionManifest({
       productionId: "test-production",
+      generationId: "00000000-0000-4000-8000-000000000000",
       logoPath: "/Users/editor/private/logo.png",
       musicPath: "/Users/editor/private/Body_Komorebi_Futuremono.mp3",
       logoSha256: "a".repeat(64),
@@ -406,21 +445,27 @@ describe("GPT-Live post-production publication", () => {
           inputPath: "/private/episode/exports/tella-a.mp4",
           outputPath: "/private/episode/final/version-a.mp4",
           inputDurationSeconds: 10.75,
-          outputDurationSeconds: 10.75
+          outputDurationSeconds: 10.75,
+          sha256: "f".repeat(64),
+          byteSize: 1000
         },
         {
           name: "version-b",
           inputPath: "/private/episode/exports/tella-b.mp4",
           outputPath: "/private/episode/final/version-b.mp4",
           inputDurationSeconds: 10.75,
-          outputDurationSeconds: 10.75
+          outputDurationSeconds: 10.75,
+          sha256: "9".repeat(64),
+          byteSize: 1001
         }
       ]
     });
     const serialized = JSON.stringify(manifest);
 
     expect(manifest).toMatchObject({
+      schemaVersion: "0.2.0",
       status: "finished",
+      generationId: "00000000-0000-4000-8000-000000000000",
       assets: {
         logo: "logo.png",
         logoSha256: "a".repeat(64),
@@ -446,7 +491,214 @@ describe("GPT-Live post-production publication", () => {
       { inputPath: "exports/tella-a.mp4", outputPath: "final/version-a.mp4" },
       { inputPath: "exports/tella-b.mp4", outputPath: "final/version-b.mp4" }
     ]);
+    expect(manifest.variants.map(({ sha256, byteSize }) => ({ sha256, byteSize }))).toEqual([
+      { sha256: "f".repeat(64), byteSize: 1000 },
+      { sha256: "9".repeat(64), byteSize: 1001 }
+    ]);
     expect(serialized).not.toMatch(/\/Users|\/private|secret|token|api.?key/i);
+  });
+
+  it("exports the Task 10 QA validator for current generation and explicit paths", async () => {
+    const episodeDir = await createContainedEpisode();
+    const versionAPath = join(episodeDir, "final", "version-a.mp4");
+    const versionBPath = join(episodeDir, "final", "version-b.mp4");
+    const reportPath = join(episodeDir, "reports", "post-production.json");
+    await writeFile(versionAPath, "current-a", "utf8");
+    await writeFile(versionBPath, "current-b", "utf8");
+    await writeGenerationMarker(episodeDir, "current-a", "current-b");
+
+    try {
+      await expect(validatePublishedGeneration(episodeDir)).resolves.toMatchObject({
+        generationId: "00000000-0000-4000-8000-000000000000"
+      });
+      await expect(
+        validatePublishedGeneration({
+          episodeDir,
+          finalPaths: [versionAPath, versionBPath],
+          reportPath
+        })
+      ).resolves.toMatchObject({
+        finalPaths: [versionAPath, versionBPath]
+      });
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: "new A with old B and old report",
+      arrange: async (episodeDir: string) => {
+        await writeFile(join(episodeDir, "final", "version-a.mp4"), "old-a", "utf8");
+        await writeFile(join(episodeDir, "final", "version-b.mp4"), "old-b", "utf8");
+        await writeGenerationMarker(episodeDir, "old-a", "old-b", "old-generation");
+        await writeFile(join(episodeDir, "final", "version-a.mp4"), "new-a", "utf8");
+      }
+    },
+    {
+      name: "new A with old B and new report",
+      arrange: async (episodeDir: string) => {
+        await writeFile(join(episodeDir, "final", "version-a.mp4"), "new-a", "utf8");
+        await writeFile(join(episodeDir, "final", "version-b.mp4"), "old-b", "utf8");
+        await writeGenerationMarker(episodeDir, "new-a", "new-b", "new-generation");
+      }
+    },
+    {
+      name: "tampered canonical file",
+      arrange: async (episodeDir: string) => {
+        await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
+        await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
+        await writeGenerationMarker(episodeDir, "current-a", "current-b");
+        await writeFile(join(episodeDir, "final", "version-b.mp4"), "tampered-b", "utf8");
+      }
+    },
+    {
+      name: "missing commit marker",
+      arrange: async (episodeDir: string) => {
+        await rm(join(episodeDir, "reports", "post-production.json"));
+      }
+    }
+  ])("rejects $name", async ({ arrange }) => {
+    const episodeDir = await createContainedEpisode();
+    await arrange(episodeDir);
+    try {
+      await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(/generation|manifest/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects symlinked canonical generation files", async () => {
+    const episodeDir = await createContainedEpisode();
+    const outsideDir = await mkdtemp(join(tmpdir(), "gpt-live-generation-outside-"));
+    const outsideFile = join(outsideDir, "outside.mp4");
+    await writeFile(outsideFile, "outside", "utf8");
+    await rm(join(episodeDir, "final", "version-a.mp4"));
+    await symlink(outsideFile, join(episodeDir, "final", "version-a.mp4"));
+
+    try {
+      await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(/symlink/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it("promotes A and B before hashing and atomically publishing the manifest last", async () => {
+    const transactionId = "00000000-0000-4000-8000-000000000000";
+    const episodeDir = await createContainedEpisode();
+    const events: string[] = [];
+    const validateGeneration = vi.fn(async () => {
+      events.push("validate");
+      return {
+        generationId: transactionId,
+        finalPaths: [
+          join(episodeDir, "final", "version-a.mp4"),
+          join(episodeDir, "final", "version-b.mp4")
+        ] as const,
+        reportPath: join(episodeDir, "reports", "post-production.json")
+      };
+    });
+
+    try {
+      await finishGptLiveProduction(finishOptions(episodeDir), {
+        access: async () => undefined,
+        randomUUID: () => transactionId,
+        readFileBytes: async (path) => {
+          if (path === "/assets/logo.png") return new Uint8Array([1, 2, 3]);
+          if (path.endsWith("version-a.mp4")) events.push("hash-a");
+          if (path.endsWith("version-b.mp4")) events.push("hash-b");
+          return readFile(path);
+        },
+        inspectFinalMediaFile: async () => validInspection(10.75),
+        measureIntervalLoudness: async () => -23,
+        sampleLogoCornerFrameHash: async (_ffmpeg, path) =>
+          path.includes("exports") ? "a".repeat(64) : "b".repeat(64),
+        runCommand: async (_command, args) => {
+          await writeFile(args.at(-1)!, "new-final", "utf8");
+          return { stdout: "", stderr: "" };
+        },
+        writeJsonAtomic: async (path, value) => {
+          events.push("report-write");
+          await writeFile(path, `${JSON.stringify(value)}\n`, "utf8");
+        },
+        rename: async (from, to) => {
+          if (String(from).includes("version-a.tmp-")) events.push("publish-a");
+          if (String(from).includes("version-b.tmp-")) events.push("publish-b");
+          if (String(from).includes("post-production.tmp-")) events.push("publish-report");
+          await fsRename(from, to);
+        },
+        validatePublishedGeneration: validateGeneration
+      });
+
+      expect(events).toEqual([
+        "publish-a",
+        "publish-b",
+        "hash-a",
+        "hash-b",
+        "report-write",
+        "publish-report",
+        "validate"
+      ]);
+      expect(validateGeneration).toHaveBeenCalledWith(episodeDir);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports cleanup debt after a committed generation without failing success", async () => {
+    const transactionId = "00000000-0000-4000-8000-000000000000";
+    const episodeDir = await createContainedEpisode();
+    let markerPublished = false;
+    let cleanupFailed = false;
+
+    try {
+      const result = await finishGptLiveProduction(finishOptions(episodeDir), {
+        access: async () => undefined,
+        randomUUID: () => transactionId,
+        readFileBytes: async (path) =>
+          path === "/assets/logo.png" ? new Uint8Array([1, 2, 3]) : readFile(path),
+        inspectFinalMediaFile: async () => validInspection(10.75),
+        measureIntervalLoudness: async () => -23,
+        sampleLogoCornerFrameHash: async (_ffmpeg, path) =>
+          path.includes("exports") ? "a".repeat(64) : "b".repeat(64),
+        runCommand: async (_command, args) => {
+          await writeFile(args.at(-1)!, "new-final", "utf8");
+          return { stdout: "", stderr: "" };
+        },
+        rename: async (from, to) => {
+          await fsRename(from, to);
+          if (String(from).includes("post-production.tmp-")) markerPublished = true;
+        },
+        rm: async (path, options) => {
+          if (
+            markerPublished &&
+            !cleanupFailed &&
+            String(path).includes("version-a.mp4.rollback-")
+          ) {
+            cleanupFailed = true;
+            throw new Error("injected committed cleanup failure");
+          }
+          await rm(path, options);
+        },
+        validatePublishedGeneration: async () => ({
+          generationId: transactionId,
+          finalPaths: [
+            join(episodeDir, "final", "version-a.mp4"),
+            join(episodeDir, "final", "version-b.mp4")
+          ] as const,
+          reportPath: join(episodeDir, "reports", "post-production.json")
+        })
+      });
+
+      expect(result.cleanupWarnings).toHaveLength(1);
+      expect(result.cleanupWarnings[0]).toContain("final/version-a.mp4.rollback-");
+      expect(result.cleanupWarnings[0]).not.toContain(episodeDir);
+      expect(await readFile(join(episodeDir, "reports", "post-production.json"), "utf8"))
+        .toContain(transactionId);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
   });
 
   it("does not replace an existing final when rendering fails", async () => {
