@@ -856,13 +856,19 @@ describe("GPT-Live preparation CLI", () => {
   it("prints the root comparison report separately from visual assets", () => {
     expect(formatGptLiveCliResult({
       episodeDir: "/project/episodes/custom",
-      ok: true,
+      machineOk: true,
+      humanPlayback: { status: "pending", note: "Playback required." },
+      readyForUpload: false,
+      ok: false,
       reportPath: "/project/episodes/custom/reports/qa.json",
       comparisonPath: "/project/episodes/custom/reports/comparison.md",
       visualDirectory: "/project/episodes/custom/reports/visual"
     })).toEqual([
       "episode: /project/episodes/custom",
-      "ok: true",
+      "machineOk: true",
+      "humanPlayback: pending",
+      "readyForUpload: false",
+      "ok: false",
       "qa: /project/episodes/custom/reports/qa.json",
       "comparison: /project/episodes/custom/reports/comparison.md",
       "visual: /project/episodes/custom/reports/visual"

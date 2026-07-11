@@ -1,4 +1,13 @@
 import { createHash } from "node:crypto";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename as fsRename,
+  rm,
+  writeFile
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { GPT_LIVE_CONTENT } from "../src/production/gptLive/content";
@@ -12,13 +21,22 @@ import type { MediaInspection } from "../src/production/gptLive/mediaInspection"
 import { GPT_LIVE_SCENES, sceneStyle } from "../src/production/gptLive/motion/sceneStyle";
 import {
   clearStaleQaOutputs,
+  deriveQaStatus,
+  parseHumanPlaybackReview,
   qaReportPaths,
   runGptLiveQa,
   validateGptLiveQaSnapshot,
   type GptLiveQaSnapshot
 } from "../src/production/gptLive/qa";
 import type { QaProduction } from "../src/production/gptLive/qa";
+import { publishQaReportSet } from "../src/production/gptLive/qa/publication";
+import { withValidatedQaArtifactPaths } from "../src/production/gptLive/qa/paths";
+import {
+  assertMeaningfulFrameContent,
+  renderComparisonMarkdown
+} from "../src/production/gptLive/qa/visual";
 import { buildTellaPlan } from "../src/production/gptLive/tellaPlan";
+import { buildVoiceCacheKey } from "../src/voice/elevenLabsAdapter";
 
 const EPISODE_DIR = "/episode";
 const sha = (character: string): string => character.repeat(64);
@@ -85,6 +103,11 @@ const validSnapshot = (): GptLiveQaSnapshot => {
     branding: structuredClone(GPT_LIVE_CONTENT.branding),
     musicPath: GPT_LIVE_CONTENT.musicPath
   }) as unknown as QaProduction;
+  const env = {
+    YOUTUBE_UPLOAD_ENABLED: "false",
+    ELEVENLABS_VOICE_ID: "qa-test-voice",
+    ELEVENLABS_MODEL_ID: "eleven_multilingual_v2"
+  };
   const voice = {
     provider: "elevenlabs" as const,
     chunks: GPT_LIVE_CONTENT.narration.map((narration) => ({
@@ -201,7 +224,7 @@ const validSnapshot = (): GptLiveQaSnapshot => {
 
   return {
     episodeDir: EPISODE_DIR,
-    env: { YOUTUBE_UPLOAD_ENABLED: "false" },
+    env,
     generation: {
       generationId: postProduction.generationId,
       finalPaths: [
@@ -222,7 +245,11 @@ const validSnapshot = (): GptLiveQaSnapshot => {
     voiceCacheMetadata: Object.fromEntries(
       voice.chunks.map((chunk) => [
         chunk.id,
-        { schemaVersion: "0.1.0", cacheKey: sha("f"), modelId: "eleven_multilingual_v2" }
+        {
+          schemaVersion: "0.1.0",
+          cacheKey: buildVoiceCacheKey({ text: chunk.text, env }),
+          modelId: "eleven_multilingual_v2"
+        }
       ])
     ),
     plan,
@@ -259,13 +286,70 @@ const validSnapshot = (): GptLiveQaSnapshot => {
       GPT_LIVE_SCENES.map((scene) => ({ variant, scene, ...sceneStyle(variant, scene).reservedTopRight }))
     ),
     tailAudio: {
-      "version-a": { tailPeakDb: -2, endPeakDb: -8 },
-      "version-b": { tailPeakDb: -2, endPeakDb: -8 }
+      "version-a": { tailPeakDb: -2, endPeakDb: -8, tailSignalPresent: true },
+      "version-b": { tailPeakDb: -2, endPeakDb: -8, tailSignalPresent: true }
+    },
+    observedIntegrityHashes: {
+      sources: Object.fromEntries(
+        GPT_LIVE_CONTENT.timeline
+          .filter((item) => item.kind === "source_clip")
+          .map((item) => [item.id, sha("1")])
+      ),
+      voice: Object.fromEntries(voice.chunks.map((chunk) => [chunk.id, sha("2")]))
     }
-  };
+  } as unknown as GptLiveQaSnapshot;
 };
 
 describe("GPT-Live full production QA", () => {
+  it("keeps machine success separate from pending human playback", () => {
+    const humanPlayback = parseHumanPlaybackReview(undefined);
+    expect(humanPlayback).toEqual({
+      status: "pending",
+      note: "Full real-time listening and viewing is required before upload."
+    });
+    expect(deriveQaStatus(humanPlayback)).toEqual({
+      machineOk: true,
+      humanPlayback,
+      readyForUpload: false,
+      ok: false
+    });
+  });
+
+  it("accepts an explicit safe human playback status file", () => {
+    const humanPlayback = parseHumanPlaybackReview(JSON.stringify({
+      schemaVersion: "0.1.0",
+      status: "passed",
+      note: "Full A/B playback reviewed."
+    }));
+    expect(deriveQaStatus(humanPlayback)).toMatchObject({
+      machineOk: true,
+      humanPlayback: { status: "passed" },
+      readyForUpload: true,
+      ok: true
+    });
+  });
+
+  it.each([
+    {
+      name: "all black plus one white pixel",
+      metrics: { changedPixelProportion: 0.000001, lumaVariance: 0.05, normalizedEntropy: 0.0001 }
+    },
+    {
+      name: "black content with only an excluded logo",
+      metrics: { changedPixelProportion: 0, lumaVariance: 0, normalizedEntropy: 0 }
+    }
+  ])("rejects $name as a blank sampled frame", ({ metrics }) => {
+    expect(() => assertMeaningfulFrameContent(metrics, "sample.png")).toThrow(/blank|content/i);
+  });
+
+  it("accepts representative real-frame content metrics", () => {
+    expect(() => assertMeaningfulFrameContent({
+      changedPixelProportion: 0.07,
+      lumaVariance: 1156,
+      normalizedEntropy: 0.14
+    }, "sample.png")).not.toThrow();
+  });
+
   it("writes comparison.md at the reports root and identifies the stale visual path", () => {
     expect(qaReportPaths(EPISODE_DIR)).toEqual({
       reportPath: join(EPISODE_DIR, "reports", "qa.json"),
@@ -289,6 +373,134 @@ describe("GPT-Live full production QA", () => {
 
   it("accepts a complete editorial, media, Tella, and A/B snapshot", () => {
     expect(() => validateGptLiveQaSnapshot(validSnapshot())).not.toThrow();
+  });
+
+  it.each([
+    {
+      name: "master and A video IDs",
+      mutate: (state: Record<string, any>) => {
+        state.variantVideoIds.dynamic_editorial = state.masterVideoId;
+      }
+    },
+    {
+      name: "base source IDs",
+      mutate: (state: Record<string, any>) => {
+        state.sourceIds.narration_hook = state.sourceIds.clip_translation;
+      }
+    },
+    {
+      name: "plate source IDs",
+      mutate: (state: Record<string, any>) => {
+        state.sourceIds["plate:dynamic_editorial:narration_full_duplex"] =
+          state.sourceIds["plate:dynamic_editorial:narration_hook"];
+      }
+    },
+    {
+      name: "variant clip IDs",
+      mutate: (state: Record<string, any>) => {
+        state.variantClipIds.dynamic_editorial.narration_hook =
+          state.variantClipIds.dynamic_editorial.clip_translation;
+      }
+    },
+    {
+      name: "layout IDs",
+      mutate: (state: Record<string, any>) => {
+        state.layoutIds["dynamic_editorial:narration_full_duplex"] =
+          state.layoutIds["dynamic_editorial:narration_hook"];
+      }
+    }
+  ])("rejects duplicate Tella $name", ({ mutate }) => {
+    const snapshot = validSnapshot();
+    mutate(snapshot.tellaState as Record<string, any>);
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/unique|distinct|duplicate/i);
+  });
+
+  it("rejects an outside serialized path before any inspector is called", async () => {
+    const snapshot = validSnapshot();
+    const plan = structuredClone(snapshot.plan);
+    const narration = plan.clips.find((clip) => clip.kind === "narration")!;
+    if (narration.kind === "narration") {
+      (narration as unknown as { masterPath: string }).masterPath = "/outside/master.mp4";
+    }
+    const inspector = vi.fn(async () => undefined);
+
+    await expect(withValidatedQaArtifactPaths({
+      episodeDir: EPISODE_DIR,
+      production: snapshot.production,
+      voice: snapshot.voice,
+      plan,
+      generation: snapshot.generation
+    }, {}, inspector)).rejects.toThrow(/outside|escape|path/i);
+    expect(inspector).not.toHaveBeenCalled();
+  });
+
+  it("restores prior complete QA evidence when report-marker promotion fails", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-qa-publish-"));
+    const paths = qaReportPaths(episodeDir);
+    const stagingDirectory = join(episodeDir, "reports", ".qa-staging-test");
+    await Promise.all([
+      mkdir(paths.visualDirectory, { recursive: true }),
+      mkdir(join(stagingDirectory, "visual"), { recursive: true })
+    ]);
+    await Promise.all([
+      writeFile(paths.reportPath, "old-marker", "utf8"),
+      writeFile(paths.comparisonPath, "old-comparison", "utf8"),
+      writeFile(join(paths.visualDirectory, "old.png"), "old-visual", "utf8"),
+      writeFile(join(stagingDirectory, "qa.json"), "new-marker", "utf8"),
+      writeFile(join(stagingDirectory, "comparison.md"), "new-comparison", "utf8"),
+      writeFile(join(stagingDirectory, "visual", "new.png"), "new-visual", "utf8")
+    ]);
+
+    try {
+      await expect(publishQaReportSet({ stagingDirectory, paths }, {
+        rename: async (from, to) => {
+          if (from === join(stagingDirectory, "qa.json")) throw new Error("late marker failure");
+          await fsRename(from, to);
+        }
+      })).rejects.toThrow("late marker failure");
+      await expect(readFile(paths.reportPath, "utf8")).resolves.toBe("old-marker");
+      await expect(readFile(paths.comparisonPath, "utf8")).resolves.toBe("old-comparison");
+      await expect(readFile(join(paths.visualDirectory, "old.png"), "utf8"))
+        .resolves.toBe("old-visual");
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a mismatched canonical ElevenLabs cache key", () => {
+    const snapshot = validSnapshot();
+    snapshot.voiceCacheMetadata.narration_hook!.cacheKey = sha("f");
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/cache provenance|cache key/i);
+  });
+
+  it("requires observed source and voice integrity hashes", () => {
+    const snapshot = validSnapshot();
+    (snapshot as any).observedIntegrityHashes.sources.clip_translation = "invalid";
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/observed integrity hash/i);
+  });
+
+  it("states machine review and the remaining human audio limitation", () => {
+    const comparison = renderComparisonMarkdown({
+      artifacts: {
+        contactSheets: { "version-a": "a.png", "version-b": "b.png" },
+        transitionFrames: { "version-a": ["a/1.png"], "version-b": ["b/1.png"] },
+        tailAudio: { "version-a": "a.wav", "version-b": "b.wav" },
+        contactSampleTimesSeconds: { "version-a": [], "version-b": [] },
+        checkedFrameCount: 58,
+        contentMetrics: {
+          minimumChangedPixelProportion: 0.07,
+          minimumLumaVariance: 100,
+          minimumNormalizedEntropy: 0.1
+        }
+      },
+      durations: { "version-a": 150, "version-b": 150 },
+      durationDeltaSeconds: 0,
+      sourceIntervals: [],
+      sourceOutputLufs: []
+    });
+    expect(comparison).toContain("Machine review complete");
+    expect(comparison).toContain("cannot prove CTA narration");
+    expect(comparison).toContain("Full real-time listening");
   });
 
   it("rejects a source claim without a source", () => {
@@ -376,9 +588,10 @@ describe("GPT-Live full production QA", () => {
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/unsafe URL field/i);
   });
 
-  it("rejects a truncated or silent final audio tail", () => {
+  it("rejects a final without tail signal", () => {
     const snapshot = validSnapshot();
     snapshot.tailAudio["version-a"].endPeakDb = Number.NEGATIVE_INFINITY;
-    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/truncated|silent/i);
+    snapshot.tailAudio["version-a"].tailSignalPresent = false;
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/tail signal/i);
   });
 });

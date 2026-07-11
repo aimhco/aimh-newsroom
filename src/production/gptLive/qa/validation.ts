@@ -15,6 +15,7 @@ import { GPT_LIVE_SCENES } from "../motion/sceneStyle";
 import { assertPlateContract } from "../renderPlates";
 import { buildTellaPlan } from "../tellaPlan";
 import type { GptLiveProduction } from "../types";
+import { buildSpeechRequestBody, buildVoiceCacheKey } from "../../../voice/elevenLabsAdapter";
 import type {
   GptLiveQaSnapshot,
   QaPreparedMediaInspection,
@@ -66,6 +67,11 @@ const keysExactly = (
 
 const assertFile = (snapshot: GptLiveQaSnapshot, path: string, label: string): void => {
   if (snapshot.filePresence[path] !== true) fail(`${label} is missing`);
+};
+
+const assertUniqueValues = (record: Record<string, unknown>, label: string): void => {
+  const values = Object.values(record);
+  if (new Set(values).size !== values.length) fail(`${label} IDs must be unique`);
 };
 
 const assertGenericVideo = (
@@ -178,11 +184,13 @@ const validateVoice = (snapshot: GptLiveQaSnapshot): void => {
     const metadataPath = `${expectedFile}.json`;
     assertFile(snapshot, metadataPath, `voice cache provenance ${narration.id}`);
     const metadata = snapshot.voiceCacheMetadata[narration.id];
+    const expectedCacheKey = buildVoiceCacheKey({ text: narration.text, env: snapshot.env });
+    const expectedModelId = String(buildSpeechRequestBody(narration.text, snapshot.env).model_id);
     if (
       !metadata ||
       metadata.schemaVersion !== "0.1.0" ||
-      !HASH.test(metadata.cacheKey) ||
-      !metadata.modelId.trim()
+      metadata.cacheKey !== expectedCacheKey ||
+      metadata.modelId !== expectedModelId
     ) {
       fail(`invalid voice cache provenance: ${narration.id}`);
     }
@@ -245,14 +253,21 @@ const validateTellaState = (snapshot: GptLiveQaSnapshot): void => {
   scanUnsafeTellaState(snapshot.tellaState);
   const state = requireRecord(snapshot.tellaState, "Tella state");
   if (typeof state.masterVideoId !== "string" || !state.masterVideoId) fail("Tella master video ID is missing");
-  keysExactly(state.variantVideoIds, PLATE_VARIANTS, "Tella variant video IDs");
+  const variantVideoIds = keysExactly(state.variantVideoIds, PLATE_VARIANTS, "Tella variant video IDs");
+  assertUniqueValues(variantVideoIds, "Tella variant video");
+  if (Object.values(variantVideoIds).includes(state.masterVideoId)) {
+    fail("Tella master and A/B video IDs must be distinct");
+  }
 
   const timelineIds = snapshot.plan.clips.map((clip) => clip.id);
   const plateSourceKeys = GPT_LIVE_CONTENT.narration.flatMap((narration) =>
     PLATE_VARIANTS.map((variant) => `plate:${variant}:${narration.id}`)
   );
-  keysExactly(state.sourceIds, [...timelineIds, ...plateSourceKeys], "Tella source IDs");
-  keysExactly(state.clipIds, timelineIds, "Tella base clip IDs");
+  const sourceIds = keysExactly(state.sourceIds, [...timelineIds, ...plateSourceKeys], "Tella source IDs");
+  assertUniqueValues(Object.fromEntries(timelineIds.map((key) => [key, sourceIds[key]])), "Tella base source");
+  assertUniqueValues(Object.fromEntries(plateSourceKeys.map((key) => [key, sourceIds[key]])), "Tella plate source");
+  const baseClipIds = keysExactly(state.clipIds, timelineIds, "Tella base clip IDs");
+  assertUniqueValues(baseClipIds, "Tella base clip");
   const variantClipIds = keysExactly(
     state.variantClipIds,
     PLATE_VARIANTS,
@@ -260,12 +275,14 @@ const validateTellaState = (snapshot: GptLiveQaSnapshot): void => {
     false
   );
   for (const variant of PLATE_VARIANTS) {
-    keysExactly(variantClipIds[variant], timelineIds, `Tella ${variant} clip IDs`);
+    const clips = keysExactly(variantClipIds[variant], timelineIds, `Tella ${variant} clip IDs`);
+    assertUniqueValues(clips, `Tella ${variant} clip`);
   }
   const layoutKeys = GPT_LIVE_CONTENT.narration.flatMap((narration) =>
     PLATE_VARIANTS.map((variant) => `${variant}:${narration.id}`)
   );
-  keysExactly(state.layoutIds, layoutKeys, "Tella layout IDs");
+  const layoutIds = keysExactly(state.layoutIds, layoutKeys, "Tella layout IDs");
+  assertUniqueValues(layoutIds, "Tella layout");
   const exportPaths = keysExactly(state.exportPaths, PLATE_VARIANTS, "Tella export paths");
   exact(exportPaths, {
     dynamic_editorial: join(snapshot.episodeDir, "exports", "tella-a.mp4"),
@@ -496,10 +513,29 @@ const validateSafeAreasAndTails = (snapshot: GptLiveQaSnapshot): void => {
       !Number.isFinite(tail.tailPeakDb) ||
       !Number.isFinite(tail.endPeakDb) ||
       tail.tailPeakDb <= TAIL_SIGNAL_FLOOR_DB ||
-      tail.endPeakDb <= TAIL_SIGNAL_FLOOR_DB
+      tail.endPeakDb <= TAIL_SIGNAL_FLOOR_DB ||
+      tail.tailSignalPresent !== true
     ) {
-      fail(`${name} has a silent or truncated final audio tail`);
+      fail(`${name} final tail signal is not present`);
     }
+  }
+};
+
+const validateObservedIntegrityHashes = (snapshot: GptLiveQaSnapshot): void => {
+  const sourceIds = GPT_LIVE_CONTENT.timeline
+    .filter((item) => item.kind === "source_clip")
+    .map((item) => item.id);
+  exact(Object.keys(snapshot.observedIntegrityHashes.sources).sort(), [...sourceIds].sort(), "observed source integrity hash keys");
+  exact(
+    Object.keys(snapshot.observedIntegrityHashes.voice).sort(),
+    GPT_LIVE_CONTENT.narration.map(({ id }) => id).sort(),
+    "observed voice integrity hash keys"
+  );
+  for (const hash of [
+    ...Object.values(snapshot.observedIntegrityHashes.sources),
+    ...Object.values(snapshot.observedIntegrityHashes.voice)
+  ]) {
+    if (!HASH.test(hash)) fail("observed integrity hash is invalid");
   }
 };
 
@@ -516,4 +552,5 @@ export function validateGptLiveQaSnapshot(snapshot: GptLiveQaSnapshot): void {
   validateFinals(snapshot);
   validateBrandingAndAudio(snapshot);
   validateSafeAreasAndTails(snapshot);
+  validateObservedIntegrityHashes(snapshot);
 }

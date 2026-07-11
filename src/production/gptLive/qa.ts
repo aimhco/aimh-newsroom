@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import {
+  lstat as defaultLstat,
   mkdir as defaultMkdir,
+  mkdtemp as defaultMkdtemp,
   readFile as defaultReadFile,
+  realpath as defaultRealpath,
   rm as defaultRm,
   stat as defaultStat
 } from "node:fs/promises";
@@ -26,10 +29,13 @@ import type {
   QaVariantName,
   QaVoice,
   QaVoiceCacheMetadata,
+  HumanPlayback,
   VisualArtifacts
 } from "./qa/types";
 import { validateGptLiveQaSnapshot } from "./qa/validation";
 import { generateVisualArtifacts, renderComparisonMarkdown } from "./qa/visual";
+import { publishQaReportSet } from "./qa/publication";
+import { validateNoSymlinkPaths, withValidatedQaArtifactPaths } from "./qa/paths";
 
 export { validateGptLiveQaSnapshot } from "./qa/validation";
 export type {
@@ -87,6 +93,9 @@ export interface RunGptLiveQaDependencies {
   readFileBytes?: ReadBytes;
   stat?: StatFile;
   mkdir?: typeof defaultMkdir;
+  mkdtemp?: typeof defaultMkdtemp;
+  lstat?: typeof defaultLstat;
+  realpath?: typeof defaultRealpath;
   rm?: typeof defaultRm;
   runCommand?: typeof defaultRunCommand;
   inspectMediaFile?: (ffprobePath: string, path: string) => Promise<QaPreparedMediaInspection>;
@@ -115,6 +124,29 @@ const assertSafeReportText = (text: string, label: string): void => {
     throw new Error(`GPT-Live QA failed: ${label} contains an unsafe path or signed URL`);
   }
 };
+
+const PENDING_PLAYBACK_NOTE = "Full real-time listening and viewing is required before upload.";
+
+export function parseHumanPlaybackReview(text: string | undefined): HumanPlayback {
+  if (text === undefined) return { status: "pending", note: PENDING_PLAYBACK_NOTE };
+  const parsed = parseJson<Record<string, unknown>>(text, "human playback review");
+  if (
+    parsed.schemaVersion !== "0.1.0" ||
+    (parsed.status !== "pending" && parsed.status !== "passed" && parsed.status !== "failed") ||
+    typeof parsed.note !== "string" ||
+    !parsed.note.trim() ||
+    parsed.note.length > 500
+  ) {
+    throw new Error("GPT-Live QA failed: invalid human playback review");
+  }
+  assertSafeReportText(parsed.note, "human playback review");
+  return { status: parsed.status, note: parsed.note } as HumanPlayback;
+}
+
+export function deriveQaStatus(humanPlayback: HumanPlayback) {
+  const readyForUpload = humanPlayback.status === "passed";
+  return { machineOk: true as const, humanPlayback, readyForUpload, ok: readyForUpload };
+}
 
 const parsePeakDb = (text: string): number => {
   const value = text.match(/max_volume:\s*(-?(?:\d+(?:\.\d+)?|inf))\s*dB/i)?.[1];
@@ -185,7 +217,8 @@ const inspectTailAudio = async (
   };
   return {
     tailPeakDb: await measure(10),
-    endPeakDb: await measure(0.5)
+    endPeakDb: await measure(0.5),
+    tailSignalPresent: true
   };
 };
 
@@ -225,7 +258,7 @@ const collectSnapshot = async (
   generation: PublishedGenerationValidation,
   dependencies: Required<Pick<
     RunGptLiveQaDependencies,
-    "readFile" | "readFileBytes" | "stat" | "runCommand" | "inspectMediaFile" | "inspectFinalMediaFile"
+    "readFile" | "readFileBytes" | "stat" | "runCommand" | "inspectMediaFile" | "inspectFinalMediaFile" | "lstat" | "realpath"
   >>
 ): Promise<GptLiveQaSnapshot> => {
   const productionPath = join(options.episodeDir, "production.json");
@@ -234,6 +267,18 @@ const collectSnapshot = async (
   const statePath = join(options.episodeDir, "tella", "state.json");
   const preparedPath = join(options.episodeDir, "reports", "prepared.json");
   const sourceMatrixPath = join(options.episodeDir, "reports", "source-matrix.md");
+  const humanPlaybackPath = join(options.episodeDir, "reports", "human-playback.json");
+
+  await validateNoSymlinkPaths(options.episodeDir, [
+    productionPath,
+    voicePath,
+    planPath,
+    statePath,
+    generation.reportPath,
+    preparedPath,
+    sourceMatrixPath,
+    humanPlaybackPath
+  ], dependencies);
 
   const [productionText, voiceText, planText, stateText, postText, preparedText, sourceMatrix] =
     await Promise.all([
@@ -251,6 +296,18 @@ const collectSnapshot = async (
   const tellaState = parseJson<unknown>(stateText, "Tella state");
   const postProduction = parseJson<Record<string, unknown>>(postText, "post-production report");
   const prepared = parseJson<Record<string, unknown>>(preparedText, "prepared report");
+
+  await withValidatedQaArtifactPaths({
+    episodeDir: options.episodeDir,
+    production,
+    voice,
+    plan,
+    generation,
+    tellaState,
+    postProduction
+  }, dependencies, async () => undefined);
+  const logoStat = await dependencies.lstat(production.branding.logoPath);
+  if (logoStat.isSymbolicLink()) throw new Error("GPT-Live QA path contains a symlink: logo");
 
   const voiceCacheEntries = await Promise.all(
     voice.chunks.map(async (chunk) => [
@@ -311,6 +368,16 @@ const collectSnapshot = async (
     generation.finalPaths.map((path) => inspectTailAudio(options.ffmpegPath, path, dependencies.runCommand))
   );
   const logoBytes = await dependencies.readFileBytes(production.branding.logoPath);
+  const sourceHashEntries = await Promise.all(sourceClips.map(async (clip) => [
+    clip.id,
+    createHash("sha256").update(
+      await dependencies.readFileBytes(join(options.episodeDir, "source", `${clip.id}.mp4`))
+    ).digest("hex")
+  ] as const));
+  const voiceHashEntries = await Promise.all(voice.chunks.map(async (chunk) => [
+    chunk.id,
+    createHash("sha256").update(await dependencies.readFileBytes(chunk.file)).digest("hex")
+  ] as const));
 
   return {
     episodeDir: options.episodeDir,
@@ -348,6 +415,10 @@ const collectSnapshot = async (
     tailAudio: {
       "version-a": tailAudio[0]!,
       "version-b": tailAudio[1]!
+    },
+    observedIntegrityHashes: {
+      sources: Object.fromEntries(sourceHashEntries),
+      voice: Object.fromEntries(voiceHashEntries)
     }
   };
 };
@@ -359,15 +430,20 @@ const postSourceIntervals = (snapshot: GptLiveQaSnapshot) => {
   return sourceDialogue.intervals;
 };
 
-const buildSafeQaReport = (snapshot: GptLiveQaSnapshot, artifacts: VisualArtifacts) => {
+const buildSafeQaReport = (
+  snapshot: GptLiveQaSnapshot,
+  artifacts: VisualArtifacts,
+  humanPlayback: HumanPlayback
+) => {
   const variants = snapshot.postProduction.variants as Array<{
     name: QaVariantName;
     outputPath: string;
     sha256: string;
   }>;
+  const status = deriveQaStatus(humanPlayback);
   return {
     schemaVersion: "0.1.0",
-    ok: true,
+    ...status,
     productionId: GPT_LIVE_CONTENT.id,
     generationId: snapshot.generation.generationId,
     youtubeUploadEnabled: false,
@@ -378,7 +454,7 @@ const buildSafeQaReport = (snapshot: GptLiveQaSnapshot, artifacts: VisualArtifac
       tellaPlanAndState: true,
       finalGenerationIntegrity: true,
       brandingAndSafeArea: true,
-      audioTreatmentAndTail: true,
+      audioTreatmentAndTailSignal: true,
       sampledFramesNonblank: true
     },
     finals: VARIANTS.map((name) => {
@@ -392,7 +468,21 @@ const buildSafeQaReport = (snapshot: GptLiveQaSnapshot, artifacts: VisualArtifac
     }),
     visual: artifacts,
     comparisonPath: "reports/comparison.md",
-    humanPlaybackRequired: true
+    tailSignalPresent: true,
+    tailSignalLimitation: "Music is present; tail signal cannot prove CTA narration or exclude speech truncation.",
+    observedIntegrityHashes: {
+      label: "Observed SHA-256 hashes from this QA run; these are integrity evidence, not cryptographic origin proof.",
+      sources: Object.entries(snapshot.observedIntegrityHashes.sources).map(([id, sha256]) => ({
+        id,
+        path: `source/${id}.mp4`,
+        sha256
+      })),
+      voice: Object.entries(snapshot.observedIntegrityHashes.voice).map(([id, sha256]) => ({
+        id,
+        path: `voice/${id}.mp3`,
+        sha256
+      }))
+    }
   };
 };
 
@@ -407,6 +497,9 @@ export async function runGptLiveQa(
     ((path: string) => defaultReadFile(path) as Promise<Uint8Array>);
   const stat = dependencies.stat ?? defaultStat;
   const mkdir = dependencies.mkdir ?? defaultMkdir;
+  const mkdtemp = dependencies.mkdtemp ?? defaultMkdtemp;
+  const lstat = dependencies.lstat ?? defaultLstat;
+  const realpath = dependencies.realpath ?? defaultRealpath;
   const rm = dependencies.rm ?? defaultRm;
   const runCommand = dependencies.runCommand ?? defaultRunCommand;
   const inspectMediaFile = dependencies.inspectMediaFile ??
@@ -419,13 +512,7 @@ export async function runGptLiveQa(
   const paths = qaReportPaths(options.episodeDir);
 
   let generation: PublishedGenerationValidation;
-  try {
-    generation = await validatePublishedGeneration(options.episodeDir);
-  } catch (error) {
-    await clearStaleQaOutputs(options.episodeDir, rm);
-    throw error;
-  }
-  await clearStaleQaOutputs(options.episodeDir, rm);
+  generation = await validatePublishedGeneration(options.episodeDir);
 
   const snapshot = await collectSnapshot(options, generation, {
     readFile,
@@ -433,11 +520,24 @@ export async function runGptLiveQa(
     stat,
     runCommand,
     inspectMediaFile,
-    inspectFinalMediaFile
+    inspectFinalMediaFile,
+    lstat,
+    realpath
   });
   validateGptLiveQaSnapshot(snapshot);
 
-  await mkdir(paths.visualDirectory, { recursive: true });
+  let humanPlaybackText: string | undefined;
+  try {
+    humanPlaybackText = await readFile(join(options.episodeDir, "reports", "human-playback.json"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const humanPlayback = parseHumanPlaybackReview(humanPlaybackText);
+  const status = deriveQaStatus(humanPlayback);
+
+  const stagingDirectory = await mkdtemp(join(options.episodeDir, "reports", ".qa-staging-"));
+  const stagingVisualDirectory = join(stagingDirectory, "visual");
+  await mkdir(stagingVisualDirectory, { recursive: true });
   const visualArtifacts = await generateArtifacts({
     episodeDir: options.episodeDir,
     finalPaths: {
@@ -449,7 +549,9 @@ export async function runGptLiveQa(
       "version-b": snapshot.media.finals["version-b"].durationSeconds
     },
     plan: snapshot.plan,
-    ffmpegPath: options.ffmpegPath
+    ffmpegPath: options.ffmpegPath,
+    outputDirectory: stagingVisualDirectory,
+    artifactRelativeRoot: "reports/visual"
   }, { runCommand });
   if (visualArtifacts.checkedFrameCount !== 58) {
     throw new Error(`GPT-Live QA failed: expected 58 checked frames, received ${visualArtifacts.checkedFrameCount}`);
@@ -473,16 +575,17 @@ export async function runGptLiveQa(
     sourceOutputLufs: postSourceIntervals(snapshot)
   });
   assertSafeReportText(comparison, "visual comparison");
-  await writeTextAtomic(paths.comparisonPath, comparison);
+  await writeTextAtomic(join(stagingDirectory, "comparison.md"), comparison);
 
-  const report = buildSafeQaReport(snapshot, visualArtifacts);
+  const report = buildSafeQaReport(snapshot, visualArtifacts, humanPlayback);
   const reportText = `${JSON.stringify(report, null, 2)}\n`;
   assertSafeReportText(reportText, "QA report");
-  await writeJsonAtomic(paths.reportPath, report);
+  await writeJsonAtomic(join(stagingDirectory, "qa.json"), report);
+  await publishQaReportSet({ stagingDirectory, paths });
 
   return {
     episodeDir: options.episodeDir,
-    ok: true,
+    ...status,
     reportPath: paths.reportPath,
     comparisonPath: paths.comparisonPath,
     visualDirectory: paths.visualDirectory,

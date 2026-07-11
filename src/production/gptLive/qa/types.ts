@@ -61,6 +61,17 @@ export interface QaSafeArea {
 export interface QaTailAudioCheck {
   tailPeakDb: number;
   endPeakDb: number;
+  tailSignalPresent: boolean;
+}
+
+export interface HumanPlayback {
+  status: "pending" | "passed" | "failed";
+  note: string;
+}
+
+export interface ObservedIntegrityHashes {
+  sources: Record<string, string>;
+  voice: Record<string, string>;
 }
 
 export interface QaPreparedMediaInspection extends MediaInspection {
@@ -90,6 +101,7 @@ export interface GptLiveQaSnapshot {
   };
   safeAreas: QaSafeArea[];
   tailAudio: Record<QaVariantName, QaTailAudioCheck>;
+  observedIntegrityHashes: ObservedIntegrityHashes;
 }
 
 export interface VisualArtifacts {
@@ -98,11 +110,19 @@ export interface VisualArtifacts {
   tailAudio: Record<QaVariantName, string>;
   contactSampleTimesSeconds: Record<QaVariantName, number[]>;
   checkedFrameCount: number;
+  contentMetrics: {
+    minimumChangedPixelProportion: number;
+    minimumLumaVariance: number;
+    minimumNormalizedEntropy: number;
+  };
 }
 
 export interface GptLiveQaResult {
   episodeDir: string;
-  ok: true;
+  machineOk: true;
+  humanPlayback: HumanPlayback;
+  readyForUpload: boolean;
+  ok: boolean;
   reportPath: string;
   comparisonPath: string;
   visualDirectory: string;

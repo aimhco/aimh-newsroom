@@ -221,20 +221,29 @@ const joinDefaultEpisodeDirectory = (productionId: string): string =>
 
 export function formatGptLiveCliResult(result: {
   episodeDir: string;
-  ok?: true;
+  machineOk?: true;
+  humanPlayback?: { status: "pending" | "passed" | "failed"; note: string };
+  readyForUpload?: boolean;
+  ok?: boolean;
   reportPath?: string;
   comparisonPath?: string;
   visualDirectory?: string;
 }): string[] {
   const lines = [`episode: ${result.episodeDir}`];
   if (
-    result.ok === true &&
+    result.machineOk === true &&
+    result.humanPlayback &&
+    typeof result.readyForUpload === "boolean" &&
+    typeof result.ok === "boolean" &&
     result.reportPath &&
     result.comparisonPath &&
     result.visualDirectory
   ) {
     lines.push(
-      "ok: true",
+      "machineOk: true",
+      `humanPlayback: ${result.humanPlayback.status}`,
+      `readyForUpload: ${result.readyForUpload}`,
+      `ok: ${result.ok}`,
       `qa: ${result.reportPath}`,
       `comparison: ${result.comparisonPath}`,
       `visual: ${result.visualDirectory}`
