@@ -34,7 +34,7 @@ import type {
 } from "./qa/types";
 import { validateGptLiveQaSnapshot } from "./qa/validation";
 import { generateVisualArtifacts, renderComparisonMarkdown } from "./qa/visual";
-import { publishQaReportSet } from "./qa/publication";
+import { publishQaReportSet, withQaStagingDirectory } from "./qa/publication";
 import { validateNoSymlinkPaths, withValidatedQaArtifactPaths } from "./qa/paths";
 
 export { validateGptLiveQaSnapshot } from "./qa/validation";
@@ -127,19 +127,78 @@ const assertSafeReportText = (text: string, label: string): void => {
 
 const PENDING_PLAYBACK_NOTE = "Full real-time listening and viewing is required before upload.";
 
-export function parseHumanPlaybackReview(text: string | undefined): HumanPlayback {
+interface HumanPlaybackReviewTarget {
+  generationId: string;
+  versionASha256: string;
+  versionBSha256: string;
+}
+
+const humanPlaybackReviewTarget = (
+  postProduction: Record<string, unknown>
+): HumanPlaybackReviewTarget => {
+  const variants = postProduction.variants as Array<{ name: string; sha256: string }>;
+  const versionA = variants?.find(({ name }) => name === "version-a")?.sha256;
+  const versionB = variants?.find(({ name }) => name === "version-b")?.sha256;
+  if (
+    typeof postProduction.generationId !== "string" ||
+    !/^[a-f0-9-]{36}$/i.test(postProduction.generationId) ||
+    !/^[a-f0-9]{64}$/.test(versionA ?? "") ||
+    !/^[a-f0-9]{64}$/.test(versionB ?? "")
+  ) {
+    throw new Error("GPT-Live QA failed: invalid human playback review target");
+  }
+  return {
+    generationId: postProduction.generationId,
+    versionASha256: versionA!,
+    versionBSha256: versionB!
+  };
+};
+
+export function buildHumanPlaybackReviewTemplate(
+  postProduction: Record<string, unknown>,
+  reviewedAt = new Date().toISOString()
+) {
+  return {
+    schemaVersion: "0.2.0" as const,
+    ...humanPlaybackReviewTarget(postProduction),
+    status: "pending" as const,
+    note: PENDING_PLAYBACK_NOTE,
+    reviewedAt
+  };
+}
+
+export function parseHumanPlaybackReview(
+  text: string | undefined,
+  postProduction: Record<string, unknown>
+): HumanPlayback {
   if (text === undefined) return { status: "pending", note: PENDING_PLAYBACK_NOTE };
   const parsed = parseJson<Record<string, unknown>>(text, "human playback review");
   if (
-    parsed.schemaVersion !== "0.1.0" ||
+    parsed.schemaVersion !== "0.2.0" ||
+    typeof parsed.generationId !== "string" ||
+    typeof parsed.versionASha256 !== "string" ||
+    typeof parsed.versionBSha256 !== "string" ||
     (parsed.status !== "pending" && parsed.status !== "passed" && parsed.status !== "failed") ||
     typeof parsed.note !== "string" ||
     !parsed.note.trim() ||
-    parsed.note.length > 500
+    parsed.note.length > 500 ||
+    typeof parsed.reviewedAt !== "string" ||
+    !Number.isFinite(Date.parse(parsed.reviewedAt))
   ) {
     throw new Error("GPT-Live QA failed: invalid human playback review");
   }
   assertSafeReportText(parsed.note, "human playback review");
+  const target = humanPlaybackReviewTarget(postProduction);
+  if (
+    parsed.generationId !== target.generationId ||
+    parsed.versionASha256 !== target.versionASha256 ||
+    parsed.versionBSha256 !== target.versionBSha256
+  ) {
+    return {
+      status: "pending",
+      note: "Stored human playback review does not match the current published generation."
+    };
+  }
   return { status: parsed.status, note: parsed.note } as HumanPlayback;
 }
 
@@ -532,56 +591,62 @@ export async function runGptLiveQa(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const humanPlayback = parseHumanPlaybackReview(humanPlaybackText);
+  const humanPlayback = parseHumanPlaybackReview(humanPlaybackText, snapshot.postProduction);
   const status = deriveQaStatus(humanPlayback);
 
-  const stagingDirectory = await mkdtemp(join(options.episodeDir, "reports", ".qa-staging-"));
-  const stagingVisualDirectory = join(stagingDirectory, "visual");
-  await mkdir(stagingVisualDirectory, { recursive: true });
-  const visualArtifacts = await generateArtifacts({
-    episodeDir: options.episodeDir,
-    finalPaths: {
-      "version-a": generation.finalPaths[0],
-      "version-b": generation.finalPaths[1]
-    },
-    durations: {
-      "version-a": snapshot.media.finals["version-a"].durationSeconds,
-      "version-b": snapshot.media.finals["version-b"].durationSeconds
-    },
-    plan: snapshot.plan,
-    ffmpegPath: options.ffmpegPath,
-    outputDirectory: stagingVisualDirectory,
-    artifactRelativeRoot: "reports/visual"
-  }, { runCommand });
-  if (visualArtifacts.checkedFrameCount !== 58) {
-    throw new Error(`GPT-Live QA failed: expected 58 checked frames, received ${visualArtifacts.checkedFrameCount}`);
-  }
+  const visualArtifacts = await withQaStagingDirectory(
+    join(options.episodeDir, "reports"),
+    { mkdtemp, rm },
+    async (stagingDirectory) => {
+      const stagingVisualDirectory = join(stagingDirectory, "visual");
+      await mkdir(stagingVisualDirectory, { recursive: true });
+      const artifacts = await generateArtifacts({
+        episodeDir: options.episodeDir,
+        finalPaths: {
+          "version-a": generation.finalPaths[0],
+          "version-b": generation.finalPaths[1]
+        },
+        durations: {
+          "version-a": snapshot.media.finals["version-a"].durationSeconds,
+          "version-b": snapshot.media.finals["version-b"].durationSeconds
+        },
+        plan: snapshot.plan,
+        ffmpegPath: options.ffmpegPath,
+        outputDirectory: stagingVisualDirectory,
+        artifactRelativeRoot: "reports/visual"
+      }, { runCommand });
+      if (artifacts.checkedFrameCount !== 58) {
+        throw new Error(`GPT-Live QA failed: expected 58 checked frames, received ${artifacts.checkedFrameCount}`);
+      }
 
-  const sourceIntervals = snapshot.postProduction.duckIntervals as Array<{
-    startSeconds: number;
-    endSeconds: number;
-  }>;
-  const comparison = renderComparisonMarkdown({
-    artifacts: visualArtifacts,
-    durations: {
-      "version-a": snapshot.media.finals["version-a"].durationSeconds,
-      "version-b": snapshot.media.finals["version-b"].durationSeconds
-    },
-    durationDeltaSeconds: Math.abs(
-      snapshot.media.finals["version-a"].durationSeconds -
-      snapshot.media.finals["version-b"].durationSeconds
-    ),
-    sourceIntervals,
-    sourceOutputLufs: postSourceIntervals(snapshot)
-  });
-  assertSafeReportText(comparison, "visual comparison");
-  await writeTextAtomic(join(stagingDirectory, "comparison.md"), comparison);
+      const sourceIntervals = snapshot.postProduction.duckIntervals as Array<{
+        startSeconds: number;
+        endSeconds: number;
+      }>;
+      const comparison = renderComparisonMarkdown({
+        artifacts,
+        durations: {
+          "version-a": snapshot.media.finals["version-a"].durationSeconds,
+          "version-b": snapshot.media.finals["version-b"].durationSeconds
+        },
+        durationDeltaSeconds: Math.abs(
+          snapshot.media.finals["version-a"].durationSeconds -
+          snapshot.media.finals["version-b"].durationSeconds
+        ),
+        sourceIntervals,
+        sourceOutputLufs: postSourceIntervals(snapshot)
+      });
+      assertSafeReportText(comparison, "visual comparison");
+      await writeTextAtomic(join(stagingDirectory, "comparison.md"), comparison);
 
-  const report = buildSafeQaReport(snapshot, visualArtifacts, humanPlayback);
-  const reportText = `${JSON.stringify(report, null, 2)}\n`;
-  assertSafeReportText(reportText, "QA report");
-  await writeJsonAtomic(join(stagingDirectory, "qa.json"), report);
-  await publishQaReportSet({ stagingDirectory, paths });
+      const report = buildSafeQaReport(snapshot, artifacts, humanPlayback);
+      const reportText = `${JSON.stringify(report, null, 2)}\n`;
+      assertSafeReportText(reportText, "QA report");
+      await writeJsonAtomic(join(stagingDirectory, "qa.json"), report);
+      await publishQaReportSet({ stagingDirectory, paths });
+      return artifacts;
+    }
+  );
 
   return {
     episodeDir: options.episodeDir,

@@ -317,7 +317,7 @@ export function renderComparisonMarkdown(options: {
     "Each review set includes the CTA start, midpoint, and a labeled frame 0.5 seconds before the final boundary. Tail signal is present but does not validate narration completion.",
     "",
     "## Human playback",
-    "Full real-time listening and viewing remains required before upload. An explicit review may be recorded in reports/human-playback.json with schemaVersion 0.1.0, status passed or failed, and a concise note.",
+    "Full real-time listening and viewing remains required before upload. Generate a pending review template from the current post-production manifest, then record it in reports/human-playback.json with schemaVersion 0.2.0, generationId, versionASha256, versionBSha256, status, note, and reviewedAt. Only an explicit current-generation passed review unlocks upload readiness.",
     ""
   ].join("\n");
 }

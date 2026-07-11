@@ -1,4 +1,5 @@
 import {
+  mkdtemp as defaultMkdtemp,
   mkdir as defaultMkdir,
   rename as defaultRename,
   rm as defaultRm
@@ -21,6 +22,27 @@ export interface PublishQaReportSetDependencies {
   mkdir?: typeof defaultMkdir;
   rename?: typeof defaultRename;
   rm?: typeof defaultRm;
+}
+
+export interface QaStagingDependencies {
+  mkdtemp?: typeof defaultMkdtemp;
+  rm?: typeof defaultRm;
+}
+
+export async function withQaStagingDirectory<T>(
+  reportsDirectory: string,
+  dependencies: QaStagingDependencies,
+  action: (stagingDirectory: string) => Promise<T>
+): Promise<T> {
+  const mkdtemp = dependencies.mkdtemp ?? defaultMkdtemp;
+  const rm = dependencies.rm ?? defaultRm;
+  const stagingDirectory = await mkdtemp(join(reportsDirectory, ".qa-staging-"));
+  try {
+    return await action(stagingDirectory);
+  } finally {
+    await rm(stagingDirectory, { recursive: true, force: true });
+    await rm(`${stagingDirectory}.backup`, { recursive: true, force: true });
+  }
 }
 
 const missing = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === "ENOENT";

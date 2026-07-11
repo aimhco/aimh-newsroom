@@ -21,6 +21,7 @@ import type { MediaInspection } from "../src/production/gptLive/mediaInspection"
 import { GPT_LIVE_SCENES, sceneStyle } from "../src/production/gptLive/motion/sceneStyle";
 import {
   clearStaleQaOutputs,
+  buildHumanPlaybackReviewTemplate,
   deriveQaStatus,
   parseHumanPlaybackReview,
   qaReportPaths,
@@ -29,7 +30,10 @@ import {
   type GptLiveQaSnapshot
 } from "../src/production/gptLive/qa";
 import type { QaProduction } from "../src/production/gptLive/qa";
-import { publishQaReportSet } from "../src/production/gptLive/qa/publication";
+import {
+  publishQaReportSet,
+  withQaStagingDirectory
+} from "../src/production/gptLive/qa/publication";
 import { withValidatedQaArtifactPaths } from "../src/production/gptLive/qa/paths";
 import {
   assertMeaningfulFrameContent,
@@ -302,7 +306,7 @@ const validSnapshot = (): GptLiveQaSnapshot => {
 
 describe("GPT-Live full production QA", () => {
   it("keeps machine success separate from pending human playback", () => {
-    const humanPlayback = parseHumanPlaybackReview(undefined);
+    const humanPlayback = parseHumanPlaybackReview(undefined, validSnapshot().postProduction);
     expect(humanPlayback).toEqual({
       status: "pending",
       note: "Full real-time listening and viewing is required before upload."
@@ -316,17 +320,74 @@ describe("GPT-Live full production QA", () => {
   });
 
   it("accepts an explicit safe human playback status file", () => {
+    const snapshot = validSnapshot();
+    const template = buildHumanPlaybackReviewTemplate(
+      snapshot.postProduction,
+      "2026-07-11T12:00:00.000Z"
+    );
+    expect(template).toMatchObject({
+      generationId: snapshot.generation.generationId,
+      versionASha256: (snapshot.postProduction.variants as any[])[0].sha256,
+      versionBSha256: (snapshot.postProduction.variants as any[])[1].sha256,
+      status: "pending",
+      reviewedAt: "2026-07-11T12:00:00.000Z"
+    });
     const humanPlayback = parseHumanPlaybackReview(JSON.stringify({
-      schemaVersion: "0.1.0",
+      ...template,
       status: "passed",
       note: "Full A/B playback reviewed."
-    }));
+    }), snapshot.postProduction);
     expect(deriveQaStatus(humanPlayback)).toMatchObject({
       machineOk: true,
       humanPlayback: { status: "passed" },
       readyForUpload: true,
       ok: true
     });
+  });
+
+  it("keeps a passed review for a stale generation pending", () => {
+    const snapshot = validSnapshot();
+    const review = buildHumanPlaybackReviewTemplate(snapshot.postProduction);
+    const humanPlayback = parseHumanPlaybackReview(JSON.stringify({
+      ...review,
+      generationId: "11111111-1111-4111-8111-111111111111",
+      status: "passed"
+    }), snapshot.postProduction);
+    expect(deriveQaStatus(humanPlayback)).toMatchObject({
+      humanPlayback: { status: "pending" },
+      readyForUpload: false,
+      ok: false
+    });
+  });
+
+  it("keeps a passed review with a mismatched final hash pending", () => {
+    const snapshot = validSnapshot();
+    const review = buildHumanPlaybackReviewTemplate(snapshot.postProduction);
+    const humanPlayback = parseHumanPlaybackReview(JSON.stringify({
+      ...review,
+      versionASha256: sha("9"),
+      status: "passed"
+    }), snapshot.postProduction);
+    expect(deriveQaStatus(humanPlayback)).toMatchObject({
+      humanPlayback: { status: "pending" },
+      readyForUpload: false,
+      ok: false
+    });
+  });
+
+  it.each(["early", "late"])('cleans QA staging after a %s lifecycle failure', async (phase) => {
+    const reportsDirectory = await mkdtemp(join(tmpdir(), "gpt-live-qa-lifecycle-"));
+    let stagingDirectory = "";
+    try {
+      await expect(withQaStagingDirectory(reportsDirectory, {}, async (directory) => {
+        stagingDirectory = directory;
+        await writeFile(join(directory, `${phase}.tmp`), phase, "utf8");
+        throw new Error(`${phase} lifecycle failure`);
+      })).rejects.toThrow(`${phase} lifecycle failure`);
+      await expect(readFile(stagingDirectory, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(reportsDirectory, { recursive: true, force: true });
+    }
   });
 
   it.each([
