@@ -551,6 +551,58 @@ describe("GPT-Live post-production publication", () => {
       expect(missingCanonicalObserved).toBe(false);
       expect(renameCalls.some(([from]) => canonicalPaths.includes(from))).toBe(false);
       expect((await readdir(finalDirectory)).some((name) => name.includes(".backup-"))).toBe(false);
+      expect((await readdir(finalDirectory)).some((name) => name.includes(".rollback-"))).toBe(false);
+      expect((await readdir(join(episodeDir, "reports"))).some((name) => name.includes(".rollback-")))
+        .toBe(false);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves deterministic A recovery bytes when B promotion and A restore fail", async () => {
+    const transactionId = "00000000-0000-4000-8000-000000000000";
+    const episodeDir = await createContainedEpisode();
+    const versionAPath = join(episodeDir, "final", "version-a.mp4");
+    const versionBPath = join(episodeDir, "final", "version-b.mp4");
+    const reportPath = join(episodeDir, "reports", "post-production.json");
+    const recoveryPath = `${versionAPath}.rollback-${transactionId}`;
+
+    try {
+      let failure: Error | undefined;
+      try {
+        await finishGptLiveProduction(finishOptions(episodeDir), {
+          access: async () => undefined,
+          randomUUID: () => transactionId,
+          readFileBytes: async () => new Uint8Array([1, 2, 3]),
+          inspectFinalMediaFile: async () => validInspection(10.75),
+          measureIntervalLoudness: async () => -23,
+          sampleLogoCornerFrameHash: async (_ffmpeg, path) =>
+            path.includes("exports") ? "a".repeat(64) : "b".repeat(64),
+          runCommand: async (_command, args) => {
+            await writeFile(args.at(-1)!, "new-final", "utf8");
+            return { stdout: "", stderr: "" };
+          },
+          rename: async (from, to) => {
+            if (String(from).includes("version-b.tmp-")) {
+              throw new Error("injected B promotion failure");
+            }
+            if (String(from) === recoveryPath && String(to) === versionAPath) {
+              throw new Error("injected A restore failure");
+            }
+            await fsRename(from, to);
+          }
+        });
+      } catch (error) {
+        failure = error as Error;
+      }
+
+      expect(failure?.message).toContain("rollback incomplete");
+      expect(failure?.message).toContain(recoveryPath);
+      expect(failure?.message).toContain("injected A restore failure");
+      expect(await readFile(recoveryPath, "utf8")).toBe("approved-a");
+      expect(await readFile(versionAPath, "utf8")).toBe("new-final");
+      expect(await readFile(versionBPath, "utf8")).toBe("approved-b");
+      expect(await readFile(reportPath, "utf8")).toBe("{}\n");
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
     }

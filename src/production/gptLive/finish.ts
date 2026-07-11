@@ -775,7 +775,7 @@ const promoteFilesAtomically = async (
       promoted.push(promotion);
     }
   } catch (error) {
-    let rollbackError: unknown;
+    const failedRestorations: Array<{ promotion: Promotion; error: unknown }> = [];
     for (const promotion of promoted.reverse()) {
       try {
         if (rollbackCopies.has(promotion)) {
@@ -785,13 +785,25 @@ const promoteFilesAtomically = async (
           await rm(promotion.targetPath, { force: true });
         }
       } catch (restoreError) {
-        rollbackError ??= restoreError;
+        failedRestorations.push({ promotion, error: restoreError });
       }
     }
     for (const promotion of rollbackCopies) {
+      if (failedRestorations.some(({ promotion: failed }) => failed === promotion)) continue;
       await rm(promotion.rollbackPath, { force: true });
     }
-    if (rollbackError) throw rollbackError;
+    if (failedRestorations.length > 0) {
+      const recoveryDetails = failedRestorations
+        .map(({ promotion, error: restoreError }) =>
+          `${promotion.rollbackPath} (${restoreError instanceof Error ? restoreError.message : String(restoreError)})`
+        )
+        .join(", ");
+      const promotionError = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Promotion rollback incomplete; new canonical state is incomplete. ` +
+        `Recovery preserved at ${recoveryDetails}. Promotion failure: ${promotionError}`
+      );
+    }
     throw error;
   }
 
