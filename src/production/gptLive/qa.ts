@@ -19,6 +19,7 @@ import {
   type PublishedGenerationValidation
 } from "./finish";
 import { GPT_LIVE_SCENES, sceneStyle } from "./motion/sceneStyle";
+import { withEpisodeProductionLock } from "./productionLock";
 import type { TellaPlan } from "./tellaPlan";
 import type {
   GptLiveQaResult,
@@ -103,6 +104,7 @@ export interface RunGptLiveQaDependencies {
   generateVisualArtifacts?: typeof generateVisualArtifacts;
   writeJsonAtomic?: typeof defaultWriteJsonAtomic;
   writeTextAtomic?: typeof defaultWriteTextAtomic;
+  withProductionLock?: typeof withEpisodeProductionLock;
 }
 
 const parseJson = <T>(text: string, label: string): T => {
@@ -567,7 +569,7 @@ const assertUnchangedPublishedGeneration = (
   }
 };
 
-export async function runGptLiveQa(
+async function runGptLiveQaUnlocked(
   options: RunGptLiveQaOptions,
   dependencies: RunGptLiveQaDependencies = {}
 ): Promise<GptLiveQaResult> {
@@ -680,4 +682,13 @@ export async function runGptLiveQa(
     visualDirectory: paths.visualDirectory,
     visualArtifacts
   };
+}
+
+export async function runGptLiveQa(
+  options: RunGptLiveQaOptions,
+  dependencies: RunGptLiveQaDependencies = {}
+): Promise<GptLiveQaResult> {
+  const withProductionLock = dependencies.withProductionLock ?? withEpisodeProductionLock;
+  return withProductionLock(options.episodeDir, "qa", () =>
+    runGptLiveQaUnlocked(options, dependencies));
 }

@@ -13,6 +13,7 @@ import {
 import { basename, join, relative, resolve, sep } from "node:path";
 import { runCommand as defaultRunCommand } from "../../render/process";
 import { writeJsonAtomic as defaultWriteJsonAtomic } from "./atomicFiles";
+import { withEpisodeProductionLock } from "./productionLock";
 import { validateContainedEpisodePaths } from "./qa/paths";
 
 const NORMAL_MUSIC_VOLUME = 0.07;
@@ -197,6 +198,7 @@ export interface FinishGptLiveDependencies {
   readonly sampleLogoCornerFrameHash?: SampleLogoCornerFrameHash;
   readonly validatePublishedGeneration?: ValidatePublishedGeneration;
   readonly writeJsonAtomic?: typeof defaultWriteJsonAtomic;
+  readonly withProductionLock?: typeof withEpisodeProductionLock;
 }
 
 interface ProbeStream {
@@ -950,7 +952,7 @@ const publishGenerationAtomically = async (
   return cleanupWarnings;
 };
 
-export async function finishGptLiveProduction(
+async function finishGptLiveProductionUnlocked(
   options: FinishGptLiveProductionOptions,
   dependencies: FinishGptLiveDependencies = {}
 ): Promise<FinishGptLiveProductionResult> {
@@ -1258,4 +1260,13 @@ export async function finishGptLiveProduction(
       }
     }
   }
+}
+
+export async function finishGptLiveProduction(
+  options: FinishGptLiveProductionOptions,
+  dependencies: FinishGptLiveDependencies = {}
+): Promise<FinishGptLiveProductionResult> {
+  const withProductionLock = dependencies.withProductionLock ?? withEpisodeProductionLock;
+  return withProductionLock(options.episodeDir, "finish", () =>
+    finishGptLiveProductionUnlocked(options, dependencies));
 }

@@ -837,7 +837,8 @@ describe("GPT-Live full production QA", () => {
         { episodeDir: EPISODE_DIR, env: {}, ffmpegPath: "ffmpeg", ffprobePath: "ffprobe" },
         {
           validatePublishedGeneration: vi.fn(async () => { throw failure; }),
-          readFile
+          readFile,
+          withProductionLock: async (_episodeDir, _operation, action) => action()
         }
       )
     ).rejects.toThrow(failure.message);
