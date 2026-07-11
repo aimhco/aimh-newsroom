@@ -219,6 +219,30 @@ export async function runGptLiveCli<
 const joinDefaultEpisodeDirectory = (productionId: string): string =>
   `episodes/${productionId}`;
 
+export function formatGptLiveCliResult(result: {
+  episodeDir: string;
+  ok?: true;
+  reportPath?: string;
+  comparisonPath?: string;
+  visualDirectory?: string;
+}): string[] {
+  const lines = [`episode: ${result.episodeDir}`];
+  if (
+    result.ok === true &&
+    result.reportPath &&
+    result.comparisonPath &&
+    result.visualDirectory
+  ) {
+    lines.push(
+      "ok: true",
+      `qa: ${result.reportPath}`,
+      `comparison: ${result.comparisonPath}`,
+      `visual: ${result.visualDirectory}`
+    );
+  }
+  return lines;
+}
+
 const isDirectExecution = (): boolean => {
   const entrypoint = process.argv[1];
   return Boolean(entrypoint && pathToFileURL(resolve(entrypoint)).href === import.meta.url);
@@ -227,12 +251,7 @@ const isDirectExecution = (): boolean => {
 if (isDirectExecution()) {
   runGptLiveCli(process.argv.slice(2))
     .then((result) => {
-      console.log(`episode: ${result.episodeDir}`);
-      if ("ok" in result && result.ok === true) {
-        console.log("ok: true");
-        console.log(`qa: ${result.reportPath}`);
-        console.log(`visual: ${result.visualDirectory}`);
-      }
+      for (const line of formatGptLiveCliResult(result)) console.log(line);
     })
     .catch((error: unknown) => {
       console.error(error instanceof Error ? error.message : String(error));

@@ -11,6 +11,8 @@ import {
 import type { MediaInspection } from "../src/production/gptLive/mediaInspection";
 import { GPT_LIVE_SCENES, sceneStyle } from "../src/production/gptLive/motion/sceneStyle";
 import {
+  clearStaleQaOutputs,
+  qaReportPaths,
   runGptLiveQa,
   validateGptLiveQaSnapshot,
   type GptLiveQaSnapshot
@@ -264,6 +266,27 @@ const validSnapshot = (): GptLiveQaSnapshot => {
 };
 
 describe("GPT-Live full production QA", () => {
+  it("writes comparison.md at the reports root and identifies the stale visual path", () => {
+    expect(qaReportPaths(EPISODE_DIR)).toEqual({
+      reportPath: join(EPISODE_DIR, "reports", "qa.json"),
+      comparisonPath: join(EPISODE_DIR, "reports", "comparison.md"),
+      staleComparisonPath: join(EPISODE_DIR, "reports", "visual", "comparison.md"),
+      visualDirectory: join(EPISODE_DIR, "reports", "visual")
+    });
+  });
+
+  it("removes stale QA and comparison reports without removing visual assets", async () => {
+    const remove = vi.fn(async (_path: string, _options: { force: true }) => undefined);
+    await clearStaleQaOutputs(EPISODE_DIR, remove);
+
+    expect(remove.mock.calls.map(([path]) => path)).toEqual([
+      join(EPISODE_DIR, "reports", "qa.json"),
+      join(EPISODE_DIR, "reports", "comparison.md"),
+      join(EPISODE_DIR, "reports", "visual", "comparison.md")
+    ]);
+    expect(remove).toHaveBeenCalledWith(expect.any(String), { force: true });
+  });
+
   it("accepts a complete editorial, media, Tella, and A/B snapshot", () => {
     expect(() => validateGptLiveQaSnapshot(validSnapshot())).not.toThrow();
   });

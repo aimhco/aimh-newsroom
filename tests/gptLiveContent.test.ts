@@ -12,7 +12,7 @@ import { basename, join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_ENV_KEYS, loadEnvSnapshot } from "../src/config/env";
 import * as contentModule from "../src/production/gptLive/content";
-import { runGptLiveCli } from "../src/production/gptLive/cli";
+import { formatGptLiveCliResult, runGptLiveCli } from "../src/production/gptLive/cli";
 import {
   assertNarrationSlateContract,
   buildFfprobeMediaArgs,
@@ -852,6 +852,22 @@ describe("GPT-Live preparation CLI", () => {
     },
     realpath: async (path: string) => path
   };
+
+  it("prints the root comparison report separately from visual assets", () => {
+    expect(formatGptLiveCliResult({
+      episodeDir: "/project/episodes/custom",
+      ok: true,
+      reportPath: "/project/episodes/custom/reports/qa.json",
+      comparisonPath: "/project/episodes/custom/reports/comparison.md",
+      visualDirectory: "/project/episodes/custom/reports/visual"
+    })).toEqual([
+      "episode: /project/episodes/custom",
+      "ok: true",
+      "qa: /project/episodes/custom/reports/qa.json",
+      "comparison: /project/episodes/custom/reports/comparison.md",
+      "visual: /project/episodes/custom/reports/visual"
+    ]);
+  });
 
   it("accepts pnpm's extra separator and resolves preparation paths from cwd", async () => {
     const loadEnvSnapshotFromFiles = vi.fn(async () => ({

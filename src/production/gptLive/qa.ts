@@ -48,6 +48,28 @@ export type {
 const VARIANTS = ["version-a", "version-b"] as const;
 const PLATE_VARIANTS = ["dynamic_editorial", "aimh_visual_host"] as const;
 
+export const qaReportPaths = (episodeDir: string) => {
+  const reportsDirectory = join(episodeDir, "reports");
+  const visualDirectory = join(reportsDirectory, "visual");
+  return {
+    reportPath: join(reportsDirectory, "qa.json"),
+    comparisonPath: join(reportsDirectory, "comparison.md"),
+    staleComparisonPath: join(visualDirectory, "comparison.md"),
+    visualDirectory
+  };
+};
+
+export async function clearStaleQaOutputs(
+  episodeDir: string,
+  remove: (path: string, options: { force: true }) => Promise<void> =
+    (path, options) => defaultRm(path, options)
+): Promise<void> {
+  const paths = qaReportPaths(episodeDir);
+  for (const path of [paths.reportPath, paths.comparisonPath, paths.staleComparisonPath]) {
+    await remove(path, { force: true });
+  }
+}
+
 export interface RunGptLiveQaOptions {
   episodeDir: string;
   env: Record<string, string | undefined>;
@@ -369,7 +391,7 @@ const buildSafeQaReport = (snapshot: GptLiveQaSnapshot, artifacts: VisualArtifac
       };
     }),
     visual: artifacts,
-    comparisonPath: "reports/visual/comparison.md",
+    comparisonPath: "reports/comparison.md",
     humanPlaybackRequired: true
   };
 };
@@ -394,17 +416,16 @@ export async function runGptLiveQa(
   const generateArtifacts = dependencies.generateVisualArtifacts ?? generateVisualArtifacts;
   const writeJsonAtomic = dependencies.writeJsonAtomic ?? defaultWriteJsonAtomic;
   const writeTextAtomic = dependencies.writeTextAtomic ?? defaultWriteTextAtomic;
-  const reportsDirectory = join(options.episodeDir, "reports");
-  const reportPath = join(reportsDirectory, "qa.json");
+  const paths = qaReportPaths(options.episodeDir);
 
   let generation: PublishedGenerationValidation;
   try {
     generation = await validatePublishedGeneration(options.episodeDir);
   } catch (error) {
-    await rm(reportPath, { force: true });
+    await clearStaleQaOutputs(options.episodeDir, rm);
     throw error;
   }
-  await rm(reportPath, { force: true });
+  await clearStaleQaOutputs(options.episodeDir, rm);
 
   const snapshot = await collectSnapshot(options, generation, {
     readFile,
@@ -416,7 +437,7 @@ export async function runGptLiveQa(
   });
   validateGptLiveQaSnapshot(snapshot);
 
-  await mkdir(join(reportsDirectory, "visual"), { recursive: true });
+  await mkdir(paths.visualDirectory, { recursive: true });
   const visualArtifacts = await generateArtifacts({
     episodeDir: options.episodeDir,
     finalPaths: {
@@ -434,7 +455,6 @@ export async function runGptLiveQa(
     throw new Error(`GPT-Live QA failed: expected 58 checked frames, received ${visualArtifacts.checkedFrameCount}`);
   }
 
-  const comparisonPath = join(reportsDirectory, "visual", "comparison.md");
   const sourceIntervals = snapshot.postProduction.duckIntervals as Array<{
     startSeconds: number;
     endSeconds: number;
@@ -453,19 +473,19 @@ export async function runGptLiveQa(
     sourceOutputLufs: postSourceIntervals(snapshot)
   });
   assertSafeReportText(comparison, "visual comparison");
-  await writeTextAtomic(comparisonPath, comparison);
+  await writeTextAtomic(paths.comparisonPath, comparison);
 
   const report = buildSafeQaReport(snapshot, visualArtifacts);
   const reportText = `${JSON.stringify(report, null, 2)}\n`;
   assertSafeReportText(reportText, "QA report");
-  await writeJsonAtomic(reportPath, report);
+  await writeJsonAtomic(paths.reportPath, report);
 
   return {
     episodeDir: options.episodeDir,
     ok: true,
-    reportPath,
-    comparisonPath,
-    visualDirectory: join(reportsDirectory, "visual"),
+    reportPath: paths.reportPath,
+    comparisonPath: paths.comparisonPath,
+    visualDirectory: paths.visualDirectory,
     visualArtifacts
   };
 }
