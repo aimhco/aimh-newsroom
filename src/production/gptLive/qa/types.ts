@@ -1,6 +1,7 @@
 import type { FinalMediaInspection, PublishedGenerationValidation } from "../finish";
 import type { MediaInspection } from "../mediaInspection";
 import type { TellaPlan } from "../tellaPlan";
+import type { AudioPolicy, EvidenceSpec } from "../types";
 
 export type QaVariantName = "version-a" | "version-b";
 
@@ -18,6 +19,8 @@ export interface QaProduction {
     scene: string;
   }>;
   timeline: Array<Record<string, unknown> & { id: string; kind: "source_clip" | "narration" }>;
+  evidence: EvidenceSpec[];
+  audio: AudioPolicy;
   branding: {
     logoPath: string;
     width: number;
@@ -25,7 +28,6 @@ export interface QaProduction {
     marginRight: number;
     opacity: number;
   };
-  musicPath: string;
 }
 
 export interface QaVoiceChunk {

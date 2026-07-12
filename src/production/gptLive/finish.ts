@@ -985,8 +985,8 @@ async function finishGptLiveProductionUnlocked(
   const ffprobePath = requireConfiguredValue(options.ffprobePath, "ffprobe path");
   const logoPath = requireConfiguredValue(options.env.AIMH_LOGO_PATH, "AIMH logo path");
   const musicPath = requireConfiguredValue(
-    options.env.AIMH_BODY_MUSIC_PATH,
-    "AIMH body music path"
+    options.env.AIMH_OUTRO_MUSIC_PATH,
+    "AIMH outro music path"
   );
   try {
     await access(logoPath, constants.R_OK);
@@ -996,7 +996,7 @@ async function finishGptLiveProductionUnlocked(
   try {
     await access(musicPath, constants.R_OK);
   } catch {
-    throw new Error("GPT-Live finish preflight failed: AIMH body music is not readable");
+    throw new Error("GPT-Live finish preflight failed: AIMH outro music is not readable");
   }
 
   const planPath = join(options.episodeDir, "tella", "plan.json");

@@ -50,9 +50,7 @@ export function validateSerializedQaPaths(input: QaSerializedPathInput): string[
   if (input.production.branding.logoPath !== GPT_LIVE_CONTENT.branding.logoPath) {
     throw new Error("GPT-Live QA path validation failed: logo path");
   }
-  if (input.production.musicPath !== GPT_LIVE_CONTENT.musicPath) {
-    throw new Error("GPT-Live QA path validation failed: music path");
-  }
+  exact(input.production.audio, GPT_LIVE_CONTENT.audio, "audio path");
   for (const narration of GPT_LIVE_CONTENT.narration) {
     const chunk = input.voice.chunks.find(({ id }) => id === narration.id);
     if (chunk?.file !== join(episodeDir, "voice", `${narration.id}.mp3`)) {

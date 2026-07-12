@@ -20,7 +20,7 @@ const finishOptions = (episodeDir: string) => ({
   episodeDir,
   env: {
     AIMH_LOGO_PATH: "/assets/logo.png",
-    AIMH_BODY_MUSIC_PATH: "/assets/music.mp3"
+    AIMH_OUTRO_MUSIC_PATH: "/assets/outro.mp3"
   },
   ffmpegPath: "ffmpeg",
   ffprobePath: "ffprobe"

@@ -671,7 +671,7 @@ describe("GPT-Live production preparation", () => {
             ELEVENLABS_API_KEY: "eleven-secret-do-not-write",
             ELEVENLABS_VOICE_ID: "voice-secret-do-not-write",
             AIMH_LOGO_PATH: "/assets/logo.png",
-            AIMH_BODY_MUSIC_PATH: "/assets/music.mp3"
+            AIMH_OUTRO_MUSIC_PATH: "/assets/outro.mp3"
           },
           ffmpegPath: "/tools/ffmpeg",
           ffprobePath: "/tools/ffprobe"
@@ -733,8 +733,9 @@ describe("GPT-Live production preparation", () => {
         id: GPT_LIVE_CONTENT.id,
         branding: { logoPath: "/assets/logo.png" },
         evidence: EXPECTED_EVIDENCE,
-        audio: EXPECTED_AUDIO
+        audio: { ...EXPECTED_AUDIO, outroMusicPath: "/assets/outro.mp3" }
       });
+      expect(JSON.parse(productionText)).not.toHaveProperty("musicPath");
       expect(JSON.parse(voiceText)).toEqual(successfulVoiceResult(join(episodeDir, "voice")));
       expect(JSON.parse(planText)).toEqual(result.plan);
       expect(result.plan.clips.map(({ id }) => id)).toEqual(
@@ -803,7 +804,7 @@ describe("GPT-Live production preparation", () => {
             ELEVENLABS_API_KEY: "test-key",
             ELEVENLABS_VOICE_ID: "test-voice",
             AIMH_LOGO_PATH: "/assets/logo.png",
-            AIMH_BODY_MUSIC_PATH: "/assets/music.mp3"
+            AIMH_OUTRO_MUSIC_PATH: "/assets/outro.mp3"
           },
           ffmpegPath: "ffmpeg",
           ffprobePath: "ffprobe"
@@ -840,7 +841,7 @@ describe("GPT-Live production preparation", () => {
               ELEVENLABS_API_KEY: "test-key",
               ELEVENLABS_VOICE_ID: "test-voice",
               AIMH_LOGO_PATH: "/assets/logo.png",
-              AIMH_BODY_MUSIC_PATH: "/assets/music.mp3"
+              AIMH_OUTRO_MUSIC_PATH: "/assets/outro.mp3"
             },
             ffmpegPath: "ffmpeg",
             ffprobePath: "ffprobe"
@@ -887,7 +888,7 @@ describe("GPT-Live production preparation", () => {
                 ELEVENLABS_API_KEY: "test-key",
                 ELEVENLABS_VOICE_ID: "test-voice",
                 AIMH_LOGO_PATH: "/assets/logo.png",
-                AIMH_BODY_MUSIC_PATH: "/assets/music.mp3"
+                AIMH_OUTRO_MUSIC_PATH: "/assets/outro.mp3"
               },
               ffmpegPath: "ffmpeg",
               ffprobePath: "ffprobe"
@@ -926,7 +927,7 @@ describe("GPT-Live production preparation", () => {
   it.each([
     {
       name: "missing ElevenLabs credentials",
-      options: { env: { AIMH_LOGO_PATH: "/logo", AIMH_BODY_MUSIC_PATH: "/music" } },
+      options: { env: { AIMH_LOGO_PATH: "/logo", AIMH_OUTRO_MUSIC_PATH: "/outro" } },
       error: "ElevenLabs credentials"
     },
     {
@@ -936,7 +937,7 @@ describe("GPT-Live production preparation", () => {
           ELEVENLABS_API_KEY: " ",
           ELEVENLABS_VOICE_ID: "\t",
           AIMH_LOGO_PATH: "/logo",
-          AIMH_BODY_MUSIC_PATH: "/music"
+          AIMH_OUTRO_MUSIC_PATH: "/outro"
         }
       },
       error: "ElevenLabs credentials"
@@ -952,7 +953,7 @@ describe("GPT-Live production preparation", () => {
         ELEVENLABS_API_KEY: "test-key",
         ELEVENLABS_VOICE_ID: "test-voice",
         AIMH_LOGO_PATH: "/logo",
-        AIMH_BODY_MUSIC_PATH: "/music"
+        AIMH_OUTRO_MUSIC_PATH: "/outro"
       },
       ffmpegPath: "ffmpeg",
       ffprobePath: "ffprobe"
@@ -978,7 +979,7 @@ describe("GPT-Live production preparation", () => {
             ELEVENLABS_API_KEY: "test-key",
             ELEVENLABS_VOICE_ID: "test-voice",
             AIMH_LOGO_PATH: "/missing/logo.png",
-            AIMH_BODY_MUSIC_PATH: "/music.mp3"
+            AIMH_OUTRO_MUSIC_PATH: "/outro.mp3"
           },
           ffmpegPath: "ffmpeg",
           ffprobePath: "ffprobe"
@@ -1007,7 +1008,7 @@ describe("GPT-Live production preparation", () => {
               ELEVENLABS_API_KEY: "test-key",
               ELEVENLABS_VOICE_ID: "test-voice",
               AIMH_LOGO_PATH: "/logo.png",
-              AIMH_BODY_MUSIC_PATH: "/music.mp3"
+              AIMH_OUTRO_MUSIC_PATH: "/outro.mp3"
             },
             ffmpegPath: "ffmpeg",
             ffprobePath: "ffprobe"
@@ -1131,7 +1132,7 @@ describe("GPT-Live preparation CLI", () => {
       loadEnvSnapshotFromFiles: async () => ({
         values: {
           AIMH_LOGO_PATH: "/assets/logo.png",
-          AIMH_BODY_MUSIC_PATH: "/assets/music.mp3",
+          AIMH_OUTRO_MUSIC_PATH: "/assets/outro.mp3",
           FFMPEG_PATH: "/tools/ffmpeg",
           FFPROBE_PATH: "/tools/ffprobe"
         },

@@ -134,7 +134,7 @@ describe("GPT-Live finishing filters", () => {
     const args = buildFinishFfmpegArgs({
         inputPath: "/episode/exports/tella-a.mp4",
         logoPath: "/assets/logo.png",
-        musicPath: "/assets/Body_Komorebi_Futuremono.mp3",
+        musicPath: "/assets/Outro_Much_Higher_Causmic.mp3",
         outputPath: "/episode/final/version-a.tmp.mp4",
         durationSeconds: 10.75,
         duckIntervals: deriveSourceDuckIntervals(plan()),
@@ -149,7 +149,7 @@ describe("GPT-Live finishing filters", () => {
       "-stream_loop",
       "-1",
       "-i",
-      "/assets/Body_Komorebi_Futuremono.mp3"
+      "/assets/Outro_Much_Higher_Causmic.mp3"
     ]);
     const graph = args[args.indexOf("-filter_complex") + 1]!;
     expect(graph).toContain("apad=whole_dur=10.750");
@@ -301,7 +301,7 @@ describe("GPT-Live post-production publication", () => {
     episodeDir,
     env: {
       AIMH_LOGO_PATH: "/assets/logo.png",
-      AIMH_BODY_MUSIC_PATH: "/assets/music.mp3"
+      AIMH_OUTRO_MUSIC_PATH: "/assets/outro.mp3"
     },
     ffmpegPath: "ffmpeg",
     ffprobePath: "ffprobe"
@@ -425,7 +425,7 @@ describe("GPT-Live post-production publication", () => {
       productionId: "test-production",
       generationId: "00000000-0000-4000-8000-000000000000",
       logoPath: "/Users/editor/private/logo.png",
-      musicPath: "/Users/editor/private/Body_Komorebi_Futuremono.mp3",
+      musicPath: "/Users/editor/private/Outro_Much_Higher_Causmic.mp3",
       logoSha256: "a".repeat(64),
       duckIntervals: deriveSourceDuckIntervals(plan()),
       sourceGains: sourceGains.map((gain, index) => ({
@@ -473,7 +473,7 @@ describe("GPT-Live post-production publication", () => {
       assets: {
         logo: "logo.png",
         logoSha256: "a".repeat(64),
-        music: "Body_Komorebi_Futuremono.mp3"
+        music: "Outro_Much_Higher_Causmic.mp3"
       },
       sourceDialogue: {
         targetLufs: -23,
@@ -816,7 +816,7 @@ describe("GPT-Live post-production publication", () => {
             episodeDir,
             env: {
               AIMH_LOGO_PATH: "/assets/logo.png",
-              AIMH_BODY_MUSIC_PATH: "/assets/music.mp3"
+              AIMH_OUTRO_MUSIC_PATH: "/assets/outro.mp3"
             },
             ffmpegPath: "ffmpeg",
             ffprobePath: "ffprobe"

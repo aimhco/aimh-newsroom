@@ -133,9 +133,9 @@ const runPreflight = async (
   requireConfiguredValue(options.ffmpegPath, "ffmpeg path");
   requireConfiguredValue(options.ffprobePath, "ffprobe path");
   const logoPath = requireConfiguredValue(options.env.AIMH_LOGO_PATH, "AIMH logo path");
-  const musicPath = requireConfiguredValue(
-    options.env.AIMH_BODY_MUSIC_PATH,
-    "AIMH body music path"
+  const outroMusicPath = requireConfiguredValue(
+    options.env.AIMH_OUTRO_MUSIC_PATH,
+    "AIMH outro music path"
   );
 
   try {
@@ -144,9 +144,9 @@ const runPreflight = async (
     throw new Error("GPT-Live preflight failed: AIMH logo is not readable");
   }
   try {
-    await access(musicPath, constants.R_OK);
+    await access(outroMusicPath, constants.R_OK);
   } catch {
-    throw new Error("GPT-Live preflight failed: AIMH body music is not readable");
+    throw new Error("GPT-Live preflight failed: AIMH outro music is not readable");
   }
 };
 
@@ -402,7 +402,11 @@ export async function prepareGptLiveProduction(
       ...GPT_LIVE_CONTENT.branding,
       logoPath: options.env.AIMH_LOGO_PATH ?? GPT_LIVE_CONTENT.branding.logoPath
     },
-    musicPath: options.env.AIMH_BODY_MUSIC_PATH ?? GPT_LIVE_CONTENT.musicPath
+    audio: {
+      ...GPT_LIVE_CONTENT.audio,
+      outroMusicPath:
+        options.env.AIMH_OUTRO_MUSIC_PATH ?? GPT_LIVE_CONTENT.audio.outroMusicPath
+    }
   };
   const sourceMatrix = renderSourceMatrix();
   const manifestFingerprint = createHash("sha256")

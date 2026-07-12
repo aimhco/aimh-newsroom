@@ -35,7 +35,10 @@ import {
   publishQaReportSet,
   withQaStagingDirectory
 } from "../src/production/gptLive/qa/publication";
-import { withValidatedQaArtifactPaths } from "../src/production/gptLive/qa/paths";
+import {
+  validateSerializedQaPaths,
+  withValidatedQaArtifactPaths
+} from "../src/production/gptLive/qa/paths";
 import {
   assertMeaningfulFrameContent,
   renderComparisonMarkdown
@@ -105,8 +108,7 @@ const validSnapshot = (): GptLiveQaSnapshot => {
   const production = ({
     schemaVersion: "0.1.0" as const,
     ...structuredClone(GPT_LIVE_CONTENT),
-    branding: structuredClone(GPT_LIVE_CONTENT.branding),
-    musicPath: GPT_LIVE_CONTENT.musicPath
+    branding: structuredClone(GPT_LIVE_CONTENT.branding)
   }) as unknown as QaProduction;
   const env = {
     YOUTUBE_UPLOAD_ENABLED: "false",
@@ -142,7 +144,7 @@ const validSnapshot = (): GptLiveQaSnapshot => {
     productionId: GPT_LIVE_CONTENT.id,
     generationId: "00000000-0000-4000-8000-000000000000",
     logoPath: GPT_LIVE_CONTENT.branding.logoPath,
-    musicPath: GPT_LIVE_CONTENT.musicPath,
+    musicPath: GPT_LIVE_CONTENT.audio.outroMusicPath,
     logoSha256: sha("a"),
     duckIntervals,
     sourceGains,
@@ -543,6 +545,34 @@ describe("GPT-Live full production QA", () => {
 
   it("accepts a complete editorial, media, Tella, and A/B snapshot", () => {
     expect(() => validateGptLiveQaSnapshot(validSnapshot())).not.toThrow();
+  });
+
+  it("rejects a production with an altered audio policy", () => {
+    const snapshot = validSnapshot();
+    snapshot.production.audio = {
+      ...snapshot.production.audio,
+      outroMusicPath: "/outside/outro.mp3"
+    };
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/production manifest|audio/i);
+  });
+
+  it("rejects an unexpected serialized outro path", () => {
+    const snapshot = validSnapshot();
+    snapshot.production.audio = {
+      ...snapshot.production.audio,
+      outroMusicPath: "/outside/outro.mp3"
+    };
+
+    expect(() =>
+      validateSerializedQaPaths({
+        episodeDir: snapshot.episodeDir,
+        production: snapshot.production,
+        voice: snapshot.voice,
+        plan: snapshot.plan,
+        generation: snapshot.generation
+      })
+    ).toThrow(/audio path/i);
   });
 
   it.each([

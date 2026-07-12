@@ -108,7 +108,9 @@ const validateProduction = (production: QaProduction): void => {
     sources: GPT_LIVE_CONTENT.sources,
     claims: GPT_LIVE_CONTENT.claims,
     narration: GPT_LIVE_CONTENT.narration,
-    timeline: GPT_LIVE_CONTENT.timeline
+    timeline: GPT_LIVE_CONTENT.timeline,
+    evidence: GPT_LIVE_CONTENT.evidence,
+    audio: GPT_LIVE_CONTENT.audio
   };
   exact(
     {
@@ -117,7 +119,9 @@ const validateProduction = (production: QaProduction): void => {
       sources: production.sources,
       claims: production.claims,
       narration: production.narration,
-      timeline: production.timeline
+      timeline: production.timeline,
+      evidence: production.evidence,
+      audio: production.audio
     },
     approvedCore,
     "production manifest"
@@ -133,7 +137,6 @@ const validateProduction = (production: QaProduction): void => {
   }
 
   exact(production.branding, GPT_LIVE_CONTENT.branding, "logo settings and path");
-  if (production.musicPath !== GPT_LIVE_CONTENT.musicPath) fail("body music path is not approved");
 };
 
 const validatePreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
@@ -390,7 +393,7 @@ const validateBrandingAndAudio = (snapshot: GptLiveQaSnapshot): void => {
   exact(post.assets, {
     logo: "logo.png",
     logoSha256: snapshot.logo.sha256,
-    music: "Body_Komorebi_Futuremono.mp3"
+    music: "Outro_Much_Higher_Causmic.mp3"
   }, "post-production assets");
 
   if (!isRecord(post.settings)) fail("post-production settings are invalid");

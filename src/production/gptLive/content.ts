@@ -619,11 +619,4 @@ const GPT_LIVE_CONTENT_MANIFEST = {
 
 validateProductionManifest(GPT_LIVE_CONTENT_MANIFEST);
 
-// Allows downstream migration tasks to type-check without restoring musicPath to the manifest.
-type GptLiveContentCompatibility = typeof GPT_LIVE_CONTENT_MANIFEST & {
-  readonly musicPath: string;
-};
-
-export const GPT_LIVE_CONTENT = deepFreeze(
-  GPT_LIVE_CONTENT_MANIFEST
-) as GptLiveContentCompatibility;
+export const GPT_LIVE_CONTENT = deepFreeze(GPT_LIVE_CONTENT_MANIFEST);
