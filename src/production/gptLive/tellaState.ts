@@ -93,8 +93,18 @@ const requireVariantRecord = (
   return record as Record<GptLiveVariant, unknown>;
 };
 
+export const isUnsafeTellaReference = (value: string): boolean => {
+  const trimmed = value.trim();
+  return trimmed !== value || /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(trimmed);
+};
+
 const requireId = (value: unknown, label: string): string => {
-  if (typeof value !== "string" || !value.trim() || /^https?:\/\//i.test(value)) {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    isUnsafeTellaReference(value) ||
+    !/^[a-z0-9][a-z0-9_-]*$/i.test(value)
+  ) {
     invalid(`${label} must be a non-URL ID`);
   }
   return value as string;

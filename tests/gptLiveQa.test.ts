@@ -1468,6 +1468,20 @@ describe("GPT-Live full production QA", () => {
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/remote URL|non-URL ID/i);
   });
 
+  it.each([
+    "ftp://tella.example/video",
+    "data:text/plain,secret",
+    "file:///private/export.mp4",
+    "//tella.example/video",
+    " https://tella.example/video"
+  ])("rejects unsafe timeline audit identifier %s", (unsafeId) => {
+    const snapshot = validSnapshot();
+    const audit = (snapshot.tellaState as Record<string, any>).timelineAudit;
+    audit.compatibilityVideoIds.dynamic_editorial = unsafeId;
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/remote URL|non-URL ID/i);
+  });
+
   it.each(["variantClipIds", "layoutIds", "sourceIds"])(
     "rejects an extra Tella state ID in %s at the pure audit boundary",
     (mapName) => {
@@ -1991,6 +2005,18 @@ describe("GPT-Live full production QA", () => {
     const snapshot = validSnapshot();
     (snapshot.tellaState as Record<string, unknown>)[field] = "https://signed.example/video?token=secret";
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/unsafe URL field/i);
+  });
+
+  it.each([
+    "ftp://signed.example/video",
+    "data:text/plain,secret",
+    "file:///private/export.mp4",
+    "//signed.example/video",
+    " https://signed.example/video"
+  ])("rejects a nested unsafe Tella state URI %s", (unsafeUri) => {
+    const snapshot = validSnapshot();
+    (snapshot.tellaState as Record<string, unknown>).remoteReference = unsafeUri;
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/presigned or remote URL/i);
   });
 
   it("rejects a final without tail signal", () => {

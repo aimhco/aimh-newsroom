@@ -16,7 +16,11 @@ import { GPT_LIVE_SCENES } from "../motion/sceneStyle";
 import { buildSourceManifest } from "../prepare";
 import { assertPlateContract } from "../renderPlates";
 import { buildTellaPlan, type TellaPlan } from "../tellaPlan";
-import { assertTellaProgramDuration, validateTellaTimelineAudit } from "../tellaState";
+import {
+  assertTellaProgramDuration,
+  isUnsafeTellaReference,
+  validateTellaTimelineAudit
+} from "../tellaState";
 import type { EvidenceSpec, GptLiveProduction, ProductionClaim } from "../types";
 import { buildSpeechRequestBody, buildVoiceCacheKey } from "../../../voice/elevenLabsAdapter";
 import type {
@@ -452,7 +456,7 @@ const scanUnsafeTellaState = (value: unknown, path = "tellaState"): void => {
     return;
   }
   if (!isRecord(value)) {
-    if (typeof value === "string" && /^https?:\/\//i.test(value)) {
+    if (typeof value === "string" && isUnsafeTellaReference(value)) {
       fail(`Tella state contains a presigned or remote URL at ${path}`);
     }
     return;
