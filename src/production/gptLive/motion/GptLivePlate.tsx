@@ -28,6 +28,16 @@ export const evidencePlateLayout = (
   maskReservedTopRight: stage === "establish"
 });
 
+export const plateEntranceStyle = (
+  animateEntrance: boolean,
+  entranceProgress: number
+): { readonly transform: string; readonly opacity: number } => ({
+  transform: animateEntrance
+    ? `translateX(${(1 - entranceProgress) * -28}px)`
+    : "none",
+  opacity: 1
+});
+
 export const GptLivePlate = (props: GptLivePlateProps) => {
   const { delayRender, continueRender, cancelRender } = useDelayRender();
   const [fontHandle] = useState(() => delayRender("Loading bundled GPT-Live fonts"));
@@ -52,6 +62,7 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
   const entrance = plateLayout.animateEntrance
     ? spring({ frame, fps, config: { damping: 18, stiffness: 130, mass: 0.8 } })
     : 1;
+  const entranceStyle = plateEntranceStyle(plateLayout.animateEntrance, entrance);
   const stateIndex = sceneStateIndex(
     content.scene,
     frame,
@@ -79,10 +90,7 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
           width: plateLayout.rect.width,
           height: plateLayout.rect.height,
           boxSizing: "border-box",
-          transform: plateLayout.animateEntrance
-            ? `translateX(${(1 - entrance) * -28}px)`
-            : "none",
-          opacity: entrance
+          ...entranceStyle
         }}
       >
         <SceneRenderer

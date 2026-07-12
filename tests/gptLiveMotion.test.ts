@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { bundle as bundleRemotion } from "@remotion/bundler";
 import {
   openBrowser,
+  renderStill,
   selectComposition as selectRemotionComposition
 } from "@remotion/renderer";
 import { describe, expect, it, vi } from "vitest";
@@ -60,6 +61,7 @@ import type {
   EvidenceSpec,
   GptLiveVariant
 } from "../src/production/gptLive/types";
+import { runCommand } from "../src/render/process";
 
 const VARIANTS = ["dynamic_editorial", "aimh_visual_host"] as const satisfies readonly GptLiveVariant[];
 const SAFE_AREA: SceneRect = { x: 1722, y: 0, width: 198, height: 198 };
@@ -103,6 +105,14 @@ const evidencePlateLayout = (
     };
   }
 ).evidencePlateLayout;
+const plateEntranceStyle = (
+  plateModule as unknown as {
+    plateEntranceStyle?: (
+      animateEntrance: boolean,
+      entranceProgress: number
+    ) => { readonly transform: string; readonly opacity: number };
+  }
+).plateEntranceStyle;
 const resolveSmokeEvidenceDimensions = (
   smokePlanModule as unknown as {
     resolveSmokeEvidenceDimensions?: (
@@ -111,6 +121,33 @@ const resolveSmokeEvidenceDimensions = (
     ) => { readonly width: number; readonly height: number } | undefined;
   }
 ).resolveSmokeEvidenceDimensions;
+const assertContentfulFrameMetadata = (
+  smokePlanModule as unknown as {
+    assertContentfulFrameMetadata?: (metadata: string) => void;
+  }
+).assertContentfulFrameMetadata;
+
+const renderedLumaRange = async (file: string): Promise<readonly [number, number]> => {
+  const result = await runCommand(process.env.FFMPEG_PATH ?? "ffmpeg", [
+    "-hide_banner",
+    "-i",
+    file,
+    "-vf",
+    "signalstats,metadata=print",
+    "-frames:v",
+    "1",
+    "-f",
+    "null",
+    "-"
+  ]);
+  const metadata = `${result.stdout}\n${result.stderr}`;
+  const minimum = Number(metadata.match(/lavfi\.signalstats\.YMIN=(\d+)/)?.[1]);
+  const maximum = Number(metadata.match(/lavfi\.signalstats\.YMAX=(\d+)/)?.[1]);
+  if (!Number.isFinite(minimum) || !Number.isFinite(maximum)) {
+    throw new Error(`Rendered frame luma metadata is incomplete for ${file}`);
+  }
+  return [minimum, maximum];
+};
 
 const withTimeout = async <T>(
   operation: Promise<T>,
@@ -437,6 +474,22 @@ describe("GPT-Live evidence-first motion contracts", () => {
     });
   });
 
+  it("keeps entrance content opaque from frame zero while translating non-evidence scenes", () => {
+    expect(plateEntranceStyle).toBeTypeOf("function");
+    expect(plateEntranceStyle?.(true, 0)).toEqual({
+      transform: "translateX(-28px)",
+      opacity: 1
+    });
+    expect(plateEntranceStyle?.(true, 1)).toEqual({
+      transform: "translateX(0px)",
+      opacity: 1
+    });
+    expect(plateEntranceStyle?.(false, 1)).toEqual({
+      transform: "none",
+      opacity: 1
+    });
+  });
+
   it("uses deterministic establish, explain, and spotlight stages", () => {
     expect([0, 59, 60, 173, 174, 299].map((frame) => evidenceStage(frame, 300))).toEqual([
       "establish",
@@ -531,14 +584,25 @@ describe("GPT-Live rendered smoke planning", () => {
     ).toEqual({ width: 1280, height: 720 });
   });
 
-  it("plans every evidence stage plus one still for each preserved motion scene", () => {
+  it("plans every evidence stage plus start and representative stills for non-evidence scenes", () => {
     const plan = buildSmokeFramePlan(8 * 30);
-    expect(plan).toHaveLength(30);
-    expect(new Set(plan.map(({ outputName }) => outputName)).size).toBe(30);
+    expect(plan).toHaveLength(36);
+    expect(new Set(plan.map(({ outputName }) => outputName)).size).toBe(36);
     expect(new Set(plan.map(({ sceneContent }) => sceneContent.scene))).toEqual(
       new Set(GPT_LIVE_SCENES)
     );
     expect(new Set(plan.map(({ variant }) => variant))).toEqual(new Set(VARIANTS));
+
+    for (const variant of VARIANTS) {
+      for (const scene of ["hook", "use_cases", "cta"] as const) {
+        const items = plan.filter(
+          (item) => item.variant === variant && item.sceneContent.scene === scene
+        );
+        expect(items).toHaveLength(2);
+        expect(items.some(({ frame, outputName }) => frame === 0 && outputName.endsWith("-start.png")))
+          .toBe(true);
+      }
+    }
   });
 
   it("samples establish, explain, and spotlight for every captured evidence scene", () => {
@@ -604,6 +668,92 @@ describe("GPT-Live rendered smoke planning", () => {
       "safe area metadata is incomplete"
     );
   });
+
+  it("accepts visible frame luma variation and rejects a uniform base canvas", () => {
+    expect(assertContentfulFrameMetadata).toBeTypeOf("function");
+    expect(() =>
+      assertContentfulFrameMetadata?.(
+        "lavfi.signalstats.YMIN=34\nlavfi.signalstats.YMAX=228"
+      )
+    ).not.toThrow();
+    expect(() =>
+      assertContentfulFrameMetadata?.(
+        "lavfi.signalstats.YMIN=228\nlavfi.signalstats.YMAX=228"
+      )
+    ).toThrow("frame has no visible luma variation");
+    expect(() => assertContentfulFrameMetadata?.("missing metadata")).toThrow(
+      "frame metadata is incomplete"
+    );
+  });
+
+  it("renders meaningful content at frame zero for every non-evidence scene", async () => {
+    const integrationDir = await mkdtemp(join(tmpdir(), "gpt-live-frame-zero-"));
+    const bundleOutput = join(integrationDir, "bundle");
+    let browser: Awaited<ReturnType<typeof openBrowser>> | undefined;
+    try {
+      const entryPoint = fileURLToPath(
+        new URL("../src/production/gptLive/motion/Root.tsx", import.meta.url)
+      );
+      await withTimeout(
+        bundleRemotion({ entryPoint, outDir: bundleOutput }),
+        15_000,
+        "Remotion frame-zero bundle"
+      );
+      browser = await withTimeout(
+        openBrowser("chrome", { logLevel: "error" }),
+        10_000,
+        "Remotion frame-zero browser open"
+      );
+
+      for (const scene of ["hook", "use_cases", "cta"] as const) {
+        const inputProps: GptLivePlateProps = {
+          variant: "dynamic_editorial",
+          durationSeconds: 8,
+          sceneContent: GPT_LIVE_VISUAL_CONTENT[scene]
+        };
+        const composition = await withTimeout(
+          selectRemotionComposition({
+            serveUrl: bundleOutput,
+            id: "GptLivePlate",
+            inputProps,
+            puppeteerInstance: browser,
+            timeoutInMilliseconds: 10_000,
+            logLevel: "error"
+          }),
+          12_000,
+          `Remotion ${scene} composition selection`
+        );
+        const output = join(integrationDir, `${scene}-frame-0.png`);
+        await withTimeout(
+          renderStill({
+            composition,
+            serveUrl: bundleOutput,
+            inputProps,
+            frame: 0,
+            output,
+            imageFormat: "png",
+            overwrite: true,
+            puppeteerInstance: browser,
+            timeoutInMilliseconds: 10_000,
+            logLevel: "error"
+          }),
+          15_000,
+          `Remotion ${scene} frame-zero render`
+        );
+        const [minimum, maximum] = await renderedLumaRange(output);
+        expect(maximum, `${scene} YMIN=${minimum} YMAX=${maximum}`).toBeGreaterThan(minimum);
+      }
+    } finally {
+      const cleanupResults = await Promise.allSettled([
+        ...(browser ? [browser.close({ silent: true })] : []),
+        rm(integrationDir, { recursive: true, force: true })
+      ]);
+      const cleanupFailure = cleanupResults.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected"
+      );
+      if (cleanupFailure) throw cleanupFailure.reason;
+    }
+  }, 70_000);
 });
 
 describe("GPT-Live plate render planning", () => {

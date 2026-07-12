@@ -8,6 +8,7 @@ import { GPT_LIVE_VISUAL_CONTENT } from "../content";
 import { stageEvidencePublicAssets } from "../evidence";
 import type { GptLivePlateProps } from "./Root";
 import {
+  assertContentfulFrameMetadata,
   assertUniformSafeAreaMetadata,
   buildSmokeFramePlan,
   resolveSmokeEvidenceDimensions,
@@ -35,6 +36,22 @@ const assertRenderedSafeArea = async (ffmpegPath: string, file: string): Promise
     "-"
   ]);
   assertUniformSafeAreaMetadata(`${result.stdout}\n${result.stderr}`);
+};
+
+const assertRenderedContent = async (ffmpegPath: string, file: string): Promise<void> => {
+  const result = await runCommand(ffmpegPath, [
+    "-hide_banner",
+    "-i",
+    file,
+    "-vf",
+    "signalstats,metadata=print",
+    "-frames:v",
+    "1",
+    "-f",
+    "null",
+    "-"
+  ]);
+  assertContentfulFrameMetadata(`${result.stdout}\n${result.stderr}`);
 };
 
 const renderFrame = async (
@@ -74,7 +91,7 @@ const createContactSheet = async (ffmpegPath: string, outputDir: string): Promis
     "-i",
     join(outputDir, "frames", "dynamic*.png"),
     "-filter_complex",
-    "[0:v][1:v]concat=n=2:v=1:a=0,scale=320:180,tile=5x6:nb_frames=30:padding=8:margin=8:color=0x242424,scale=1500:-1",
+    "[0:v][1:v]concat=n=2:v=1:a=0,scale=320:180,tile=6x6:nb_frames=36:padding=8:margin=8:color=0x242424,scale=1500:-1",
     "-frames:v",
     "1",
     "-update",
@@ -145,6 +162,9 @@ export async function renderGptLiveMotionSmoke(
           : {})
       });
       await assertRenderedSafeArea(ffmpegPath, output);
+      if (item.verifyContentfulFrame) {
+        await assertRenderedContent(ffmpegPath, output);
+      }
     }
 
     for (const [index, frame] of useCaseTemporalFrames(DURATION_IN_FRAMES).entries()) {

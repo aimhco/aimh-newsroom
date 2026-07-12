@@ -19,6 +19,7 @@ export interface SmokeFramePlanItem {
   readonly stage?: EvidenceStage;
   readonly frame: number;
   readonly outputName: string;
+  readonly verifyContentfulFrame?: true;
 }
 
 export const resolveSmokeEvidenceDimensions = (
@@ -38,7 +39,7 @@ const representativeFrame = (content: SceneContent, durationInFrames: number): n
 
 export function buildSmokeFramePlan(durationInFrames: number): readonly SmokeFramePlanItem[] {
   return GPT_LIVE_CONTENT.variants.flatMap((variant) =>
-    GPT_LIVE_SCENES.flatMap((scene) => {
+    GPT_LIVE_SCENES.flatMap((scene): readonly SmokeFramePlanItem[] => {
       const sceneContent = GPT_LIVE_VISUAL_CONTENT[scene];
       const evidence = GPT_LIVE_CONTENT.evidence.find(
         (item) => item.scene === scene && item.playbackDecision === "captured_source"
@@ -54,12 +55,21 @@ export function buildSmokeFramePlan(durationInFrames: number): readonly SmokeFra
           outputName: `${variant}-${scene}-${stage}.png`
         }));
       }
-      return {
-        variant,
-        sceneContent,
-        frame: representativeFrame(sceneContent, durationInFrames),
-        outputName: `${variant}-${scene}.png`
-      };
+      return [
+        {
+          variant,
+          sceneContent,
+          frame: 0,
+          outputName: `${variant}-${scene}-start.png`,
+          verifyContentfulFrame: true as const
+        },
+        {
+          variant,
+          sceneContent,
+          frame: representativeFrame(sceneContent, durationInFrames),
+          outputName: `${variant}-${scene}.png`
+        }
+      ];
     })
   );
 }
@@ -84,5 +94,18 @@ export function assertUniformSafeAreaMetadata(metadata: string): void {
         `Rendered safe area is not uniform: ${channel}MIN=${minimum}, ${channel}MAX=${maximum}`
       );
     }
+  }
+}
+
+export function assertContentfulFrameMetadata(metadata: string): void {
+  const minimum = metadata.match(/lavfi\.signalstats\.YMIN=(\d+)/)?.[1];
+  const maximum = metadata.match(/lavfi\.signalstats\.YMAX=(\d+)/)?.[1];
+  if (minimum === undefined || maximum === undefined) {
+    throw new Error("Rendered frame metadata is incomplete");
+  }
+  if (minimum === maximum) {
+    throw new Error(
+      `Rendered frame has no visible luma variation: YMIN=${minimum}, YMAX=${maximum}`
+    );
   }
 }
