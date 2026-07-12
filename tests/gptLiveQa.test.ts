@@ -28,7 +28,8 @@ import {
   runGptLiveQa,
   validateGptLiveQaSnapshot,
   type GptLiveQaSnapshot,
-  type RunGptLiveQaDependencies
+  type RunGptLiveQaDependencies,
+  type VisualArtifacts
 } from "../src/production/gptLive/qa";
 import type { QaProduction } from "../src/production/gptLive/qa";
 import {
@@ -41,6 +42,9 @@ import {
 } from "../src/production/gptLive/qa/paths";
 import {
   assertMeaningfulFrameContent,
+  assertTransitionFrameHasContent,
+  generateVisualArtifacts,
+  parseTransitionSignalStats,
   renderComparisonMarkdown
 } from "../src/production/gptLive/qa/visual";
 import { assertSafeSourceManifestUrl } from "../src/production/gptLive/qa/validation";
@@ -421,11 +425,15 @@ const createQaRunHarness = async () => {
         ]
       : [])
   ]);
-  const artifacts = {
+  const artifacts: VisualArtifacts = {
     contactSheets: { "version-a": "reports/visual/a.png", "version-b": "reports/visual/b.png" },
     transitionFrames: { "version-a": [], "version-b": [] },
     tailAudio: { "version-a": "reports/visual/a.wav", "version-b": "reports/visual/b.wav" },
     contactSampleTimesSeconds: { "version-a": [], "version-b": [] },
+    transitionContent: {
+      "version-a": { sampledFrames: 16, blankFrames: [] },
+      "version-b": { sampledFrames: 16, blankFrames: [] }
+    },
     checkedFrameCount: 58,
     contentMetrics: {
       minimumChangedPixelProportion: 0.07,
@@ -569,6 +577,170 @@ describe("GPT-Live full production QA", () => {
       lumaVariance: 1156,
       normalizedEntropy: 0.14
     }, "sample.png")).not.toThrow();
+  });
+
+  it("parses transition signalstats component ranges", () => {
+    expect(parseTransitionSignalStats([
+      "lavfi.signalstats.YMIN=16",
+      "lavfi.signalstats.YMAX=235",
+      "lavfi.signalstats.UMIN=90",
+      "lavfi.signalstats.UMAX=140",
+      "lavfi.signalstats.VMIN=101",
+      "lavfi.signalstats.VMAX=155"
+    ].join("\n"))).toEqual({ yRange: 219, uRange: 50, vRange: 54 });
+  });
+
+  it.each([
+    ["missing", "lavfi.signalstats.YMIN=16\nlavfi.signalstats.YMAX=235"],
+    ["non-finite", [
+      "lavfi.signalstats.YMIN=NaN",
+      "lavfi.signalstats.YMAX=235",
+      "lavfi.signalstats.UMIN=90",
+      "lavfi.signalstats.UMAX=140",
+      "lavfi.signalstats.VMIN=101",
+      "lavfi.signalstats.VMAX=155"
+    ].join("\n")]
+  ])("rejects %s transition signalstats metadata", (_name, text) => {
+    expect(() => parseTransitionSignalStats(text)).toThrow(/signalstats|metadata/i);
+  });
+
+  it("rejects a transition frame when every component range is at most six", () => {
+    expect(() => assertTransitionFrameHasContent({ yRange: 6, uRange: 0, vRange: 4 }))
+      .toThrow(/transition.*content|blank/i);
+  });
+
+  it.each([
+    { yRange: 7, uRange: 0, vRange: 0 },
+    { yRange: 0, uRange: 7, vRange: 0 },
+    { yRange: 0, uRange: 0, vRange: 7 }
+  ])("accepts a transition frame when any component range exceeds six", (stats) => {
+    expect(() => assertTransitionFrameHasContent(stats)).not.toThrow();
+  });
+
+  it("samples both sides of every clip boundary in both variants with safe clamping", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-transition-content-"));
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const plan = {
+      schemaVersion: "0.1.0" as const,
+      productionId: "transition-test",
+      clips: [
+        { id: "clip-one", kind: "source_clip" as const, durationSeconds: 0.02 },
+        { id: "clip-two", kind: "source_clip" as const, durationSeconds: 0.06 },
+        { id: "clip-three", kind: "source_clip" as const, durationSeconds: 0.02 }
+      ]
+    } as any;
+    try {
+      const artifacts = await generateVisualArtifacts({
+        episodeDir,
+        finalPaths: { "version-a": "/final-a.mp4", "version-b": "/final-b.mp4" },
+        durations: { "version-a": 0.1, "version-b": 0.1 },
+        plan,
+        ffmpegPath: "ffmpeg"
+      }, {
+        runCommand: async (command, args) => {
+          calls.push({ command, args });
+          if (args.some((arg) => arg.endsWith("signalstats,metadata=print"))) {
+            return {
+              stdout: "",
+              stderr: [
+                "lavfi.signalstats.YMIN=16",
+                "lavfi.signalstats.YMAX=40",
+                "lavfi.signalstats.UMIN=100",
+                "lavfi.signalstats.UMAX=110",
+                "lavfi.signalstats.VMIN=120",
+                "lavfi.signalstats.VMAX=128"
+              ].join("\n")
+            };
+          }
+          return {
+            stdout: "",
+            stderr: "lavfi.blackframe.pblack=0\nshowinfo stdev:[20.0 0.0 0.0]\nlavfi.entropy.normalized_entropy.normal.Y=0.1"
+          };
+        }
+      });
+
+      const signalCalls = calls.filter(({ args }) =>
+        args.some((arg) => arg.endsWith("signalstats,metadata=print"))
+      );
+      expect(signalCalls).toHaveLength(8);
+      expect(signalCalls.every(({ args }) =>
+        args.includes("crop=iw*0.85:ih*0.92:iw*0.02:ih*0.04,signalstats,metadata=print")
+      )).toBe(true);
+      expect(signalCalls.map(({ args }) => ({
+        input: args[args.indexOf("-i") + 1],
+        time: args[args.indexOf("-ss") + 1]
+      }))).toEqual([
+        { input: "/final-a.mp4", time: "0.000000" },
+        { input: "/final-a.mp4", time: "0.053333" },
+        { input: "/final-a.mp4", time: "0.046667" },
+        { input: "/final-a.mp4", time: "0.066667" },
+        { input: "/final-b.mp4", time: "0.000000" },
+        { input: "/final-b.mp4", time: "0.053333" },
+        { input: "/final-b.mp4", time: "0.046667" },
+        { input: "/final-b.mp4", time: "0.066667" }
+      ]);
+      expect(artifacts.transitionContent).toEqual({
+        "version-a": { sampledFrames: 4, blankFrames: [] },
+        "version-b": { sampledFrames: 4, blankFrames: [] }
+      });
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports blank transition frames with deterministic clip-pair IDs", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-transition-blank-"));
+    const plan = {
+      schemaVersion: "0.1.0" as const,
+      productionId: "transition-test",
+      clips: [
+        { id: "clip-one", kind: "source_clip" as const, durationSeconds: 1 },
+        { id: "clip-two", kind: "source_clip" as const, durationSeconds: 1 }
+      ]
+    } as any;
+    try {
+      const artifacts = await generateVisualArtifacts({
+        episodeDir,
+        finalPaths: { "version-a": "/final-a.mp4", "version-b": "/final-b.mp4" },
+        durations: { "version-a": 2, "version-b": 2 },
+        plan,
+        ffmpegPath: "ffmpeg"
+      }, {
+        runCommand: async (_command, args) => {
+          if (args.some((arg) => arg.endsWith("signalstats,metadata=print"))) {
+            const input = args[args.indexOf("-i") + 1];
+            const time = args[args.indexOf("-ss") + 1];
+            const blank = input === "/final-b.mp4" && time === "1.033333";
+            return {
+              stdout: "",
+              stderr: [
+                "lavfi.signalstats.YMIN=16",
+                `lavfi.signalstats.YMAX=${blank ? 22 : 40}`,
+                "lavfi.signalstats.UMIN=100",
+                `lavfi.signalstats.UMAX=${blank ? 106 : 110}`,
+                "lavfi.signalstats.VMIN=120",
+                `lavfi.signalstats.VMAX=${blank ? 126 : 128}`
+              ].join("\n")
+            };
+          }
+          return {
+            stdout: "",
+            stderr: "lavfi.blackframe.pblack=0\nshowinfo stdev:[20.0 0.0 0.0]\nlavfi.entropy.normalized_entropy.normal.Y=0.1"
+          };
+        }
+      });
+
+      expect(artifacts.transitionContent["version-b"]).toEqual({
+        sampledFrames: 2,
+        blankFrames: [{
+          boundaryId: "boundary-01-clip-one-to-clip-two",
+          side: "after",
+          timeSeconds: 1.033333
+        }]
+      });
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
   });
 
   it("writes comparison.md at the reports root and identifies the stale visual path", () => {
@@ -1057,6 +1229,10 @@ describe("GPT-Live full production QA", () => {
         transitionFrames: { "version-a": ["a/1.png"], "version-b": ["b/1.png"] },
         tailAudio: { "version-a": "a.wav", "version-b": "b.wav" },
         contactSampleTimesSeconds: { "version-a": [], "version-b": [] },
+        transitionContent: {
+          "version-a": { sampledFrames: 16, blankFrames: [] },
+          "version-b": { sampledFrames: 16, blankFrames: [] }
+        },
         checkedFrameCount: 58,
         contentMetrics: {
           minimumChangedPixelProportion: 0.07,
@@ -1070,8 +1246,45 @@ describe("GPT-Live full production QA", () => {
       sourceOutputLufs: []
     });
     expect(comparison).toContain("Machine review complete");
-    expect(comparison).toContain("cannot prove CTA narration");
+    expect(comparison).toContain("one evidence-editorial output");
+    expect(comparison).toContain("boundary content checks passed");
+    expect(comparison).toContain("outro-only tail signal does not prove CTA completion");
+    expect(comparison).not.toContain("Version B host usefulness");
+    expect(comparison).not.toContain("Music is present");
     expect(comparison).toContain("Full real-time listening");
+  });
+
+  it("rejects QA when a transition boundary sample is blank", async () => {
+    const harness = await createQaRunHarness();
+    try {
+      harness.artifacts.transitionContent["version-b"] = {
+        sampledFrames: 16,
+        blankFrames: [{
+          boundaryId: "boundary-01-narration-hook-to-clip-translation",
+          side: "after",
+          timeSeconds: 15.033333
+        }]
+      };
+      await expect(runGptLiveQa(
+        { episodeDir: harness.episodeDir, env: harness.snapshot.env, ffmpegPath: "ffmpeg", ffprobePath: "ffprobe" },
+        { ...harness.dependencies, validatePublishedGeneration: async () => harness.generation }
+      )).rejects.toThrow(/transition.*blank|blank.*transition/i);
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects QA unless each variant samples exactly twice per interior boundary", async () => {
+    const harness = await createQaRunHarness();
+    try {
+      harness.artifacts.transitionContent["version-a"].sampledFrames = 15;
+      await expect(runGptLiveQa(
+        { episodeDir: harness.episodeDir, env: harness.snapshot.env, ffmpegPath: "ffmpeg", ffprobePath: "ffprobe" },
+        { ...harness.dependencies, validatePublishedGeneration: async () => harness.generation }
+      )).rejects.toThrow(/expected 16 transition.*samples|transition.*received 15/i);
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
   });
 
   it("rejects a source claim without a source", () => {

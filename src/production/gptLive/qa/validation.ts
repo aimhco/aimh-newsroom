@@ -14,7 +14,7 @@ import { assertNarrationSlateContract } from "../mediaInspection";
 import { GPT_LIVE_SCENES } from "../motion/sceneStyle";
 import { buildSourceManifest } from "../prepare";
 import { assertPlateContract } from "../renderPlates";
-import { buildTellaPlan } from "../tellaPlan";
+import { buildTellaPlan, type TellaPlan } from "../tellaPlan";
 import type { EvidenceSpec, GptLiveProduction, ProductionClaim } from "../types";
 import { buildSpeechRequestBody, buildVoiceCacheKey } from "../../../voice/elevenLabsAdapter";
 import type {
@@ -22,7 +22,8 @@ import type {
   QaPreparedMediaInspection,
   QaProduction,
   QaVariantName,
-  QaVoice
+  QaVoice,
+  VisualArtifacts
 } from "./types";
 
 const VARIANTS = ["version-a", "version-b"] as const;
@@ -775,4 +776,24 @@ export function validateGptLiveQaSnapshot(snapshot: GptLiveQaSnapshot): void {
   validateBrandingAndAudio(snapshot);
   validateSafeAreasAndTails(snapshot);
   validateObservedIntegrityHashes(snapshot);
+}
+
+export function validateVisualArtifacts(artifacts: VisualArtifacts, plan: TellaPlan): void {
+  const expectedSamples = Math.max(0, plan.clips.length - 1) * 2;
+  for (const name of VARIANTS) {
+    const content = artifacts.transitionContent?.[name];
+    if (!content || content.sampledFrames !== expectedSamples) {
+      fail(
+        `${name} expected ${expectedSamples} transition content samples, received ${content?.sampledFrames ?? "none"}`
+      );
+    }
+    if (!Array.isArray(content.blankFrames)) {
+      fail(`${name} transition blank frame report is invalid`);
+    }
+    if (content.blankFrames.length > 0) {
+      fail(
+        `${name} transition content contains blank frames: ${content.blankFrames.map((frame) => `${frame.boundaryId}:${frame.side}`).join(", ")}`
+      );
+    }
+  }
 }

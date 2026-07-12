@@ -2,9 +2,15 @@ import { mkdir, rm } from "node:fs/promises";
 import { basename, join, relative, sep } from "node:path";
 import { runCommand as defaultRunCommand } from "../../../render/process";
 import type { TellaPlan } from "../tellaPlan";
-import type { QaVariantName, VisualArtifacts } from "./types";
+import type {
+  BlankTransitionFrame,
+  QaVariantName,
+  TransitionSignalStats,
+  VisualArtifacts
+} from "./types";
 
 const VARIANTS = ["version-a", "version-b"] as const;
+const FRAME_DURATION_SECONDS = 1 / 30;
 
 export interface GenerateVisualArtifactsOptions {
   episodeDir: string;
@@ -23,6 +29,11 @@ export interface GenerateVisualArtifactsDependencies {
 interface FrameSample {
   label: string;
   timeSeconds: number;
+}
+
+interface TransitionFrameSample extends FrameSample {
+  boundaryId: string;
+  side: BlankTransitionFrame["side"];
 }
 
 export interface FrameContentMetrics {
@@ -44,7 +55,31 @@ export function assertMeaningfulFrameContent(
   }
 }
 
+export function parseTransitionSignalStats(text: string): TransitionSignalStats {
+  const value = (component: "Y" | "U" | "V", bound: "MIN" | "MAX"): number => {
+    const parsed = Number(
+      text.match(new RegExp(`lavfi\\.signalstats\\.${component}${bound}=([^\\s]+)`))?.[1]
+    );
+    if (!Number.isFinite(parsed)) {
+      throw new Error(`GPT-Live QA failed: transition signalstats metadata is unreadable: ${component}${bound}`);
+    }
+    return parsed;
+  };
+  return {
+    yRange: value("Y", "MAX") - value("Y", "MIN"),
+    uRange: value("U", "MAX") - value("U", "MIN"),
+    vRange: value("V", "MAX") - value("V", "MIN")
+  };
+}
+
+export function assertTransitionFrameHasContent(stats: TransitionSignalStats): void {
+  if (stats.yRange <= 6 && stats.uRange <= 6 && stats.vRange <= 6) {
+    throw new Error("GPT-Live QA failed: transition frame lacks content");
+  }
+}
+
 const fixed = (value: number): string => value.toFixed(3);
+const transitionFixed = (value: number): string => value.toFixed(6);
 
 const relativeReportPath = (episodeDir: string, path: string): string =>
   relative(episodeDir, path).split(sep).join("/");
@@ -143,6 +178,61 @@ const timelineSamples = (plan: TellaPlan): FrameSample[] => {
   }));
 };
 
+const transitionBoundarySamples = (
+  plan: TellaPlan,
+  durationSeconds: number
+): TransitionFrameSample[] => {
+  const samples: TransitionFrameSample[] = [];
+  const lastSafeTime = Math.max(0, durationSeconds - FRAME_DURATION_SECONDS);
+  let boundaryTime = 0;
+  for (let index = 0; index < plan.clips.length - 1; index += 1) {
+    const beforeClip = plan.clips[index]!;
+    const afterClip = plan.clips[index + 1]!;
+    boundaryTime += beforeClip.durationSeconds;
+    const boundaryId = [
+      `boundary-${String(index + 1).padStart(2, "0")}`,
+      safeLabel(beforeClip.id),
+      "to",
+      safeLabel(afterClip.id)
+    ].join("-");
+    for (const side of ["before", "after"] as const) {
+      const offset = side === "before" ? -FRAME_DURATION_SECONDS : FRAME_DURATION_SECONDS;
+      const timeSeconds = Math.min(lastSafeTime, Math.max(0, boundaryTime + offset));
+      samples.push({
+        boundaryId,
+        side,
+        label: `${boundaryId}-${side}`,
+        timeSeconds: Number(transitionFixed(timeSeconds))
+      });
+    }
+  }
+  return samples;
+};
+
+const inspectTransitionFrame = async (
+  runCommand: typeof defaultRunCommand,
+  ffmpegPath: string,
+  inputPath: string,
+  timeSeconds: number
+): Promise<TransitionSignalStats> => {
+  const result = await runCommand(ffmpegPath, [
+    "-hide_banner",
+    "-nostats",
+    "-ss",
+    transitionFixed(timeSeconds),
+    "-i",
+    inputPath,
+    "-frames:v",
+    "1",
+    "-vf",
+    "crop=iw*0.85:ih*0.92:iw*0.02:ih*0.04,signalstats,metadata=print",
+    "-f",
+    "null",
+    "-"
+  ]);
+  return parseTransitionSignalStats(`${result.stdout}\n${result.stderr}`);
+};
+
 const buildContactSheet = async (
   runCommand: typeof defaultRunCommand,
   ffmpegPath: string,
@@ -181,6 +271,10 @@ export async function generateVisualArtifacts(
     transitionFrames: { "version-a": [], "version-b": [] },
     tailAudio: { "version-a": "", "version-b": "" },
     contactSampleTimesSeconds: { "version-a": [], "version-b": [] },
+    transitionContent: {
+      "version-a": { sampledFrames: 0, blankFrames: [] },
+      "version-b": { sampledFrames: 0, blankFrames: [] }
+    },
     checkedFrameCount: 0,
     contentMetrics: {
       minimumChangedPixelProportion: Number.POSITIVE_INFINITY,
@@ -241,6 +335,25 @@ export async function generateVisualArtifacts(
         artifacts.transitionFrames[name].push(artifactPath(framePath));
       }
 
+      for (const sample of transitionBoundarySamples(options.plan, options.durations[name])) {
+        const stats = await inspectTransitionFrame(
+          runCommand,
+          options.ffmpegPath,
+          inputPath,
+          sample.timeSeconds
+        );
+        artifacts.transitionContent[name].sampledFrames += 1;
+        try {
+          assertTransitionFrameHasContent(stats);
+        } catch {
+          artifacts.transitionContent[name].blankFrames.push({
+            boundaryId: sample.boundaryId,
+            side: sample.side,
+            timeSeconds: sample.timeSeconds
+          });
+        }
+      }
+
       const tailPath = join(visualDirectory, `${name}-tail.wav`);
       await runCommand(options.ffmpegPath, [
         "-y",
@@ -297,9 +410,10 @@ export function renderComparisonMarkdown(options: {
     "",
     "## Pacing",
     `Version A is ${fixed(options.durations["version-a"])}s and Version B is ${fixed(options.durations["version-b"])}s; the A/B delta is ${fixed(options.durationDeltaSeconds)}s.`,
+    "This QA set contains one evidence-editorial output and one visual-host output.",
     "",
     "## Text legibility",
-    "All 34 labeled transition frames were extracted at 1920x1080; 24 contact-sheet samples were downscaled to 480x270 tiles. All passed pixel-range checks, which do not prove text legibility at playback speed.",
+    "All 34 labeled review frames were extracted at 1920x1080; 24 contact-sheet samples were downscaled to 480x270 tiles. All passed pixel-range checks, which do not prove text legibility at playback speed.",
     "",
     "## Logo placement",
     "The fixed 150px, 85% opacity, 24px top-right logo treatment has three changed-corner hash samples per final and a reserved 198x198 area in every narration scene.",
@@ -307,11 +421,11 @@ export function renderComparisonMarkdown(options: {
     "## Version A continuity",
     `The dynamic-editorial final has source, scene-start, scene-midpoint, transition, and final-CTA frames in ${options.artifacts.transitionFrames["version-a"][0]?.split("/").slice(0, -1).join("/")}. Continuity remains a human playback judgment.`,
     "",
-    "## Version B host usefulness",
-    `The visual-host final has the same labeled sampling coverage in ${options.artifacts.transitionFrames["version-b"][0]?.split("/").slice(0, -1).join("/")}. Host usefulness remains a human playback judgment.`,
+    "## Transition boundary content",
+    `All ${options.artifacts.transitionContent["version-a"].sampledFrames + options.artifacts.transitionContent["version-b"].sampledFrames} boundary content checks passed across both outputs, sampling one frame before and after every interior clip boundary independently of the labeled review screenshots.`,
     "",
     "## Audio and source-dialogue clarity",
-    `Both finals contain AAC 48kHz stereo audio with matching treatment. Measured source-dialogue outputs are ${loudnessText}; extracted 10-second tails contain signal through the final 0.5 seconds. Music is present, so tail signal cannot prove CTA narration or rule out speech truncation.`,
+    `Both finals contain AAC 48kHz stereo audio with matching treatment. Measured source-dialogue outputs are ${loudnessText}; extracted 10-second tails contain signal through the final 0.5 seconds. The outro-only tail signal does not prove CTA completion or rule out speech truncation.`,
     "",
     "## Final CTA",
     "Each review set includes the CTA start, midpoint, and a labeled frame 0.5 seconds before the final boundary. Tail signal is present but does not validate narration completion.",

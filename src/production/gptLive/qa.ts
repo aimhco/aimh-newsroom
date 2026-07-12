@@ -34,7 +34,7 @@ import type {
   HumanPlayback,
   VisualArtifacts
 } from "./qa/types";
-import { validateGptLiveQaSnapshot } from "./qa/validation";
+import { validateGptLiveQaSnapshot, validateVisualArtifacts } from "./qa/validation";
 import { generateVisualArtifacts, renderComparisonMarkdown } from "./qa/visual";
 import { publishQaReportSet, withQaStagingDirectory } from "./qa/publication";
 import { validateNoSymlinkPaths, withValidatedQaArtifactPaths } from "./qa/paths";
@@ -561,7 +561,7 @@ const buildSafeQaReport = (
     visual: artifacts,
     comparisonPath: "reports/comparison.md",
     tailSignalPresent: true,
-    tailSignalLimitation: "Music is present; tail signal cannot prove CTA narration or exclude speech truncation.",
+    tailSignalLimitation: "The outro-only tail signal does not prove CTA completion or exclude speech truncation.",
     observedIntegrityHashes: {
       label: "Observed SHA-256 hashes from this QA run; these are integrity evidence, not cryptographic origin proof.",
       sources: Object.entries(snapshot.observedIntegrityHashes.sources).map(([id, sha256]) => ({
@@ -667,6 +667,7 @@ async function runGptLiveQaUnlocked(
         outputDirectory: stagingVisualDirectory,
         artifactRelativeRoot: "reports/visual"
       }, { runCommand });
+      validateVisualArtifacts(artifacts, snapshot.plan);
       if (artifacts.checkedFrameCount !== 58) {
         throw new Error(`GPT-Live QA failed: expected 58 checked frames, received ${artifacts.checkedFrameCount}`);
       }

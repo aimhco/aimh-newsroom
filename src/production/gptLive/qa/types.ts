@@ -87,6 +87,23 @@ export interface QaTailAudioCheck {
   tailSignalPresent: boolean;
 }
 
+export interface TransitionSignalStats {
+  yRange: number;
+  uRange: number;
+  vRange: number;
+}
+
+export interface BlankTransitionFrame {
+  boundaryId: string;
+  side: "before" | "after";
+  timeSeconds: number;
+}
+
+export interface TransitionContentCheck {
+  sampledFrames: number;
+  blankFrames: BlankTransitionFrame[];
+}
+
 export interface HumanPlayback {
   status: "pending" | "passed" | "failed";
   note: string;
@@ -133,6 +150,7 @@ export interface VisualArtifacts {
   transitionFrames: Record<QaVariantName, string[]>;
   tailAudio: Record<QaVariantName, string>;
   contactSampleTimesSeconds: Record<QaVariantName, number[]>;
+  transitionContent: Record<QaVariantName, TransitionContentCheck>;
   checkedFrameCount: number;
   contentMetrics: {
     minimumChangedPixelProportion: number;
