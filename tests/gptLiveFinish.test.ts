@@ -815,6 +815,17 @@ describe("GPT-Live post-production publication", () => {
         dynamic_editorial: durationMs,
         aimh_visual_host: durationMs
       },
+      narrationClipDurationMs: Object.fromEntries(
+        GPT_LIVE_CONTENT.variants.map((variant) => [
+          variant,
+          Object.fromEntries(
+            episodePlan.clips.filter((clip) => clip.kind === "narration").map((clip) => [
+              clip.id,
+              Math.round(clip.durationSeconds * 1_000)
+            ])
+          )
+        ])
+      ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>,
       narrationLayoutDurationMs: Object.fromEntries(
         GPT_LIVE_CONTENT.variants.map((variant) => [
           variant,
@@ -1637,8 +1648,8 @@ describe("GPT-Live post-production publication", () => {
     await writeGenerationMarker(episodeDir, "current-a", "current-b");
     const statePath = join(episodeDir, "tella", "state.json");
     const state = JSON.parse(await readFile(statePath, "utf8"));
-    state.timelineAudit.narrationLayouts.dynamic_editorial[0].durationMs -= 50;
     state.timelineAudit.sourceClips.dynamic_editorial[0].durationMs += 50;
+    state.timelineAudit.sourceClips.dynamic_editorial[1].durationMs -= 50;
     await writeFile(statePath, JSON.stringify(state), "utf8");
 
     try {
@@ -1867,18 +1878,16 @@ describe("GPT-Live post-production publication", () => {
     }
   });
 
-  it("passes independent audited A/B narration timing to fullscreen verification", async () => {
+  it("uses narration clip duration rather than a shorter layout for fullscreen timing", async () => {
     const episodeDir = await createContainedEpisode();
     const statePath = join(episodeDir, "tella", "state.json");
     const state = JSON.parse(await readFile(statePath, "utf8"));
     state.timelineAudit.narrationLayouts.dynamic_editorial[0].durationMs -= 50;
     state.timelineAudit.narrationLayouts.aimh_visual_host[0].durationMs -= 25;
-    state.timelineAudit.sourceClips.dynamic_editorial[0].durationMs += 50;
-    state.timelineAudit.sourceClips.aimh_visual_host[0].durationMs += 25;
     await writeFile(statePath, JSON.stringify(state), "utf8");
     const verifySourceFullscreen = vi.fn(async (options: any) => {
-      expect(options.timing.narrationDurationMs["version-a"][0]).toBe(5_450);
-      expect(options.timing.narrationDurationMs["version-b"][0]).toBe(5_475);
+      expect(options.timing.narrationDurationMs["version-a"][0]).toBe(5_500);
+      expect(options.timing.narrationDurationMs["version-b"][0]).toBe(5_500);
       throw new Error("captured audited fullscreen timing");
     });
 

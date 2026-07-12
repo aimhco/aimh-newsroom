@@ -10,6 +10,7 @@ export interface TellaTimelinePlan {
 
 export const TELLA_TIMELINE_AUDIT_SCHEMA_VERSION = "0.2.0" as const;
 export const TELLA_LAYOUT_DURATION_TOLERANCE_MS = 100;
+export const TELLA_CLIP_DURATION_TOLERANCE_MS = 1;
 export const TELLA_SOURCE_CLIP_DURATION_TOLERANCE_MS = 250;
 export const TELLA_STORY_DURATION_TOLERANCE_MS = 1_000 / 30;
 
@@ -29,6 +30,7 @@ const LAYOUT_KEYS = [
   "layoutId",
   "sourceId",
   "startTimeMs",
+  "clipDurationMs",
   "durationMs",
   "transitionStyle"
 ] as const;
@@ -38,6 +40,7 @@ export interface TellaNarrationLayoutAudit {
   readonly layoutId: string;
   readonly sourceId: string;
   readonly startTimeMs: 0;
+  readonly clipDurationMs: number;
   readonly durationMs: number;
   readonly transitionStyle: "hardCut";
 }
@@ -69,6 +72,7 @@ export interface BuildTellaTimelineAuditOptions {
   readonly plan: TellaTimelinePlan;
   readonly state: TellaStateForTimelineAudit;
   readonly remoteStoryDurationMs: Record<GptLiveVariant, number>;
+  readonly narrationClipDurationMs: Record<GptLiveVariant, Record<string, number>>;
   readonly narrationLayoutDurationMs: Record<GptLiveVariant, Record<string, number>>;
   readonly sourceClipDurationMs: Record<GptLiveVariant, Record<string, number>>;
 }
@@ -155,6 +159,7 @@ const expectedNarrationLayouts = (
       `${variant} plate source ${clip.id}`
     ),
     startTimeMs: 0,
+    clipDurationMs: Math.round(clip.durationSeconds * 1_000),
     durationMs: Math.round(clip.durationSeconds * 1_000),
     transitionStyle: "hardCut"
   }));
@@ -209,16 +214,22 @@ export function buildTellaTimelineAudit(
     ) as unknown as Record<GptLiveVariant, readonly TellaSourceClipAudit[]>,
     narrationLayouts: Object.fromEntries(
       COMPATIBILITY_VARIANTS.map((variant) => {
+        const clipDurations = options.narrationClipDurationMs[variant];
         const durations = options.narrationLayoutDurationMs[variant];
+        requireExactKeys(clipDurations, narrationIds, `${variant} queried narration clip durations`);
         requireExactKeys(durations, narrationIds, `${variant} queried layout durations`);
         return [
           variant,
           expectedNarrationLayouts(options.plan, options.state, variant).map((layout, index) => {
+            const clipDurationMs = clipDurations[narrationIds[index]!];
             const durationMs = durations[narrationIds[index]!];
+            if (!Number.isSafeInteger(clipDurationMs) || clipDurationMs <= 0) {
+              invalid(`${variant} queried narration clip duration is invalid: ${narrationIds[index]}`);
+            }
             if (!Number.isSafeInteger(durationMs) || durationMs <= 0) {
               invalid(`${variant} queried layout duration is invalid: ${narrationIds[index]}`);
             }
-            return { ...layout, durationMs };
+            return { ...layout, clipDurationMs, durationMs };
           })
         ];
       })
@@ -324,7 +335,7 @@ export function validateTellaTimelineAudit(
       invalid(`${variant} narration layout count does not match the plan`);
     }
     const layoutRecords = actualLayouts as unknown[];
-    let auditedNarrationDurationMs = 0;
+    let auditedNarrationClipDurationMs = 0;
     for (const [index, expected] of expectedLayouts.entries()) {
       const actual = requireRecord(layoutRecords[index], `${variant} narration layout ${index + 1}`);
       requireExactKeys(actual, LAYOUT_KEYS, `${variant} narration layout ${index + 1}`);
@@ -334,13 +345,16 @@ export function validateTellaTimelineAudit(
         actual.sourceId !== expected.sourceId ||
         actual.startTimeMs !== 0 ||
         actual.transitionStyle !== "hardCut" ||
+        !Number.isSafeInteger(actual.clipDurationMs) ||
+        Math.abs((actual.clipDurationMs as number) - expected.clipDurationMs) >
+          TELLA_CLIP_DURATION_TOLERANCE_MS ||
         !Number.isSafeInteger(actual.durationMs) ||
         Math.abs((actual.durationMs as number) - expected.durationMs) >
           TELLA_LAYOUT_DURATION_TOLERANCE_MS
       ) {
         invalid(`${variant} narration layout ${index + 1} does not match current state`);
       }
-      auditedNarrationDurationMs += actual.durationMs as number;
+      auditedNarrationClipDurationMs += actual.clipDurationMs as number;
     }
 
     const actualSourceClips = sourceClips[variant];
@@ -367,7 +381,7 @@ export function validateTellaTimelineAudit(
     }
     if (
       Math.abs(
-        auditedSourceDurationMs + auditedNarrationDurationMs - (storyDurationMs as number)
+        auditedSourceDurationMs + auditedNarrationClipDurationMs - (storyDurationMs as number)
       ) > TELLA_STORY_DURATION_TOLERANCE_MS
     ) {
       invalid(`${variant} queried clip durations do not reconstruct the remote story duration`);

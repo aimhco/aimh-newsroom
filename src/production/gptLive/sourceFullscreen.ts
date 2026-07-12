@@ -130,7 +130,7 @@ export function buildSourceFullscreenTiming(
   const durationsFor = (version: SourceFullscreenVersion): readonly number[] => {
     const record = receipt.exports.find((candidate) => candidate.version === version);
     if (!record) return fail(`${version} receipt record is missing`);
-    return audit.narrationLayouts[record.sourceVariant].map(({ durationMs }) => durationMs);
+    return audit.narrationLayouts[record.sourceVariant].map(({ clipDurationMs }) => clipDurationMs);
   };
   const sourceDurationsFor = (version: SourceFullscreenVersion): readonly number[] => {
     const record = receipt.exports.find((candidate) => candidate.version === version);

@@ -375,6 +375,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
           layoutId: state.layoutIds[`${variant}:${clip.id}`],
           sourceId: state.sourceIds[`plate:${variant}:${clip.id}`],
           startTimeMs: 0,
+          clipDurationMs: Math.round(clip.durationSeconds * 1_000),
           durationMs: Math.round(clip.durationSeconds * 1_000),
           transitionStyle: "hardCut"
         }))
@@ -1488,9 +1489,9 @@ describe("GPT-Live full production QA", () => {
   it("rejects fullscreen lineage bound to stale audited remote timing", () => {
     const snapshot = validSnapshot();
     (snapshot.tellaState as any).timelineAudit
-      .narrationLayouts.dynamic_editorial[0].durationMs -= 50;
-    (snapshot.tellaState as any).timelineAudit
       .sourceClips.dynamic_editorial[0].durationMs += 50;
+    (snapshot.tellaState as any).timelineAudit
+      .sourceClips.dynamic_editorial[1].durationMs -= 50;
 
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/fullscreen|timing/i);
   });
@@ -1533,14 +1534,12 @@ describe("GPT-Live full production QA", () => {
     }
   });
 
-  it("passes independent audited A/B narration timing to fresh QA measurement", async () => {
+  it("uses narration clip duration rather than a shorter layout for QA timing", async () => {
     const harness = await createQaRunHarness();
     const statePath = join(harness.episodeDir, "tella", "state.json");
     const state = structuredClone(harness.snapshot.tellaState) as any;
     state.timelineAudit.narrationLayouts.dynamic_editorial[0].durationMs -= 50;
     state.timelineAudit.narrationLayouts.aimh_visual_host[0].durationMs -= 25;
-    state.timelineAudit.sourceClips.dynamic_editorial[0].durationMs += 50;
-    state.timelineAudit.sourceClips.aimh_visual_host[0].durationMs += 25;
     const readSnapshotFile = harness.dependencies.readFile!;
     const verifySourceFullscreen = vi.fn(async (options: any) => {
       const preparedDuration = Math.round(
@@ -1548,9 +1547,9 @@ describe("GPT-Live full production QA", () => {
           1_000
       );
       expect(options.timing.narrationDurationMs["version-a"][0])
-        .toBe(preparedDuration - 50);
+        .toBe(preparedDuration);
       expect(options.timing.narrationDurationMs["version-b"][0])
-        .toBe(preparedDuration - 25);
+        .toBe(preparedDuration);
       throw new Error("captured audited QA fullscreen timing");
     });
 
@@ -1853,6 +1852,12 @@ describe("GPT-Live full production QA", () => {
       }
     },
     {
+      name: "narration clip duration outside tolerance",
+      mutate: (audit: Record<string, any>) => {
+        audit.narrationLayouts.aimh_visual_host[0].clipDurationMs += 2;
+      }
+    },
+    {
       name: "story duration outside one frame",
       mutate: (audit: Record<string, any>) => {
         audit.remoteStoryDurationMs.dynamic_editorial += 34;
@@ -1875,7 +1880,6 @@ describe("GPT-Live full production QA", () => {
     const snapshot = validSnapshot();
     const audit = (snapshot.tellaState as Record<string, any>).timelineAudit;
     audit.narrationLayouts.dynamic_editorial[0].durationMs += 100;
-    audit.sourceClips.dynamic_editorial[0].durationMs -= 100;
     const refreshedFullscreen = deriveSourceFullscreenExpectations(
       snapshot.plan,
       buildSourceFullscreenTiming(snapshot.tellaExportReceipt, audit)
@@ -1899,6 +1903,17 @@ describe("GPT-Live full production QA", () => {
       plan: snapshot.plan,
       state,
       remoteStoryDurationMs: expected.remoteStoryDurationMs,
+      narrationClipDurationMs: Object.fromEntries(
+        GPT_LIVE_CONTENT.variants.map((variant) => [
+          variant,
+          Object.fromEntries(
+            snapshot.plan.clips.filter((clip) => clip.kind === "narration").map((clip, index) => [
+              clip.id,
+              expected.narrationLayouts[variant][index]!.clipDurationMs
+            ])
+          )
+        ])
+      ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>,
       narrationLayoutDurationMs: Object.fromEntries(
         GPT_LIVE_CONTENT.variants.map((variant) => [
           variant,
@@ -1946,19 +1961,87 @@ describe("GPT-Live full production QA", () => {
         dynamic_editorial: 129_310,
         aimh_visual_host: 129_310
       },
+      narrationClipDurationMs: Object.fromEntries(
+        GPT_LIVE_CONTENT.variants.map((variant) => [
+          variant,
+          Object.fromEntries(snapshot.plan.clips
+            .filter((clip) => clip.kind === "narration")
+            .map((clip) => [clip.id, Math.round(clip.durationSeconds * 1_000)]))
+        ])
+      ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>,
       narrationLayoutDurationMs,
       sourceClipDurationMs: Object.fromEntries(
         GPT_LIVE_CONTENT.variants.map((variant) => [
           variant,
           Object.fromEntries(snapshot.plan.clips
             .filter((clip) => clip.kind === "source_clip")
-            .map((clip) => [clip.id, Math.round(clip.durationSeconds * 1_000) + 175]))
+            .map((clip) => [clip.id, Math.round(clip.durationSeconds * 1_000)]))
         ])
       ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>
     });
 
     expect(audit.narrationLayouts.dynamic_editorial.map(({ durationMs }) => durationMs))
       .toEqual(Object.values(narrationLayoutDurationMs.dynamic_editorial));
+  });
+
+  it("keeps queried narration clip and shorter layout durations distinct", () => {
+    const snapshot = validSnapshot();
+    const state = snapshot.tellaState as TellaStateForTimelineAudit;
+    const narrationClips = snapshot.plan.clips.filter((clip) => clip.kind === "narration");
+    const sourceClips = snapshot.plan.clips.filter((clip) => clip.kind === "source_clip");
+    const narrationClipDurationMs = Object.fromEntries(
+      GPT_LIVE_CONTENT.variants.map((variant) => [
+        variant,
+        Object.fromEntries(narrationClips.map((clip) => [
+          clip.id,
+          Math.floor(clip.durationSeconds * 1_000)
+        ]))
+      ])
+    ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>;
+    const narrationLayoutDurationMs = Object.fromEntries(
+      GPT_LIVE_CONTENT.variants.map((variant) => [
+        variant,
+        Object.fromEntries(narrationClips.map((clip, index) => [
+          clip.id,
+          Math.floor(clip.durationSeconds * 1_000) - (index % 2 === 0 ? 50 : 0)
+        ]))
+      ])
+    ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>;
+    const sourceClipDurationMs = Object.fromEntries(
+      GPT_LIVE_CONTENT.variants.map((variant) => [
+        variant,
+        Object.fromEntries(sourceClips.map((clip) => [
+          clip.id,
+          Math.floor(clip.durationSeconds * 1_000)
+        ]))
+      ])
+    ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>;
+    const remoteStoryDurationMs = Object.fromEntries(
+      GPT_LIVE_CONTENT.variants.map((variant) => [
+        variant,
+        Object.values(narrationClipDurationMs[variant]).reduce((total, value) => total + value, 0) +
+          Object.values(sourceClipDurationMs[variant]).reduce((total, value) => total + value, 0)
+      ])
+    ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], number>;
+
+    const audit = buildTellaTimelineAudit({
+      plan: snapshot.plan,
+      state,
+      remoteStoryDurationMs,
+      narrationClipDurationMs,
+      narrationLayoutDurationMs,
+      sourceClipDurationMs
+    } as any);
+
+    expect(audit.narrationLayouts.dynamic_editorial.map((layout) => ({
+      clipDurationMs: (layout as any).clipDurationMs,
+      durationMs: layout.durationMs
+    }))).toEqual(narrationClips.map((clip, index) => ({
+      clipDurationMs: Math.floor(clip.durationSeconds * 1_000),
+      durationMs: Math.floor(clip.durationSeconds * 1_000) - (index % 2 === 0 ? 50 : 0)
+    })));
+    expect(validateTellaTimelineAudit(snapshot.plan, { ...state, timelineAudit: audit }))
+      .toEqual(audit);
   });
 
   it("rejects a remote URL nested in the timeline audit", () => {
