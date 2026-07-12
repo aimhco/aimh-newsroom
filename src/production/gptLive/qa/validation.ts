@@ -780,6 +780,14 @@ export function validateGptLiveQaSnapshot(snapshot: GptLiveQaSnapshot): void {
 
 export function validateVisualArtifacts(artifacts: VisualArtifacts, plan: TellaPlan): void {
   const expectedSamples = Math.max(0, plan.clips.length - 1) * 2;
+  const expectedBoundaryIds = new Set(
+    plan.clips.slice(0, -1).map((clip, index) => [
+      `boundary-${String(index + 1).padStart(2, "0")}`,
+      clip.id.replaceAll(/[^a-z0-9_-]/gi, "-"),
+      "to",
+      plan.clips[index + 1]!.id.replaceAll(/[^a-z0-9_-]/gi, "-")
+    ].join("-"))
+  );
   for (const name of VARIANTS) {
     const content = artifacts.transitionContent?.[name];
     if (!content || content.sampledFrames !== expectedSamples) {
@@ -787,8 +795,63 @@ export function validateVisualArtifacts(artifacts: VisualArtifacts, plan: TellaP
         `${name} expected ${expectedSamples} transition content samples, received ${content?.sampledFrames ?? "none"}`
       );
     }
+    if (!Array.isArray(content.samples) || content.samples.length !== expectedSamples) {
+      fail(`${name} transition sample records must contain exactly ${expectedSamples} entries`);
+    }
+    const identities = new Set<string>();
+    const framesByBoundary = new Map<string, Partial<Record<"before" | "after", number>>>();
+    for (const sample of content.samples) {
+      if (
+        typeof sample.boundaryId !== "string" ||
+        !sample.boundaryId ||
+        (sample.side !== "before" && sample.side !== "after") ||
+        !Number.isFinite(sample.timeSeconds) ||
+        sample.timeSeconds < 0 ||
+        !Number.isSafeInteger(sample.frameIndex) ||
+        sample.frameIndex < 0
+      ) {
+        fail(`${name} transition sample record is invalid`);
+      }
+      const resolvedFrameIndex = Math.max(0, Math.ceil(sample.timeSeconds * 30 - 1e-9));
+      if (sample.frameIndex !== resolvedFrameIndex) {
+        fail(`${name} transition sample frame index does not match its seek time`);
+      }
+      const identity = `${sample.boundaryId}:${sample.side}`;
+      if (identities.has(identity)) {
+        fail(`${name} transition sample identities contain duplicate boundary sides`);
+      }
+      identities.add(identity);
+      const frames = framesByBoundary.get(sample.boundaryId) ?? {};
+      frames[sample.side] = sample.frameIndex;
+      framesByBoundary.set(sample.boundaryId, frames);
+    }
+    if (framesByBoundary.size !== Math.max(0, plan.clips.length - 1)) {
+      fail(`${name} transition sample boundary count is invalid`);
+    }
+    if (
+      framesByBoundary.size !== expectedBoundaryIds.size ||
+      [...framesByBoundary.keys()].some((boundaryId) => !expectedBoundaryIds.has(boundaryId))
+    ) {
+      fail(`${name} transition sample boundary identities do not match planned boundaries`);
+    }
+    for (const [boundaryId, frames] of framesByBoundary) {
+      if (frames.before === undefined || frames.after === undefined) {
+        fail(`${name} transition sample boundary sides are incomplete: ${boundaryId}`);
+      }
+      if (frames.before === frames.after) {
+        fail(`${name} transition boundary sides must resolve to distinct 30fps frames: ${boundaryId}`);
+      }
+    }
     if (!Array.isArray(content.blankFrames)) {
       fail(`${name} transition blank frame report is invalid`);
+    }
+    const blankIdentities = new Set<string>();
+    for (const frame of content.blankFrames) {
+      const identity = `${frame.boundaryId}:${frame.side}`;
+      if (blankIdentities.has(identity) || !identities.has(identity)) {
+        fail(`${name} transition blank frame identities are invalid or duplicated`);
+      }
+      blankIdentities.add(identity);
     }
     if (content.blankFrames.length > 0) {
       fail(

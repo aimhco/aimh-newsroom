@@ -3,8 +3,8 @@ import { basename, join, relative, sep } from "node:path";
 import { runCommand as defaultRunCommand } from "../../../render/process";
 import type { TellaPlan } from "../tellaPlan";
 import type {
-  BlankTransitionFrame,
   QaVariantName,
+  TransitionFrameSampleRecord,
   TransitionSignalStats,
   VisualArtifacts
 } from "./types";
@@ -31,10 +31,7 @@ interface FrameSample {
   timeSeconds: number;
 }
 
-interface TransitionFrameSample extends FrameSample {
-  boundaryId: string;
-  side: BlankTransitionFrame["side"];
-}
+type TransitionFrameSample = FrameSample & TransitionFrameSampleRecord;
 
 export interface FrameContentMetrics {
   changedPixelProportion: number;
@@ -65,21 +62,38 @@ export function parseTransitionSignalStats(text: string): TransitionSignalStats 
     }
     return parsed;
   };
+  const standardDeviation = Number(text.match(/showinfo[^\n]*stdev:\[([\d.]+)/)?.[1]);
+  const normalizedEntropy = Number(
+    text.match(/lavfi\.entropy\.normalized_entropy\.normal\.Y=([^\s]+)/)?.[1]
+  );
+  if (!Number.isFinite(standardDeviation) || !Number.isFinite(normalizedEntropy)) {
+    throw new Error("GPT-Live QA failed: transition luma metadata is unreadable");
+  }
   return {
     yRange: value("Y", "MAX") - value("Y", "MIN"),
     uRange: value("U", "MAX") - value("U", "MIN"),
-    vRange: value("V", "MAX") - value("V", "MIN")
+    vRange: value("V", "MAX") - value("V", "MIN"),
+    lumaVariance: Number((standardDeviation ** 2).toFixed(6)),
+    normalizedEntropy
   };
 }
 
 export function assertTransitionFrameHasContent(stats: TransitionSignalStats): void {
-  if (stats.yRange <= 6 && stats.uRange <= 6 && stats.vRange <= 6) {
-    throw new Error("GPT-Live QA failed: transition frame lacks content");
+  if (
+    !Number.isFinite(stats.yRange) ||
+    !Number.isFinite(stats.lumaVariance) ||
+    !Number.isFinite(stats.normalizedEntropy) ||
+    stats.yRange <= 6 ||
+    stats.lumaVariance < 25 ||
+    stats.normalizedEntropy < 0.02
+  ) {
+    throw new Error("GPT-Live QA failed: transition frame is blank or exposes the base layer");
   }
 }
 
 const fixed = (value: number): string => value.toFixed(3);
-const transitionFixed = (value: number): string => value.toFixed(6);
+const transitionFixed = (value: number): string =>
+  (Math.floor(value * 1_000_000 + 1e-9) / 1_000_000).toFixed(6);
 
 const relativeReportPath = (episodeDir: string, path: string): string =>
   relative(episodeDir, path).split(sep).join("/");
@@ -178,12 +192,19 @@ const timelineSamples = (plan: TellaPlan): FrameSample[] => {
   }));
 };
 
-const transitionBoundarySamples = (
+const transitionFrameIndex = (timeSeconds: number, frameCount: number): number =>
+  Math.min(frameCount - 1, Math.max(0, Math.ceil(timeSeconds * 30 - 1e-9)));
+
+export const planTransitionBoundarySamples = (
   plan: TellaPlan,
   durationSeconds: number
 ): TransitionFrameSample[] => {
   const samples: TransitionFrameSample[] = [];
-  const lastSafeTime = Math.max(0, durationSeconds - FRAME_DURATION_SECONDS);
+  const frameCount = Math.ceil(durationSeconds * 30 - 1e-6);
+  if (!Number.isFinite(durationSeconds) || frameCount < 1) {
+    throw new Error("GPT-Live QA failed: final duration cannot provide transition frames");
+  }
+  const lastSafeTime = (frameCount - 1) / 30;
   let boundaryTime = 0;
   for (let index = 0; index < plan.clips.length - 1; index += 1) {
     const beforeClip = plan.clips[index]!;
@@ -195,21 +216,41 @@ const transitionBoundarySamples = (
       "to",
       safeLabel(afterClip.id)
     ].join("-");
-    for (const side of ["before", "after"] as const) {
+    const boundarySamples = (["before", "after"] as const).map((side) => {
       const offset = side === "before" ? -FRAME_DURATION_SECONDS : FRAME_DURATION_SECONDS;
       const timeSeconds = Math.min(lastSafeTime, Math.max(0, boundaryTime + offset));
-      samples.push({
+      const sampledTimeSeconds = Number(transitionFixed(timeSeconds));
+      return {
         boundaryId,
         side,
         label: `${boundaryId}-${side}`,
-        timeSeconds: Number(transitionFixed(timeSeconds))
-      });
+        timeSeconds: sampledTimeSeconds,
+        frameIndex: transitionFrameIndex(sampledTimeSeconds, frameCount)
+      };
+    });
+    const [before, after] = boundarySamples;
+    if (before!.frameIndex === after!.frameIndex) {
+      const earlierFrameIndex = before!.frameIndex - 1;
+      const laterFrameIndex = after!.frameIndex + 1;
+      if (earlierFrameIndex >= 0 && earlierFrameIndex / 30 < boundaryTime) {
+        before!.frameIndex = earlierFrameIndex;
+        before!.timeSeconds = Number(transitionFixed(earlierFrameIndex / 30));
+      } else if (laterFrameIndex < frameCount && laterFrameIndex / 30 > boundaryTime) {
+        after!.frameIndex = laterFrameIndex;
+        after!.timeSeconds = Number(transitionFixed(laterFrameIndex / 30));
+      }
     }
+    if (before!.frameIndex === after!.frameIndex) {
+      throw new Error(
+        `GPT-Live QA failed: ${boundaryId} cannot resolve to two distinct 30fps frames`
+      );
+    }
+    samples.push(before!, after!);
   }
   return samples;
 };
 
-const inspectTransitionFrame = async (
+const readTransitionFrameStats = async (
   runCommand: typeof defaultRunCommand,
   ffmpegPath: string,
   inputPath: string,
@@ -225,13 +266,24 @@ const inspectTransitionFrame = async (
     "-frames:v",
     "1",
     "-vf",
-    "crop=iw*0.85:ih*0.92:iw*0.02:ih*0.04,signalstats,metadata=print",
+    "crop=iw*0.85:ih*0.92:iw*0.02:ih*0.04,signalstats,entropy,showinfo,metadata=print",
     "-f",
     "null",
     "-"
   ]);
   return parseTransitionSignalStats(`${result.stdout}\n${result.stderr}`);
 };
+
+export async function inspectTransitionFrameContent(
+  ffmpegPath: string,
+  inputPath: string,
+  timeSeconds: number,
+  runCommand: typeof defaultRunCommand = defaultRunCommand
+): Promise<TransitionSignalStats> {
+  const stats = await readTransitionFrameStats(runCommand, ffmpegPath, inputPath, timeSeconds);
+  assertTransitionFrameHasContent(stats);
+  return stats;
+}
 
 const buildContactSheet = async (
   runCommand: typeof defaultRunCommand,
@@ -272,8 +324,8 @@ export async function generateVisualArtifacts(
     tailAudio: { "version-a": "", "version-b": "" },
     contactSampleTimesSeconds: { "version-a": [], "version-b": [] },
     transitionContent: {
-      "version-a": { sampledFrames: 0, blankFrames: [] },
-      "version-b": { sampledFrames: 0, blankFrames: [] }
+      "version-a": { sampledFrames: 0, samples: [], blankFrames: [] },
+      "version-b": { sampledFrames: 0, samples: [], blankFrames: [] }
     },
     checkedFrameCount: 0,
     contentMetrics: {
@@ -335,14 +387,20 @@ export async function generateVisualArtifacts(
         artifacts.transitionFrames[name].push(artifactPath(framePath));
       }
 
-      for (const sample of transitionBoundarySamples(options.plan, options.durations[name])) {
-        const stats = await inspectTransitionFrame(
+      for (const sample of planTransitionBoundarySamples(options.plan, options.durations[name])) {
+        const stats = await readTransitionFrameStats(
           runCommand,
           options.ffmpegPath,
           inputPath,
           sample.timeSeconds
         );
         artifacts.transitionContent[name].sampledFrames += 1;
+        artifacts.transitionContent[name].samples.push({
+          boundaryId: sample.boundaryId,
+          side: sample.side,
+          timeSeconds: sample.timeSeconds,
+          frameIndex: sample.frameIndex
+        });
         try {
           assertTransitionFrameHasContent(stats);
         } catch {

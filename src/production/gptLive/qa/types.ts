@@ -91,6 +91,8 @@ export interface TransitionSignalStats {
   yRange: number;
   uRange: number;
   vRange: number;
+  lumaVariance: number;
+  normalizedEntropy: number;
 }
 
 export interface BlankTransitionFrame {
@@ -99,8 +101,13 @@ export interface BlankTransitionFrame {
   timeSeconds: number;
 }
 
+export interface TransitionFrameSampleRecord extends BlankTransitionFrame {
+  frameIndex: number;
+}
+
 export interface TransitionContentCheck {
   sampledFrames: number;
+  samples: TransitionFrameSampleRecord[];
   blankFrames: BlankTransitionFrame[];
 }
 

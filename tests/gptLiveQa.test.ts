@@ -19,6 +19,7 @@ import {
 } from "../src/production/gptLive/finish";
 import type { MediaInspection } from "../src/production/gptLive/mediaInspection";
 import { GPT_LIVE_SCENES, sceneStyle } from "../src/production/gptLive/motion/sceneStyle";
+import { runCommand } from "../src/render/process";
 import {
   clearStaleQaOutputs,
   buildHumanPlaybackReviewTemplate,
@@ -44,7 +45,9 @@ import {
   assertMeaningfulFrameContent,
   assertTransitionFrameHasContent,
   generateVisualArtifacts,
+  inspectTransitionFrameContent,
   parseTransitionSignalStats,
+  planTransitionBoundarySamples,
   renderComparisonMarkdown
 } from "../src/production/gptLive/qa/visual";
 import { assertSafeSourceManifestUrl } from "../src/production/gptLive/qa/validation";
@@ -53,6 +56,16 @@ import { buildVoiceCacheKey } from "../src/voice/elevenLabsAdapter";
 
 const EPISODE_DIR = "/episode";
 const sha = (character: string): string => character.repeat(64);
+const transitionSampleRecords = (clips: readonly { id: string }[]) =>
+  clips.slice(0, -1).flatMap((clip, index) => {
+    const boundaryId = `boundary-${String(index + 1).padStart(2, "0")}-${clip.id}-to-${clips[index + 1]!.id}`;
+    return (["before", "after"] as const).map((side, sideIndex) => ({
+      boundaryId,
+      side,
+      timeSeconds: (index * 2 + sideIndex) / 30,
+      frameIndex: index * 2 + sideIndex
+    }));
+  });
 
 const canonicalSourceManifest = () => ({
   schemaVersion: "0.1.0" as const,
@@ -431,8 +444,16 @@ const createQaRunHarness = async () => {
     tailAudio: { "version-a": "reports/visual/a.wav", "version-b": "reports/visual/b.wav" },
     contactSampleTimesSeconds: { "version-a": [], "version-b": [] },
     transitionContent: {
-      "version-a": { sampledFrames: 16, blankFrames: [] },
-      "version-b": { sampledFrames: 16, blankFrames: [] }
+      "version-a": {
+        sampledFrames: 16,
+        samples: transitionSampleRecords(snapshot.plan.clips),
+        blankFrames: []
+      },
+      "version-b": {
+        sampledFrames: 16,
+        samples: transitionSampleRecords(snapshot.plan.clips),
+        blankFrames: []
+      }
     },
     checkedFrameCount: 58,
     contentMetrics: {
@@ -581,13 +602,21 @@ describe("GPT-Live full production QA", () => {
 
   it("parses transition signalstats component ranges", () => {
     expect(parseTransitionSignalStats([
+      "showinfo stdev:[85.4 0.0 0.0]",
       "lavfi.signalstats.YMIN=16",
       "lavfi.signalstats.YMAX=235",
       "lavfi.signalstats.UMIN=90",
       "lavfi.signalstats.UMAX=140",
       "lavfi.signalstats.VMIN=101",
-      "lavfi.signalstats.VMAX=155"
-    ].join("\n"))).toEqual({ yRange: 219, uRange: 50, vRange: 54 });
+      "lavfi.signalstats.VMAX=155",
+      "lavfi.entropy.normalized_entropy.normal.Y=0.109035"
+    ].join("\n"))).toEqual({
+      yRange: 219,
+      uRange: 50,
+      vRange: 54,
+      lumaVariance: 7293.16,
+      normalizedEntropy: 0.109035
+    });
   });
 
   it.each([
@@ -598,23 +627,84 @@ describe("GPT-Live full production QA", () => {
       "lavfi.signalstats.UMIN=90",
       "lavfi.signalstats.UMAX=140",
       "lavfi.signalstats.VMIN=101",
-      "lavfi.signalstats.VMAX=155"
+      "lavfi.signalstats.VMAX=155",
+      "showinfo stdev:[85.4 0.0 0.0]",
+      "lavfi.entropy.normalized_entropy.normal.Y=0.109035"
     ].join("\n")]
   ])("rejects %s transition signalstats metadata", (_name, text) => {
     expect(() => parseTransitionSignalStats(text)).toThrow(/signalstats|metadata/i);
   });
 
-  it("rejects a transition frame when every component range is at most six", () => {
-    expect(() => assertTransitionFrameHasContent({ yRange: 6, uRange: 0, vRange: 4 }))
-      .toThrow(/transition.*content|blank/i);
+  it.each([
+    { yRange: 2, uRange: 2, vRange: 10 },
+    { yRange: 3, uRange: 3, vRange: 8 },
+    { yRange: 4, uRange: 3, vRange: 8 }
+  ])("rejects compressed near-black chroma noise $yRange/$uRange/$vRange", (ranges) => {
+    expect(() => assertTransitionFrameHasContent({
+      ...ranges,
+      lumaVariance: 100,
+      normalizedEntropy: 0.5
+    })).toThrow(/transition.*content|blank|base/i);
   });
 
   it.each([
-    { yRange: 7, uRange: 0, vRange: 0 },
-    { yRange: 0, uRange: 7, vRange: 0 },
-    { yRange: 0, uRange: 0, vRange: 7 }
-  ])("accepts a transition frame when any component range exceeds six", (stats) => {
+    { yRange: 220, uRange: 0, vRange: 0, lumaVariance: 7293.16, normalizedEntropy: 0.109035 },
+    { yRange: 180, uRange: 120, vRange: 120, lumaVariance: 3340.84, normalizedEntropy: 0.72 }
+  ])("accepts representative article and official-video luma structure", (stats) => {
     expect(() => assertTransitionFrameHasContent(stats)).not.toThrow();
+  });
+
+  it.each([
+    { yRange: 6, uRange: 40, vRange: 40, lumaVariance: 100, normalizedEntropy: 0.5 },
+    { yRange: 220, uRange: 0, vRange: 0, lumaVariance: 24.9, normalizedEntropy: 0.5 },
+    { yRange: 220, uRange: 0, vRange: 0, lumaVariance: 100, normalizedEntropy: 0.019 }
+  ])("rejects transition frames without meaningful luma structure", (stats) => {
+    expect(() => assertTransitionFrameHasContent(stats)).toThrow(/transition.*content|blank|base/i);
+  });
+
+  it("probes real encoded CFR frames and rejects uniform base colors", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "gpt-live-transition-cfr-"));
+    const videoPath = join(directory, "transition-content.mp4");
+    try {
+      await runCommand("ffmpeg", [
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "color=c=black:s=320x180:r=30:d=0.2",
+        "-f", "lavfi", "-i", "color=c=white:s=320x180:r=30:d=0.2",
+        "-f", "lavfi", "-i", "color=c=blue:s=320x180:r=30:d=0.2",
+        "-f", "lavfi", "-i", "color=c=0x05060d:s=320x180:r=30:d=0.2",
+        "-f", "lavfi", "-i",
+        "color=c=white:s=320x180:r=30:d=0.2,drawbox=x=20:y=25:w=260:h=18:color=black:t=fill,drawbox=x=20:y=65:w=220:h=8:color=black:t=fill,drawbox=x=20:y=85:w=270:h=8:color=black:t=fill,drawbox=x=20:y=105:w=190:h=8:color=black:t=fill",
+        "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=0.2",
+        "-filter_complex",
+        "[0:v][1:v][2:v][3:v][4:v][5:v]concat=n=6:v=1:a=0,format=yuv420p[v]",
+        "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-g", "1", "-r", "30", "-an", videoPath
+      ]);
+
+      for (const timeSeconds of [0.9, 1.1]) {
+        await expect(inspectTransitionFrameContent("ffmpeg", videoPath, timeSeconds))
+          .resolves.toMatchObject({ yRange: expect.any(Number) });
+      }
+      for (const timeSeconds of [0.1, 0.3, 0.5, 0.7]) {
+        await expect(inspectTransitionFrameContent("ffmpeg", videoPath, timeSeconds))
+          .rejects.toThrow(/blank|base layer|content/i);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("fails closed when a boundary cannot resolve to two distinct 30fps frames", () => {
+    const plan = {
+      schemaVersion: "0.1.0" as const,
+      productionId: "transition-test",
+      clips: [
+        { id: "clip-one", kind: "source_clip" as const, durationSeconds: 0.01 },
+        { id: "clip-two", kind: "source_clip" as const, durationSeconds: 0.01 }
+      ]
+    } as any;
+    expect(() => planTransitionBoundarySamples(plan, 0.02))
+      .toThrow(/distinct 30fps frames|two distinct frames/i);
   });
 
   it("samples both sides of every clip boundary in both variants with safe clamping", async () => {
@@ -639,16 +729,18 @@ describe("GPT-Live full production QA", () => {
       }, {
         runCommand: async (command, args) => {
           calls.push({ command, args });
-          if (args.some((arg) => arg.endsWith("signalstats,metadata=print"))) {
+          if (args.some((arg) => arg.includes("signalstats") && arg.endsWith("metadata=print"))) {
             return {
               stdout: "",
               stderr: [
+                "showinfo stdev:[20.0 0.0 0.0]",
                 "lavfi.signalstats.YMIN=16",
                 "lavfi.signalstats.YMAX=40",
                 "lavfi.signalstats.UMIN=100",
                 "lavfi.signalstats.UMAX=110",
                 "lavfi.signalstats.VMIN=120",
-                "lavfi.signalstats.VMAX=128"
+                "lavfi.signalstats.VMAX=128",
+                "lavfi.entropy.normalized_entropy.normal.Y=0.1"
               ].join("\n")
             };
           }
@@ -660,11 +752,11 @@ describe("GPT-Live full production QA", () => {
       });
 
       const signalCalls = calls.filter(({ args }) =>
-        args.some((arg) => arg.endsWith("signalstats,metadata=print"))
+        args.some((arg) => arg.includes("signalstats") && arg.endsWith("metadata=print"))
       );
       expect(signalCalls).toHaveLength(8);
       expect(signalCalls.every(({ args }) =>
-        args.includes("crop=iw*0.85:ih*0.92:iw*0.02:ih*0.04,signalstats,metadata=print")
+        args.includes("crop=iw*0.85:ih*0.92:iw*0.02:ih*0.04,signalstats,entropy,showinfo,metadata=print")
       )).toBe(true);
       expect(signalCalls.map(({ args }) => ({
         input: args[args.indexOf("-i") + 1],
@@ -672,17 +764,41 @@ describe("GPT-Live full production QA", () => {
       }))).toEqual([
         { input: "/final-a.mp4", time: "0.000000" },
         { input: "/final-a.mp4", time: "0.053333" },
-        { input: "/final-a.mp4", time: "0.046667" },
-        { input: "/final-a.mp4", time: "0.066667" },
+        { input: "/final-a.mp4", time: "0.033333" },
+        { input: "/final-a.mp4", time: "0.066666" },
         { input: "/final-b.mp4", time: "0.000000" },
         { input: "/final-b.mp4", time: "0.053333" },
-        { input: "/final-b.mp4", time: "0.046667" },
-        { input: "/final-b.mp4", time: "0.066667" }
+        { input: "/final-b.mp4", time: "0.033333" },
+        { input: "/final-b.mp4", time: "0.066666" }
       ]);
       expect(artifacts.transitionContent).toEqual({
-        "version-a": { sampledFrames: 4, blankFrames: [] },
-        "version-b": { sampledFrames: 4, blankFrames: [] }
+        "version-a": {
+          sampledFrames: 4,
+          samples: [
+            { boundaryId: "boundary-01-clip-one-to-clip-two", side: "before", timeSeconds: 0, frameIndex: 0 },
+            { boundaryId: "boundary-01-clip-one-to-clip-two", side: "after", timeSeconds: 0.053333, frameIndex: 2 },
+            { boundaryId: "boundary-02-clip-two-to-clip-three", side: "before", timeSeconds: 0.033333, frameIndex: 1 },
+            { boundaryId: "boundary-02-clip-two-to-clip-three", side: "after", timeSeconds: 0.066666, frameIndex: 2 }
+          ],
+          blankFrames: []
+        },
+        "version-b": {
+          sampledFrames: 4,
+          samples: [
+            { boundaryId: "boundary-01-clip-one-to-clip-two", side: "before", timeSeconds: 0, frameIndex: 0 },
+            { boundaryId: "boundary-01-clip-one-to-clip-two", side: "after", timeSeconds: 0.053333, frameIndex: 2 },
+            { boundaryId: "boundary-02-clip-two-to-clip-three", side: "before", timeSeconds: 0.033333, frameIndex: 1 },
+            { boundaryId: "boundary-02-clip-two-to-clip-three", side: "after", timeSeconds: 0.066666, frameIndex: 2 }
+          ],
+          blankFrames: []
+        }
       });
+      for (const content of Object.values(artifacts.transitionContent)) {
+        for (const sample of content.samples) {
+          expect(Math.max(0, Math.ceil(sample.timeSeconds * 30 - 1e-9)))
+            .toBe(sample.frameIndex);
+        }
+      }
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
     }
@@ -707,19 +823,21 @@ describe("GPT-Live full production QA", () => {
         ffmpegPath: "ffmpeg"
       }, {
         runCommand: async (_command, args) => {
-          if (args.some((arg) => arg.endsWith("signalstats,metadata=print"))) {
+          if (args.some((arg) => arg.includes("signalstats") && arg.endsWith("metadata=print"))) {
             const input = args[args.indexOf("-i") + 1];
             const time = args[args.indexOf("-ss") + 1];
             const blank = input === "/final-b.mp4" && time === "1.033333";
             return {
               stdout: "",
               stderr: [
+                `showinfo stdev:[${blank ? "1.0" : "20.0"} 0.0 0.0]`,
                 "lavfi.signalstats.YMIN=16",
                 `lavfi.signalstats.YMAX=${blank ? 22 : 40}`,
                 "lavfi.signalstats.UMIN=100",
                 `lavfi.signalstats.UMAX=${blank ? 106 : 110}`,
                 "lavfi.signalstats.VMIN=120",
-                `lavfi.signalstats.VMAX=${blank ? 126 : 128}`
+                `lavfi.signalstats.VMAX=${blank ? 126 : 128}`,
+                `lavfi.entropy.normalized_entropy.normal.Y=${blank ? "0.01" : "0.1"}`
               ].join("\n")
             };
           }
@@ -732,6 +850,10 @@ describe("GPT-Live full production QA", () => {
 
       expect(artifacts.transitionContent["version-b"]).toEqual({
         sampledFrames: 2,
+        samples: [
+          { boundaryId: "boundary-01-clip-one-to-clip-two", side: "before", timeSeconds: 0.966666, frameIndex: 29 },
+          { boundaryId: "boundary-01-clip-one-to-clip-two", side: "after", timeSeconds: 1.033333, frameIndex: 31 }
+        ],
         blankFrames: [{
           boundaryId: "boundary-01-clip-one-to-clip-two",
           side: "after",
@@ -1230,8 +1352,16 @@ describe("GPT-Live full production QA", () => {
         tailAudio: { "version-a": "a.wav", "version-b": "b.wav" },
         contactSampleTimesSeconds: { "version-a": [], "version-b": [] },
         transitionContent: {
-          "version-a": { sampledFrames: 16, blankFrames: [] },
-          "version-b": { sampledFrames: 16, blankFrames: [] }
+          "version-a": {
+            sampledFrames: 16,
+            samples: transitionSampleRecords(validSnapshot().plan.clips),
+            blankFrames: []
+          },
+          "version-b": {
+            sampledFrames: 16,
+            samples: transitionSampleRecords(validSnapshot().plan.clips),
+            blankFrames: []
+          }
         },
         checkedFrameCount: 58,
         contentMetrics: {
@@ -1261,6 +1391,7 @@ describe("GPT-Live full production QA", () => {
     try {
       harness.artifacts.transitionContent["version-b"] = {
         sampledFrames: 16,
+        samples: harness.artifacts.transitionContent["version-b"].samples,
         blankFrames: [{
           boundaryId: "boundary-01-narration-hook-to-clip-translation",
           side: "after",
@@ -1284,6 +1415,67 @@ describe("GPT-Live full production QA", () => {
         { episodeDir: harness.episodeDir, env: harness.snapshot.env, ffmpegPath: "ffmpeg", ffprobePath: "ffprobe" },
         { ...harness.dependencies, validatePublishedGeneration: async () => harness.generation }
       )).rejects.toThrow(/expected 16 transition.*samples|transition.*received 15/i);
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects QA when transition sample identities are duplicated", async () => {
+    const harness = await createQaRunHarness();
+    try {
+      const samples = harness.artifacts.transitionContent["version-a"].samples;
+      samples[1] = { ...samples[0]! };
+      await expect(runGptLiveQa(
+        { episodeDir: harness.episodeDir, env: harness.snapshot.env, ffmpegPath: "ffmpeg", ffprobePath: "ffprobe" },
+        { ...harness.dependencies, validatePublishedGeneration: async () => harness.generation }
+      )).rejects.toThrow(/duplicate.*boundary|unique.*boundary|sample identit/i);
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects QA when boundary sides resolve to the same 30fps frame", async () => {
+      const harness = await createQaRunHarness();
+    try {
+      const samples = harness.artifacts.transitionContent["version-a"].samples;
+      samples[1] = {
+        ...samples[1]!,
+        timeSeconds: samples[0]!.timeSeconds,
+        frameIndex: samples[0]!.frameIndex
+      };
+      await expect(runGptLiveQa(
+        { episodeDir: harness.episodeDir, env: harness.snapshot.env, ffmpegPath: "ffmpeg", ffprobePath: "ffprobe" },
+        { ...harness.dependencies, validatePublishedGeneration: async () => harness.generation }
+      )).rejects.toThrow(/distinct 30fps frames|same 30fps frame/i);
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects QA when sample records replace a planned boundary ID", async () => {
+    const harness = await createQaRunHarness();
+    try {
+      const samples = harness.artifacts.transitionContent["version-a"].samples;
+      samples[0] = { ...samples[0]!, boundaryId: "boundary-01-fake-to-boundary" };
+      samples[1] = { ...samples[1]!, boundaryId: "boundary-01-fake-to-boundary" };
+      await expect(runGptLiveQa(
+        { episodeDir: harness.episodeDir, env: harness.snapshot.env, ffmpegPath: "ffmpeg", ffprobePath: "ffprobe" },
+        { ...harness.dependencies, validatePublishedGeneration: async () => harness.generation }
+      )).rejects.toThrow(/unexpected.*boundary|planned boundary|boundary identit/i);
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects QA when a reported frame index disagrees with its seek time", async () => {
+    const harness = await createQaRunHarness();
+    try {
+      const samples = harness.artifacts.transitionContent["version-a"].samples;
+      samples[1] = { ...samples[1]!, timeSeconds: samples[0]!.timeSeconds };
+      await expect(runGptLiveQa(
+        { episodeDir: harness.episodeDir, env: harness.snapshot.env, ffmpegPath: "ffmpeg", ffprobePath: "ffprobe" },
+        { ...harness.dependencies, validatePublishedGeneration: async () => harness.generation }
+      )).rejects.toThrow(/frame index.*seek time|seek time.*frame index|reported frame index/i);
     } finally {
       await rm(harness.episodeDir, { recursive: true, force: true });
     }
