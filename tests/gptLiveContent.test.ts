@@ -1111,6 +1111,7 @@ describe("GPT-Live production preparation", () => {
           plan: result.plan,
           generation: {
             generationId: "00000000-0000-4000-8000-000000000000",
+            preparationFingerprint: "b".repeat(64),
             reportSha256: "a".repeat(64),
             variants: [],
             finalPaths: [

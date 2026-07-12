@@ -30,6 +30,7 @@ import {
   type FinalMediaInspection,
   type FinishPlan
 } from "../src/production/gptLive/finish";
+import { buildTellaTimelineAudit } from "../src/production/gptLive/tellaState";
 
 const plan = (durations = [3, 5.5, 2.25, 1]): FinishPlan => ({
   schemaVersion: "0.1.0",
@@ -301,35 +302,114 @@ describe("GPT-Live post-production publication", () => {
   const createContainedEpisode = async () => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-finish-contained-"));
     await Promise.all(
-      ["assets", "tella", "exports", "final", "reports"].map((directory) =>
+      ["assets", "voice", "tella", "exports", "final", "reports"].map((directory) =>
         mkdir(join(episodeDir, directory), { recursive: true })
       )
     );
+    const production = {
+      id: GPT_LIVE_CONTENT.id,
+      branding: {
+        ...GPT_LIVE_CONTENT.branding,
+        logoPath: join(episodeDir, "assets", "logo.png")
+      },
+      audio: {
+        introMusic: false,
+        bodyMusic: false,
+        outroMusicPath: "/assets/outro.mp3",
+        outroDurationSeconds: 7
+      }
+    };
+    const episodePlan = plan();
+    const voice = { provider: "elevenlabs", chunks: [], warnings: [] };
+    const sourceMatrix = "test source matrix";
+    const sourceManifest = { schemaVersion: "0.1.0", productionId: GPT_LIVE_CONTENT.id, sources: [] };
+    const preparationFingerprint = sha256(JSON.stringify({
+      production,
+      voice,
+      plan: episodePlan,
+      sourceMatrix,
+      sourceManifest
+    }));
+    const variantVideoIds = {
+      dynamic_editorial: "video-a",
+      aimh_visual_host: "video-b"
+    };
+    const sourceIds = Object.fromEntries([
+      ...episodePlan.clips.map((clip) => [clip.id, `source-${clip.id}`]),
+      ...episodePlan.clips.filter((clip) => clip.kind === "narration").flatMap((clip) =>
+        GPT_LIVE_CONTENT.variants.map((variant) => [
+          `plate:${variant}:${clip.id}`,
+          `plate-${variant}-${clip.id}`
+        ])
+      )
+    ]);
+    const variantClipIds = Object.fromEntries(
+      GPT_LIVE_CONTENT.variants.map((variant) => [
+        variant,
+        Object.fromEntries(episodePlan.clips.map((clip) => [clip.id, `${variant}-${clip.id}`]))
+      ])
+    ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, string>>;
+    const layoutIds = Object.fromEntries(
+      episodePlan.clips.filter((clip) => clip.kind === "narration").flatMap((clip) =>
+        GPT_LIVE_CONTENT.variants.map((variant) => [
+          `${variant}:${clip.id}`,
+          `layout-${variant}-${clip.id}`
+        ])
+      )
+    );
+    const state = {
+      masterVideoId: "video-master",
+      variantVideoIds,
+      clipIds: Object.fromEntries(episodePlan.clips.map((clip) => [clip.id, `clip-${clip.id}`])),
+      sourceIds,
+      variantClipIds,
+      layoutIds,
+      exportPaths: {
+        dynamic_editorial: join(episodeDir, "exports", "tella-a.mp4"),
+        aimh_visual_host: join(episodeDir, "exports", "tella-b.mp4")
+      }
+    };
+    const durationMs = Math.round(
+      episodePlan.clips.reduce((total, clip) => total + clip.durationSeconds, 0) * 1_000
+    );
+    const timelineAudit = buildTellaTimelineAudit({
+      plan: episodePlan,
+      state,
+      remoteStoryDurationMs: {
+        dynamic_editorial: durationMs,
+        aimh_visual_host: durationMs
+      },
+      narrationLayoutDurationMs: Object.fromEntries(
+        GPT_LIVE_CONTENT.variants.map((variant) => [
+          variant,
+          Object.fromEntries(
+            episodePlan.clips.filter((clip) => clip.kind === "narration").map((clip) => [
+              clip.id,
+              Math.round(clip.durationSeconds * 1_000)
+            ])
+          )
+        ])
+      ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>
+    });
     await Promise.all([
-      writeFile(
-        join(episodeDir, "production.json"),
-        JSON.stringify({
-          id: GPT_LIVE_CONTENT.id,
-          branding: {
-            ...GPT_LIVE_CONTENT.branding,
-            logoPath: join(episodeDir, "assets", "logo.png")
-          },
-          audio: {
-            introMusic: false,
-            bodyMusic: false,
-            outroMusicPath: "/assets/outro.mp3",
-            outroDurationSeconds: 7
-          }
-        }),
-        "utf8"
-      ),
+      writeFile(join(episodeDir, "production.json"), JSON.stringify(production), "utf8"),
       writeFile(join(episodeDir, "assets", "logo.png"), "logo-bytes", "utf8"),
-      writeFile(join(episodeDir, "tella", "plan.json"), JSON.stringify(plan()), "utf8"),
+      writeFile(join(episodeDir, "voice", "narration.json"), JSON.stringify(voice), "utf8"),
+      writeFile(join(episodeDir, "tella", "plan.json"), JSON.stringify(episodePlan), "utf8"),
+      writeFile(join(episodeDir, "tella", "state.json"), JSON.stringify({ ...state, timelineAudit }), "utf8"),
       writeFile(join(episodeDir, "exports", "tella-a.mp4"), "export-a", "utf8"),
       writeFile(join(episodeDir, "exports", "tella-b.mp4"), "export-b", "utf8"),
       writeFile(join(episodeDir, "final", "version-a.mp4"), "approved-a", "utf8"),
       writeFile(join(episodeDir, "final", "version-b.mp4"), "approved-b", "utf8"),
-      writeFile(join(episodeDir, "reports", "post-production.json"), "{}\n", "utf8")
+      writeFile(join(episodeDir, "reports", "post-production.json"), "{}\n", "utf8"),
+      writeFile(join(episodeDir, "reports", "source-matrix.md"), sourceMatrix, "utf8"),
+      writeFile(join(episodeDir, "reports", "source-manifest.json"), JSON.stringify(sourceManifest), "utf8"),
+      writeFile(join(episodeDir, "reports", "prepared.json"), JSON.stringify({
+        schemaVersion: "0.1.0",
+        status: "prepared",
+        productionId: GPT_LIVE_CONTENT.id,
+        manifestFingerprint: preparationFingerprint
+      }), "utf8")
     ]);
     return episodeDir;
   };
@@ -346,9 +426,70 @@ describe("GPT-Live post-production publication", () => {
 
   const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
   const publishedVariants = [
-    { name: "version-a" as const, sha256: "a".repeat(64), byteSize: 1 },
-    { name: "version-b" as const, sha256: "b".repeat(64), byteSize: 1 }
+    {
+      name: "version-a" as const,
+      inputSha256: "1".repeat(64),
+      inputByteSize: 1,
+      sha256: "a".repeat(64),
+      byteSize: 1
+    },
+    {
+      name: "version-b" as const,
+      inputSha256: "2".repeat(64),
+      inputByteSize: 1,
+      sha256: "b".repeat(64),
+      byteSize: 1
+    }
   ];
+
+  it("binds the prepared fingerprint and exact Tella inputs in the post-production manifest", () => {
+    const preparationFingerprint = sha256("prepared-generation");
+    const manifest = buildPostProductionManifest({
+      productionId: GPT_LIVE_CONTENT.id,
+      generationId: "00000000-0000-4000-8000-000000000000",
+      preparationFingerprint,
+      logoPath: "/assets/logo.png",
+      outroMusicPath: "/assets/outro.mp3",
+      outroDurationSeconds: 7,
+      logoSha256: sha256("logo"),
+      sourceGains: [],
+      logoEvidence: [],
+      variants: [
+        {
+          name: "version-a",
+          inputPath: "/episode/exports/tella-a.mp4",
+          outputPath: "/episode/final/version-a.mp4",
+          inputDurationSeconds: 10,
+          outputDurationSeconds: 10,
+          inputSha256: sha256("export-a"),
+          inputByteSize: 8,
+          sha256: sha256("final-a"),
+          byteSize: 7
+        },
+        {
+          name: "version-b",
+          inputPath: "/episode/exports/tella-b.mp4",
+          outputPath: "/episode/final/version-b.mp4",
+          inputDurationSeconds: 10,
+          outputDurationSeconds: 10,
+          inputSha256: sha256("export-b"),
+          inputByteSize: 8,
+          sha256: sha256("final-b"),
+          byteSize: 7
+        }
+      ]
+    } as Parameters<typeof buildPostProductionManifest>[0] & {
+      preparationFingerprint: string;
+    });
+
+    expect(manifest).toMatchObject({
+      preparationFingerprint,
+      variants: [
+        { inputSha256: sha256("export-a"), inputByteSize: 8 },
+        { inputSha256: sha256("export-b"), inputByteSize: 8 }
+      ]
+    });
+  });
 
   const writeGenerationMarker = async (
     episodeDir: string,
@@ -356,9 +497,13 @@ describe("GPT-Live post-production publication", () => {
     expectedB: string,
     generationId = "00000000-0000-4000-8000-000000000000"
   ) => {
+    const prepared = JSON.parse(
+      await readFile(join(episodeDir, "reports", "prepared.json"), "utf8")
+    ) as { manifestFingerprint: string };
     const report = buildPostProductionManifest({
       productionId: GPT_LIVE_CONTENT.id,
       generationId,
+      preparationFingerprint: prepared.manifestFingerprint,
       logoPath: join(episodeDir, "assets", "logo.png"),
       outroMusicPath: "/assets/outro.mp3",
       outroDurationSeconds: 7,
@@ -370,7 +515,7 @@ describe("GPT-Live post-production publication", () => {
       })),
       logoEvidence: (["version-a", "version-b"] as const).map((name, index) => ({
         name,
-        samples: [0.5, 5.375, 10.25].map((timeSeconds) => ({
+        samples: [0.5, 5.875, 11.25].map((timeSeconds) => ({
           timeSeconds,
           inputSha256: (index === 0 ? "b" : "d").repeat(64),
           outputSha256: (index === 0 ? "c" : "e").repeat(64)
@@ -381,8 +526,10 @@ describe("GPT-Live post-production publication", () => {
           name: "version-a",
           inputPath: "exports/tella-a.mp4",
           outputPath: "final/version-a.mp4",
-          inputDurationSeconds: 10.75,
-          outputDurationSeconds: 10.75,
+          inputDurationSeconds: 11.75,
+          outputDurationSeconds: 11.75,
+          inputSha256: sha256("export-a"),
+          inputByteSize: Buffer.byteLength("export-a"),
           sha256: sha256(expectedA),
           byteSize: Buffer.byteLength(expectedA)
         },
@@ -390,8 +537,10 @@ describe("GPT-Live post-production publication", () => {
           name: "version-b",
           inputPath: "exports/tella-b.mp4",
           outputPath: "final/version-b.mp4",
-          inputDurationSeconds: 10.75,
-          outputDurationSeconds: 10.75,
+          inputDurationSeconds: 11.75,
+          outputDurationSeconds: 11.75,
+          inputSha256: sha256("export-b"),
+          inputByteSize: Buffer.byteLength("export-b"),
           sha256: sha256(expectedB),
           byteSize: Buffer.byteLength(expectedB)
         }
@@ -475,7 +624,7 @@ describe("GPT-Live post-production publication", () => {
       await expect(
         finishGptLiveProduction(finishOptions(episodeDir), {
           access: async () => undefined,
-          inspectFinalMediaFile: async () => validInspection(10.75),
+          inspectFinalMediaFile: async () => validInspection(11.75),
           runCommand,
           writeJsonAtomic
         })
@@ -492,6 +641,7 @@ describe("GPT-Live post-production publication", () => {
     const manifest = buildPostProductionManifest({
       productionId: "test-production",
       generationId: "00000000-0000-4000-8000-000000000000",
+      preparationFingerprint: "8".repeat(64),
       logoPath: "/Users/editor/private/logo.png",
       outroMusicPath: "/Users/editor/private/Outro_Much_Higher_Causmic.mp3",
       outroDurationSeconds: 7,
@@ -516,8 +666,10 @@ describe("GPT-Live post-production publication", () => {
           name: "version-a",
           inputPath: "/private/episode/exports/tella-a.mp4",
           outputPath: "/private/episode/final/version-a.mp4",
-          inputDurationSeconds: 10.75,
+          inputDurationSeconds: 11.75,
           outputDurationSeconds: 10.5,
+          inputSha256: "1".repeat(64),
+          inputByteSize: 900,
           sha256: "f".repeat(64),
           byteSize: 1000
         },
@@ -525,8 +677,10 @@ describe("GPT-Live post-production publication", () => {
           name: "version-b",
           inputPath: "/private/episode/exports/tella-b.mp4",
           outputPath: "/private/episode/final/version-b.mp4",
-          inputDurationSeconds: 10.75,
+          inputDurationSeconds: 11.75,
           outputDurationSeconds: 10.5,
+          inputSha256: "2".repeat(64),
+          inputByteSize: 901,
           sha256: "9".repeat(64),
           byteSize: 1001
         }
@@ -547,7 +701,7 @@ describe("GPT-Live post-production publication", () => {
         bodyMusic: false,
         outro: {
           file: "Outro_Much_Higher_Causmic.mp3",
-          startSeconds: 3.75,
+          startSeconds: 4.75,
           durationSeconds: 7,
           fadeInSeconds: 0.25,
           fadeOutSeconds: 0.75
@@ -585,6 +739,7 @@ describe("GPT-Live post-production publication", () => {
     const manifest = buildPostProductionManifest({
       productionId: "test-production",
       generationId: "00000000-0000-4000-8000-000000000000",
+      preparationFingerprint: "8".repeat(64),
       logoPath: "/assets/logo.png",
       outroMusicPath: "/assets/outro.mp3",
       outroDurationSeconds: 7,
@@ -597,6 +752,8 @@ describe("GPT-Live post-production publication", () => {
         outputPath: `/episode/final/${name}.mp4`,
         inputDurationSeconds: 0.5,
         outputDurationSeconds: 0.5,
+        inputSha256: "1".repeat(64),
+        inputByteSize: 90,
         sha256: "b".repeat(64),
         byteSize: 100
       }))
@@ -785,7 +942,7 @@ describe("GPT-Live post-production publication", () => {
     await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
     await writeGenerationMarker(episodeDir, "current-a", "current-b");
     await mutateGenerationMarker(episodeDir, (report) => {
-      report.audioPolicy.outro.startSeconds = 3.751;
+      report.audioPolicy.outro.startSeconds = 4.751;
       report.audioPolicy.outro.durationSeconds = 7.001;
     });
 
@@ -804,7 +961,7 @@ describe("GPT-Live post-production publication", () => {
     await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
     await writeGenerationMarker(episodeDir, "current-a", "current-b");
     await mutateGenerationMarker(episodeDir, (report) => {
-      report.variants[1].inputDurationSeconds = 10.752;
+      report.variants[1].inputDurationSeconds = 11.752;
     });
 
     try {
@@ -840,6 +997,46 @@ describe("GPT-Live post-production publication", () => {
       ).resolves.toMatchObject({
         finalPaths: [versionAPath, versionBPath]
       });
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a Tella export mutated after the generation was published", async () => {
+    const episodeDir = await createContainedEpisode();
+    await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
+    await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
+    await writeGenerationMarker(episodeDir, "current-a", "current-b");
+
+    try {
+      await expect(validatePublishedGeneration(episodeDir)).resolves.toMatchObject({
+        variants: [
+          expect.objectContaining({ inputSha256: sha256("export-a"), inputByteSize: 8 }),
+          expect.objectContaining({ inputSha256: sha256("export-b"), inputByteSize: 8 })
+        ]
+      });
+      await writeFile(join(episodeDir, "exports", "tella-a.mp4"), "mutated-export-a", "utf8");
+
+      await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(/Tella|input|export/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a published generation after its prepared inputs become stale", async () => {
+    const episodeDir = await createContainedEpisode();
+    await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
+    await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
+    await writeGenerationMarker(episodeDir, "current-a", "current-b");
+
+    try {
+      await expect(validatePublishedGeneration(episodeDir)).resolves.toBeDefined();
+      const productionPath = join(episodeDir, "production.json");
+      const production = JSON.parse(await readFile(productionPath, "utf8"));
+      production.unrelatedPreparation = true;
+      await writeFile(productionPath, JSON.stringify(production), "utf8");
+
+      await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(/prepar|fingerprint/i);
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
     }
@@ -914,11 +1111,63 @@ describe("GPT-Live post-production publication", () => {
         access: async () => undefined,
         readFileBytes: async () => new Uint8Array([1, 2, 3]),
         inspectFinalMediaFile: async (_ffprobePath, path) =>
-          validInspection(path.includes("tella-b") ? 10.752 : 10.75),
+          validInspection(path.includes("tella-b") ? 11.752 : 11.75),
         measureIntervalLoudness,
         runCommand
-      })).rejects.toThrow(/input.*(?:duration|outro)|(?:duration|outro).*input/i);
+      })).rejects.toThrow(/duration|outro|30fps frame/i);
 
+      expect(measureIntervalLoudness).not.toHaveBeenCalled();
+      expect(runCommand).not.toHaveBeenCalled();
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a stale prepared record before media inspection, loudness, or rendering", async () => {
+    const episodeDir = await createContainedEpisode();
+    const preparedPath = join(episodeDir, "reports", "prepared.json");
+    const prepared = JSON.parse(await readFile(preparedPath, "utf8"));
+    prepared.manifestFingerprint = "0".repeat(64);
+    await writeFile(preparedPath, JSON.stringify(prepared), "utf8");
+    const inspectFinalMediaFile = vi.fn(async () => validInspection(11.75));
+    const measureIntervalLoudness = vi.fn(async () => -23);
+    const runCommand = vi.fn(async () => ({ stdout: "", stderr: "" }));
+
+    try {
+      await expect(finishGptLiveProduction(finishOptions(episodeDir), {
+        access: async () => undefined,
+        inspectFinalMediaFile,
+        measureIntervalLoudness,
+        runCommand
+      })).rejects.toThrow(/prepar|fingerprint/i);
+
+      expect(inspectFinalMediaFile).not.toHaveBeenCalled();
+      expect(measureIntervalLoudness).not.toHaveBeenCalled();
+      expect(runCommand).not.toHaveBeenCalled();
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a shifted Tella audit before media inspection, loudness, or rendering", async () => {
+    const episodeDir = await createContainedEpisode();
+    const statePath = join(episodeDir, "tella", "state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    state.timelineAudit.orderedClipIds.dynamic_editorial.reverse();
+    await writeFile(statePath, JSON.stringify(state), "utf8");
+    const inspectFinalMediaFile = vi.fn(async () => validInspection(11.75));
+    const measureIntervalLoudness = vi.fn(async () => -23);
+    const runCommand = vi.fn(async () => ({ stdout: "", stderr: "" }));
+
+    try {
+      await expect(finishGptLiveProduction(finishOptions(episodeDir), {
+        access: async () => undefined,
+        inspectFinalMediaFile,
+        measureIntervalLoudness,
+        runCommand
+      })).rejects.toThrow(/timeline audit|clip order/i);
+
+      expect(inspectFinalMediaFile).not.toHaveBeenCalled();
       expect(measureIntervalLoudness).not.toHaveBeenCalled();
       expect(runCommand).not.toHaveBeenCalled();
     } finally {
@@ -935,6 +1184,7 @@ describe("GPT-Live post-production publication", () => {
       events.push("validate");
       return {
         generationId: transactionId,
+        preparationFingerprint: "c".repeat(64),
         reportSha256: "c".repeat(64),
         variants: publishedVariants,
         finalPaths: [
@@ -955,7 +1205,7 @@ describe("GPT-Live post-production publication", () => {
           if (path.endsWith("version-b.mp4")) events.push("hash-b");
           return readFile(path);
         },
-        inspectFinalMediaFile: async () => validInspection(10.75),
+        inspectFinalMediaFile: async () => validInspection(11.75),
         measureIntervalLoudness: async () => -23,
         sampleLogoCornerFrameHash: async (_ffmpeg, path) =>
           path.includes("exports") ? "a".repeat(64) : "b".repeat(64),
@@ -997,7 +1247,7 @@ describe("GPT-Live post-production publication", () => {
         ]);
         const graph = args[args.indexOf("-filter_complex") + 1]!;
         expect(graph).toContain("[2:a]atrim=duration=7.000");
-        expect(graph).toContain("adelay=3750:all=1");
+        expect(graph).toContain("adelay=4750:all=1");
       }
       expect(validateGeneration).toHaveBeenCalledWith(episodeDir);
     } finally {
@@ -1028,7 +1278,7 @@ describe("GPT-Live post-production publication", () => {
         randomUUID: () => transactionId,
         readFileBytes: async (path) =>
           path === "/assets/logo.png" ? new Uint8Array([1, 2, 3]) : readFile(path),
-        inspectFinalMediaFile: async () => validInspection(10.75),
+        inspectFinalMediaFile: async () => validInspection(11.75),
         measureIntervalLoudness: async () => -23,
         sampleLogoCornerFrameHash: async (_ffmpeg, path) =>
           path.includes("exports") ? "a".repeat(64) : "b".repeat(64),
@@ -1038,6 +1288,7 @@ describe("GPT-Live post-production publication", () => {
         },
         validatePublishedGeneration: async () => ({
           generationId: transactionId,
+          preparationFingerprint: "c".repeat(64),
           reportSha256: "c".repeat(64),
           variants: publishedVariants,
           finalPaths: [
@@ -1075,7 +1326,7 @@ describe("GPT-Live post-production publication", () => {
           randomUUID: () => transactionId,
           readFileBytes: async (path) =>
             path === "/assets/logo.png" ? new Uint8Array([1, 2, 3]) : readFile(path),
-          inspectFinalMediaFile: async () => validInspection(10.75),
+          inspectFinalMediaFile: async () => validInspection(11.75),
           measureIntervalLoudness: async () => -23,
           sampleLogoCornerFrameHash: async (_ffmpeg, path) =>
             path.includes("exports") ? "a".repeat(64) : "b".repeat(64),
@@ -1113,7 +1364,7 @@ describe("GPT-Live post-production publication", () => {
         randomUUID: () => transactionId,
         readFileBytes: async (path) =>
           path === "/assets/logo.png" ? new Uint8Array([1, 2, 3]) : readFile(path),
-        inspectFinalMediaFile: async () => validInspection(10.75),
+        inspectFinalMediaFile: async () => validInspection(11.75),
         measureIntervalLoudness: async () => -23,
         sampleLogoCornerFrameHash: async (_ffmpeg, path) =>
           path.includes("exports") ? "a".repeat(64) : "b".repeat(64),
@@ -1138,6 +1389,7 @@ describe("GPT-Live post-production publication", () => {
         },
         validatePublishedGeneration: async () => ({
           generationId: transactionId,
+          preparationFingerprint: "c".repeat(64),
           reportSha256: "c".repeat(64),
           variants: publishedVariants,
           finalPaths: [
@@ -1159,9 +1411,8 @@ describe("GPT-Live post-production publication", () => {
   });
 
   it("does not replace an existing final when rendering fails", async () => {
-    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-finish-failure-"));
+    const episodeDir = await createContainedEpisode();
     const finalPath = join(episodeDir, "final", "version-a.mp4");
-    await mkdir(join(episodeDir, "final"), { recursive: true });
     await writeFile(finalPath, "approved-final", "utf8");
     const rename = vi.fn(async () => undefined);
 
@@ -1179,10 +1430,9 @@ describe("GPT-Live post-production publication", () => {
           },
           {
             access: async () => undefined,
-            readFileBytes: async () => new Uint8Array([1, 2, 3]),
-            readFile: async () => JSON.stringify(plan()),
-            inspectFinalMediaFile: async (_ffprobePath, path) =>
-              validInspection(path.includes("tella-b") ? 10.75 : 10.75),
+            readFileBytes: async (path) =>
+              path === "/assets/logo.png" ? new Uint8Array([1, 2, 3]) : readFile(path),
+            inspectFinalMediaFile: async () => validInspection(11.75),
             measureIntervalLoudness: async () => -23,
             runCommand: async () => {
               throw new Error("injected ffmpeg failure");
@@ -1222,7 +1472,7 @@ describe("GPT-Live post-production publication", () => {
             access: async () => undefined,
             randomUUID: () => transactionId,
             readFileBytes: async () => new Uint8Array([1, 2, 3]),
-            inspectFinalMediaFile: async () => validInspection(10.75),
+            inspectFinalMediaFile: async () => validInspection(11.75),
             measureIntervalLoudness: async () => -23,
             sampleLogoCornerFrameHash: async (_ffmpeg, path) =>
               path.includes("exports") ? "a".repeat(64) : "b".repeat(64),
@@ -1283,7 +1533,7 @@ describe("GPT-Live post-production publication", () => {
           access: async () => undefined,
           randomUUID: () => transactionId,
           readFileBytes: async () => new Uint8Array([1, 2, 3]),
-          inspectFinalMediaFile: async () => validInspection(10.75),
+          inspectFinalMediaFile: async () => validInspection(11.75),
           measureIntervalLoudness: async () => -23,
           sampleLogoCornerFrameHash: async (_ffmpeg, path) =>
             path.includes("exports") ? "a".repeat(64) : "b".repeat(64),

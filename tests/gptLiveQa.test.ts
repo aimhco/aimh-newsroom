@@ -15,7 +15,8 @@ import {
   buildPostProductionManifest,
   deriveSharedSourceGains,
   deriveSourceDuckIntervals,
-  type FinalMediaInspection
+  type FinalMediaInspection,
+  type PublishedGenerationValidation
 } from "../src/production/gptLive/finish";
 import type { MediaInspection } from "../src/production/gptLive/mediaInspection";
 import { GPT_LIVE_SCENES, sceneStyle } from "../src/production/gptLive/motion/sceneStyle";
@@ -52,6 +53,12 @@ import {
 } from "../src/production/gptLive/qa/visual";
 import { assertSafeSourceManifestUrl } from "../src/production/gptLive/qa/validation";
 import { buildTellaPlan } from "../src/production/gptLive/tellaPlan";
+import {
+  buildTellaTimelineAudit,
+  validateTellaTimelineAudit,
+  type TellaStateForTimelineAudit,
+  type TellaTimelineAudit
+} from "../src/production/gptLive/tellaState";
 import { buildVoiceCacheKey } from "../src/voice/elevenLabsAdapter";
 
 const EPISODE_DIR = "/episode";
@@ -159,6 +166,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
     YOUTUBE_UPLOAD_ENABLED: "false",
     ELEVENLABS_VOICE_ID: "qa-test-voice",
     ELEVENLABS_MODEL_ID: "eleven_multilingual_v2",
+    AIMH_LOGO_PATH: GPT_LIVE_CONTENT.branding.logoPath,
     AIMH_OUTRO_MUSIC_PATH: GPT_LIVE_CONTENT.audio.outroMusicPath
   };
   const voice = {
@@ -190,6 +198,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
   const postProduction = buildPostProductionManifest({
     productionId: GPT_LIVE_CONTENT.id,
     generationId: "00000000-0000-4000-8000-000000000000",
+    preparationFingerprint: sha("f"),
     logoPath: GPT_LIVE_CONTENT.branding.logoPath,
     outroMusicPath: GPT_LIVE_CONTENT.audio.outroMusicPath,
     outroDurationSeconds: GPT_LIVE_CONTENT.audio.outroDurationSeconds,
@@ -210,6 +219,8 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
         outputPath: join(EPISODE_DIR, "final", "version-a.mp4"),
         inputDurationSeconds: durationSeconds,
         outputDurationSeconds,
+        inputSha256: sha("6"),
+        inputByteSize: 900,
         sha256: sha("d"),
         byteSize: 1_000
       },
@@ -219,6 +230,8 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
         outputPath: join(EPISODE_DIR, "final", "version-b.mp4"),
         inputDurationSeconds: durationSeconds,
         outputDurationSeconds,
+        inputSha256: sha("7"),
+        inputByteSize: 901,
         sha256: sha("e"),
         byteSize: 1_001
       }
@@ -260,11 +273,41 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
       )
     )
   };
+  (state as Record<string, unknown>).timelineAudit = {
+    schemaVersion: "0.1.0",
+    compatibilityVideoIds: structuredClone(state.variantVideoIds),
+    orderedClipIds: Object.fromEntries(
+      GPT_LIVE_CONTENT.variants.map((variant) => [
+        variant,
+        plan.clips.map((clip) => state.variantClipIds[variant][clip.id])
+      ])
+    ),
+    remoteStoryDurationMs: Object.fromEntries(
+      GPT_LIVE_CONTENT.variants.map((variant) => [variant, Math.round(durationSeconds * 1_000)])
+    ),
+    narrationLayouts: Object.fromEntries(
+      GPT_LIVE_CONTENT.variants.map((variant) => [
+        variant,
+        plan.clips.filter((clip) => clip.kind === "narration").map((clip) => ({
+          clipId: state.variantClipIds[variant][clip.id],
+          layoutId: state.layoutIds[`${variant}:${clip.id}`],
+          sourceId: state.sourceIds[`plate:${variant}:${clip.id}`],
+          startTimeMs: 0,
+          durationMs: Math.round(clip.durationSeconds * 1_000),
+          transitionStyle: "hardCut"
+        }))
+      ])
+    ),
+    soundEffectIds: Object.fromEntries(
+      GPT_LIVE_CONTENT.variants.map((variant) => [variant, []])
+    )
+  };
   const sourceMatrix = "canonical source matrix";
   const sourceManifest = canonicalSourceManifest();
   const manifestFingerprint = createHash("sha256")
     .update(JSON.stringify({ production, voice, plan, sourceMatrix, sourceManifest }))
     .digest("hex");
+  (postProduction as { preparationFingerprint: string }).preparationFingerprint = manifestFingerprint;
   const masters = Object.fromEntries(
     voice.chunks.map((chunk) => [chunk.id, genericInspection(chunk.durationSeconds)])
   );
@@ -282,7 +325,15 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
     env,
     generation: {
       generationId: postProduction.generationId,
+      preparationFingerprint: manifestFingerprint,
       reportSha256: sha("f"),
+      variants: postProduction.variants.map((variant) => ({
+        name: variant.name,
+        inputSha256: variant.inputSha256,
+        inputByteSize: variant.inputByteSize,
+        sha256: variant.sha256,
+        byteSize: variant.byteSize
+      })),
       finalPaths: [
         join(EPISODE_DIR, "final", "version-a.mp4"),
         join(EPISODE_DIR, "final", "version-b.mp4")
@@ -328,6 +379,10 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
       ...voice.chunks.map((chunk) => [`${chunk.file}.json`, true] as const)
     ]),
     media: {
+      exports: {
+        "version-a": finalInspection(durationSeconds),
+        "version-b": finalInspection(durationSeconds)
+      },
       sources: {
         clip_translation: genericInspection(12.35),
         clip_interruption: genericInspection(11.96)
@@ -358,7 +413,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
 };
 
 const refreshPreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
-  snapshot.prepared.manifestFingerprint = createHash("sha256")
+  const manifestFingerprint = createHash("sha256")
     .update(
       JSON.stringify({
         production: snapshot.production,
@@ -369,6 +424,10 @@ const refreshPreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
       })
     )
     .digest("hex");
+  snapshot.prepared.manifestFingerprint = manifestFingerprint;
+  (snapshot.generation as { preparationFingerprint: string }).preparationFingerprint =
+    manifestFingerprint;
+  snapshot.postProduction.preparationFingerprint = manifestFingerprint;
 };
 
 const createQaRunHarness = async () => {
@@ -389,15 +448,26 @@ const createQaRunHarness = async () => {
       sourceManifest: snapshot.sourceManifest
     }))
     .digest("hex");
+  (snapshot.generation as { preparationFingerprint: string }).preparationFingerprint =
+    String(snapshot.prepared.manifestFingerprint);
+  snapshot.postProduction.preparationFingerprint = snapshot.prepared.manifestFingerprint;
 
   const postVariants = snapshot.postProduction.variants as Array<{
     name: "version-a" | "version-b";
+    inputSha256: string;
+    inputByteSize: number;
     sha256: string;
     byteSize: number;
   }>;
   const generation = {
     ...snapshot.generation,
-    variants: postVariants.map(({ name, sha256, byteSize }) => ({ name, sha256, byteSize }))
+    variants: postVariants.map(({
+      name,
+      inputSha256,
+      inputByteSize,
+      sha256,
+      byteSize
+    }) => ({ name, inputSha256, inputByteSize, sha256, byteSize }))
   };
   snapshot.generation = generation as typeof snapshot.generation;
 
@@ -485,9 +555,13 @@ const createQaRunHarness = async () => {
       runCommand: async () => ({ stdout: "", stderr: "max_volume: -8.0 dB" }),
       inspectMediaFile: async (_ffprobePath: string, path: string) => preparedInspections.get(path)!,
       inspectFinalMediaFile: async (_ffprobePath: string, path: string) =>
-        path.endsWith("version-a.mp4")
-          ? snapshot.media.finals["version-a"]
-          : snapshot.media.finals["version-b"],
+        path.endsWith("tella-a.mp4")
+          ? snapshot.media.exports["version-a"]
+          : path.endsWith("tella-b.mp4")
+            ? snapshot.media.exports["version-b"]
+            : path.endsWith("version-a.mp4")
+              ? snapshot.media.finals["version-a"]
+              : snapshot.media.finals["version-b"],
       generateVisualArtifacts: async () => artifacts
     } as unknown as RunGptLiveQaDependencies
   };
@@ -1049,6 +1123,36 @@ describe("GPT-Live full production QA", () => {
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/prepared generation fingerprint/i);
   });
 
+  it("rejects a published generation bound to a different preparation fingerprint", () => {
+    const snapshot = validSnapshot();
+    (snapshot.generation as { preparationFingerprint: string }).preparationFingerprint = sha("9");
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/prepar|fingerprint/i);
+  });
+
+  it("rejects published Tella input lineage that differs from the post-production report", () => {
+    const snapshot = validSnapshot();
+    const variants = snapshot.generation.variants as Array<
+      (typeof snapshot.generation.variants)[number]
+    >;
+    variants[0] = {
+      ...snapshot.generation.variants[0]!,
+      inputSha256: sha("9"),
+      inputByteSize: snapshot.generation.variants[0]!.inputByteSize + 1
+    };
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/Tella input|generation/i);
+  });
+
+  it("rejects a Tella export duration outside one 30fps frame of the audited plan", () => {
+    const snapshot = validSnapshot();
+    snapshot.media.exports["version-a"] = finalInspection(
+      snapshot.media.exports["version-a"].durationSeconds + 0.034
+    );
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/Tella|export|30fps frame/i);
+  });
+
   it("accepts a prepared production using the resolved non-default outro path", () => {
     const snapshot = validSnapshot();
     const resolvedOutroPath = "/assets/Outro_Alternate.mp3";
@@ -1094,6 +1198,30 @@ describe("GPT-Live full production QA", () => {
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/resolved QA environment/i);
   });
 
+  it("accepts the exact resolved production logo path outside the canonical development checkout", () => {
+    const snapshot = validSnapshot();
+    const logoPath = "/opt/aimh-video-engine/assets/logo.png";
+    snapshot.env.AIMH_LOGO_PATH = logoPath;
+    snapshot.production.branding = {
+      ...snapshot.production.branding,
+      logoPath
+    };
+    snapshot.logo.path = logoPath;
+    refreshPreparedFingerprint(snapshot);
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).not.toThrow();
+    expect(() => validateSerializedQaPaths({
+      episodeDir: snapshot.episodeDir,
+      env: snapshot.env,
+      production: snapshot.production,
+      voice: snapshot.voice,
+      plan: snapshot.plan,
+      generation: snapshot.generation,
+      tellaState: snapshot.tellaState,
+      postProduction: snapshot.postProduction
+    })).not.toThrow();
+  });
+
   it("rejects an unexpected serialized outro path", () => {
     const snapshot = validSnapshot();
     snapshot.production.audio = {
@@ -1118,6 +1246,7 @@ describe("GPT-Live full production QA", () => {
       name: "master and A video IDs",
       mutate: (state: Record<string, any>) => {
         state.variantVideoIds.dynamic_editorial = state.masterVideoId;
+        state.timelineAudit.compatibilityVideoIds.dynamic_editorial = state.masterVideoId;
       }
     },
     {
@@ -1131,12 +1260,18 @@ describe("GPT-Live full production QA", () => {
       mutate: (state: Record<string, any>) => {
         state.sourceIds["plate:dynamic_editorial:narration_full_duplex"] =
           state.sourceIds["plate:dynamic_editorial:narration_hook"];
+        state.timelineAudit.narrationLayouts.dynamic_editorial[1].sourceId =
+          state.sourceIds["plate:dynamic_editorial:narration_hook"];
       }
     },
     {
       name: "variant clip IDs",
       mutate: (state: Record<string, any>) => {
         state.variantClipIds.dynamic_editorial.narration_hook =
+          state.variantClipIds.dynamic_editorial.clip_translation;
+        state.timelineAudit.orderedClipIds.dynamic_editorial[1] =
+          state.variantClipIds.dynamic_editorial.clip_translation;
+        state.timelineAudit.narrationLayouts.dynamic_editorial[0].clipId =
           state.variantClipIds.dynamic_editorial.clip_translation;
       }
     },
@@ -1145,6 +1280,8 @@ describe("GPT-Live full production QA", () => {
       mutate: (state: Record<string, any>) => {
         state.layoutIds["dynamic_editorial:narration_full_duplex"] =
           state.layoutIds["dynamic_editorial:narration_hook"];
+        state.timelineAudit.narrationLayouts.dynamic_editorial[1].layoutId =
+          state.layoutIds["dynamic_editorial:narration_hook"];
       }
     }
   ])("rejects duplicate Tella $name", ({ mutate }) => {
@@ -1152,6 +1289,164 @@ describe("GPT-Live full production QA", () => {
     mutate(snapshot.tellaState as Record<string, any>);
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/unique|distinct|duplicate/i);
   });
+
+  it("requires a serialized Tella timeline audit", () => {
+    const snapshot = validSnapshot();
+    delete (snapshot.tellaState as Record<string, unknown>).timelineAudit;
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/timeline audit/i);
+  });
+
+  it.each([
+    {
+      name: "extra top-level key",
+      mutate: (audit: Record<string, any>) => { audit.unexpected = true; }
+    },
+    {
+      name: "mismatched compatibility video ID",
+      mutate: (audit: Record<string, any>) => {
+        audit.compatibilityVideoIds.dynamic_editorial = "different-video";
+      }
+    },
+    {
+      name: "shifted clip order",
+      mutate: (audit: Record<string, any>) => {
+        audit.orderedClipIds.dynamic_editorial.reverse();
+      }
+    },
+    {
+      name: "extra clip",
+      mutate: (audit: Record<string, any>) => {
+        audit.orderedClipIds.aimh_visual_host.push("extra-clip");
+      }
+    },
+    {
+      name: "shifted narration layout",
+      mutate: (audit: Record<string, any>) => {
+        audit.narrationLayouts.dynamic_editorial[0].startTimeMs = 1;
+      }
+    },
+    {
+      name: "wrong narration source",
+      mutate: (audit: Record<string, any>) => {
+        audit.narrationLayouts.dynamic_editorial[0].sourceId = "old-plate-source";
+      }
+    },
+    {
+      name: "non-hard-cut transition",
+      mutate: (audit: Record<string, any>) => {
+        audit.narrationLayouts.aimh_visual_host[0].transitionStyle = "dissolve";
+      }
+    },
+    {
+      name: "narration duration outside tolerance",
+      mutate: (audit: Record<string, any>) => {
+        audit.narrationLayouts.aimh_visual_host[0].durationMs += 101;
+      }
+    },
+    {
+      name: "story duration outside one frame",
+      mutate: (audit: Record<string, any>) => {
+        audit.remoteStoryDurationMs.dynamic_editorial += 34;
+      }
+    },
+    {
+      name: "sound effect",
+      mutate: (audit: Record<string, any>) => {
+        audit.soundEffectIds.dynamic_editorial.push("sound-effect");
+      }
+    }
+  ])("rejects a Tella timeline audit with $name", ({ mutate }) => {
+    const snapshot = validSnapshot();
+    mutate((snapshot.tellaState as Record<string, any>).timelineAudit);
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/timeline audit/i);
+  });
+
+  it("accepts the documented 100ms narration layout duration tolerance", () => {
+    const snapshot = validSnapshot();
+    const audit = (snapshot.tellaState as Record<string, any>).timelineAudit;
+    audit.narrationLayouts.dynamic_editorial[0].durationMs += 100;
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).not.toThrow();
+  });
+
+  it("builds and validates the exact timeline audit from queried Tella state maps", () => {
+    const snapshot = validSnapshot();
+    const state = snapshot.tellaState as TellaStateForTimelineAudit & Record<string, any>;
+    const expected = structuredClone(state.timelineAudit) as TellaTimelineAudit;
+    const audit = buildTellaTimelineAudit({
+      plan: snapshot.plan,
+      state,
+      remoteStoryDurationMs: expected.remoteStoryDurationMs,
+      narrationLayoutDurationMs: Object.fromEntries(
+        GPT_LIVE_CONTENT.variants.map((variant) => [
+          variant,
+          Object.fromEntries(
+            snapshot.plan.clips.filter((clip) => clip.kind === "narration").map((clip, index) => [
+              clip.id,
+              expected.narrationLayouts[variant][index]!.durationMs
+            ])
+          )
+        ])
+      ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>
+    });
+
+    expect(audit).toEqual(expected);
+    expect(validateTellaTimelineAudit(snapshot.plan, { ...state, timelineAudit: audit }))
+      .toEqual(expected);
+  });
+
+  it("preserves queried remote narration layout durations in the built audit", () => {
+    const snapshot = validSnapshot();
+    const state = snapshot.tellaState as TellaStateForTimelineAudit;
+    const narrationLayoutDurationMs = Object.fromEntries(
+      GPT_LIVE_CONTENT.variants.map((variant) => [
+        variant,
+        Object.fromEntries(
+          snapshot.plan.clips.filter((clip) => clip.kind === "narration").map((clip) => [
+            clip.id,
+            Math.round(clip.durationSeconds * 1_000) - 50
+          ])
+        )
+      ])
+    ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>;
+    const audit = buildTellaTimelineAudit({
+      plan: snapshot.plan,
+      state,
+      remoteStoryDurationMs: {
+        dynamic_editorial: 129_310,
+        aimh_visual_host: 129_310
+      },
+      narrationLayoutDurationMs
+    });
+
+    expect(audit.narrationLayouts.dynamic_editorial.map(({ durationMs }) => durationMs))
+      .toEqual(Object.values(narrationLayoutDurationMs.dynamic_editorial));
+  });
+
+  it("rejects a remote URL nested in the timeline audit", () => {
+    const snapshot = validSnapshot();
+    const audit = (snapshot.tellaState as Record<string, any>).timelineAudit;
+    audit.compatibilityVideoIds.dynamic_editorial = "https://tella.example/video/signed";
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/remote URL|non-URL ID/i);
+  });
+
+  it.each(["variantClipIds", "layoutIds", "sourceIds"])(
+    "rejects an extra Tella state ID in %s at the pure audit boundary",
+    (mapName) => {
+      const snapshot = validSnapshot();
+      const state = structuredClone(snapshot.tellaState) as Record<string, any>;
+      if (mapName === "variantClipIds") {
+        state.variantClipIds.dynamic_editorial.extra_clip = "extra-clip-id";
+      } else {
+        state[mapName].extra_key = `extra-${mapName}-id`;
+      }
+
+      expect(() => validateTellaTimelineAudit(snapshot.plan, state)).toThrow(/timeline audit/i);
+    }
+  );
 
   it("rejects an outside serialized path before any inspector is called", async () => {
     const snapshot = validSnapshot();
@@ -1171,6 +1466,44 @@ describe("GPT-Live full production QA", () => {
       generation: snapshot.generation
     }, {}, inspector)).rejects.toThrow(/outside|escape|path/i);
     expect(inspector).not.toHaveBeenCalled();
+  });
+
+  it("rejects a shifted timeline audit before QA media or audio probes", async () => {
+    const harness = await createQaRunHarness();
+    const statePath = join(harness.episodeDir, "tella", "state.json");
+    const state = structuredClone(harness.snapshot.tellaState) as Record<string, any>;
+    state.timelineAudit.orderedClipIds.dynamic_editorial.reverse();
+    const originalReadFile = harness.dependencies.readFile!;
+    const inspectMediaFile = vi.fn(harness.dependencies.inspectMediaFile!);
+    const inspectFinalMediaFile = vi.fn(harness.dependencies.inspectFinalMediaFile!);
+    const runCommand = vi.fn(harness.dependencies.runCommand!);
+
+    try {
+      await expect(runGptLiveQa(
+        {
+          episodeDir: harness.episodeDir,
+          env: harness.snapshot.env,
+          ffmpegPath: "ffmpeg",
+          ffprobePath: "ffprobe"
+        },
+        {
+          ...harness.dependencies,
+          validatePublishedGeneration: async () => harness.generation,
+          readFile: async (path, encoding) => path === statePath
+            ? JSON.stringify(state)
+            : originalReadFile(path, encoding),
+          inspectMediaFile,
+          inspectFinalMediaFile,
+          runCommand
+        }
+      )).rejects.toThrow(/timeline audit|clip order/i);
+
+      expect(inspectMediaFile).not.toHaveBeenCalled();
+      expect(inspectFinalMediaFile).not.toHaveBeenCalled();
+      expect(runCommand).not.toHaveBeenCalled();
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
   });
 
   it("restores prior complete QA evidence when report-marker promotion fails", async () => {
@@ -1305,6 +1638,49 @@ describe("GPT-Live full production QA", () => {
     }
   });
 
+  it.each([
+    {
+      name: "prepared fingerprint",
+      mutate: (generation: PublishedGenerationValidation) => ({
+        ...generation,
+        preparationFingerprint: sha("9")
+      })
+    },
+    {
+      name: "Tella input hash",
+      mutate: (generation: PublishedGenerationValidation) => ({
+          ...generation,
+          variants: generation.variants.map((variant, index) => index === 0
+            ? { ...variant, inputSha256: sha("9"), inputByteSize: variant.inputByteSize + 1 }
+            : variant)
+        })
+    }
+  ])("aborts when the $name changes before QA publication", async ({ mutate }) => {
+    const harness = await createQaRunHarness();
+    let currentGeneration = harness.generation;
+
+    try {
+      await expect(runGptLiveQa(
+        {
+          episodeDir: harness.episodeDir,
+          env: harness.snapshot.env,
+          ffmpegPath: "ffmpeg",
+          ffprobePath: "ffprobe"
+        },
+        {
+          ...harness.dependencies,
+          validatePublishedGeneration: async () => currentGeneration,
+          writeJsonAtomic: async (path, value) => {
+            currentGeneration = mutate(harness.generation as any) as typeof currentGeneration;
+            await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+          }
+        }
+      )).rejects.toThrow(/generation.*changed|changed.*generation/i);
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
+  });
+
   it("records the stable validated generation identity in qa.json", async () => {
     const harness = await createQaRunHarness();
 
@@ -1325,6 +1701,7 @@ describe("GPT-Live full production QA", () => {
       const report = JSON.parse(await readFile(harness.paths.reportPath, "utf8"));
       expect(report.generation).toEqual({
         generationId: harness.generation.generationId,
+        preparationFingerprint: harness.generation.preparationFingerprint,
         variants: harness.generation.variants
       });
     } finally {

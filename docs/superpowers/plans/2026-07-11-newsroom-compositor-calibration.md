@@ -92,4 +92,3 @@ This plan begins only after the immediate GPT-Live revision is complete. It must
 - [ ] If the evidence is inconclusive, keep Remotion and Tella unchanged and state the next measurable trigger for reevaluation.
 - [ ] Run the full test, lint, and build suite.
 - [ ] Commit with `git commit -m "docs: decide newsroom rendering architecture"`.
-

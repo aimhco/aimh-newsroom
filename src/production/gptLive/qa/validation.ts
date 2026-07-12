@@ -15,6 +15,7 @@ import { GPT_LIVE_SCENES } from "../motion/sceneStyle";
 import { buildSourceManifest } from "../prepare";
 import { assertPlateContract } from "../renderPlates";
 import { buildTellaPlan, type TellaPlan } from "../tellaPlan";
+import { assertTellaProgramDuration, validateTellaTimelineAudit } from "../tellaState";
 import type { EvidenceSpec, GptLiveProduction, ProductionClaim } from "../types";
 import { buildSpeechRequestBody, buildVoiceCacheKey } from "../../../voice/elevenLabsAdapter";
 import type {
@@ -335,7 +336,13 @@ const validateProduction = (
     if (!coveredClaims.has(claim.id)) fail(`claim ${claim.id} is not covered by narration`);
   }
 
-  exact(production.branding, GPT_LIVE_CONTENT.branding, "logo settings and path");
+  const { logoPath, ...branding } = production.branding;
+  const { logoPath: _canonicalLogoPath, ...canonicalBranding } = GPT_LIVE_CONTENT.branding;
+  exact(branding, canonicalBranding, "logo settings");
+  const resolvedLogoPath = env.AIMH_LOGO_PATH;
+  if (!resolvedLogoPath?.trim() || logoPath !== resolvedLogoPath) {
+    fail("production logo path does not match the resolved QA environment");
+  }
 };
 
 const validatePreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
@@ -355,6 +362,12 @@ const validatePreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
     snapshot.prepared.manifestFingerprint !== expected
   ) {
     fail("prepared generation fingerprint does not match production records");
+  }
+  if (
+    snapshot.generation.preparationFingerprint !== expected ||
+    snapshot.postProduction.preparationFingerprint !== expected
+  ) {
+    fail("published generation preparation fingerprint is stale or unrelated");
   }
 };
 
@@ -454,6 +467,11 @@ const scanUnsafeTellaState = (value: unknown, path = "tellaState"): void => {
 
 const validateTellaState = (snapshot: GptLiveQaSnapshot): void => {
   scanUnsafeTellaState(snapshot.tellaState);
+  try {
+    validateTellaTimelineAudit(snapshot.plan, snapshot.tellaState);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
   const state = requireRecord(snapshot.tellaState, "Tella state");
   if (typeof state.masterVideoId !== "string" || !state.masterVideoId) fail("Tella master video ID is missing");
   const variantVideoIds = keysExactly(state.variantVideoIds, PLATE_VARIANTS, "Tella variant video IDs");
@@ -537,6 +555,8 @@ interface PostVariant {
   outputPath: string;
   inputDurationSeconds: number;
   outputDurationSeconds: number;
+  inputSha256: string;
+  inputByteSize: number;
   sha256: string;
   byteSize: number;
 }
@@ -547,6 +567,17 @@ const postVariants = (post: Record<string, unknown>): PostVariant[] => {
 };
 
 const validateFinals = (snapshot: GptLiveQaSnapshot): void => {
+  for (const name of VARIANTS) {
+    try {
+      assertTellaProgramDuration(
+        snapshot.plan,
+        snapshot.media.exports[name].durationSeconds,
+        `${name} Tella export`
+      );
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error));
+    }
+  }
   const a = snapshot.media.finals["version-a"];
   const b = snapshot.media.finals["version-b"];
   if (a.durationSeconds < 120 || a.durationSeconds > 180 || b.durationSeconds < 120 || b.durationSeconds > 180) {
@@ -561,6 +592,8 @@ const validateFinals = (snapshot: GptLiveQaSnapshot): void => {
   const variants = postVariants(snapshot.postProduction);
   for (const name of VARIANTS) {
     const report = variants.find((variant) => variant.name === name) ?? fail(`missing ${name} report`);
+    const generation = snapshot.generation.variants.find((variant) => variant.name === name) ??
+      fail(`missing ${name} published generation`);
     const final = snapshot.media.finals[name];
     try {
       assertFinalMediaContract(final, report.inputDurationSeconds);
@@ -572,6 +605,14 @@ const validateFinals = (snapshot: GptLiveQaSnapshot): void => {
     }
     if (!HASH.test(report.sha256) || !Number.isSafeInteger(report.byteSize) || report.byteSize <= 0) {
       fail(`${name} generation hash metadata is invalid`);
+    }
+    if (
+      report.inputSha256 !== generation.inputSha256 ||
+      report.inputByteSize !== generation.inputByteSize ||
+      report.sha256 !== generation.sha256 ||
+      report.byteSize !== generation.byteSize
+    ) {
+      fail(`${name} Tella input or final generation lineage does not match publication validation`);
     }
   }
 };
@@ -586,7 +627,11 @@ const validateBrandingAndAudio = (snapshot: GptLiveQaSnapshot): void => {
   ) {
     fail("post-production generation metadata is invalid or stale");
   }
-  if (snapshot.logo.path !== GPT_LIVE_CONTENT.branding.logoPath || !HASH.test(snapshot.logo.sha256)) {
+  if (
+    snapshot.logo.path !== snapshot.env.AIMH_LOGO_PATH ||
+    snapshot.logo.path !== snapshot.production.branding.logoPath ||
+    !HASH.test(snapshot.logo.sha256)
+  ) {
     fail("logo path or hash is invalid");
   }
   if (!isRecord(post.assets)) fail("post-production assets are invalid");

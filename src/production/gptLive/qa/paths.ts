@@ -48,7 +48,8 @@ const exact = (actual: unknown, expected: unknown, label: string): void => {
 
 export function validateSerializedQaPaths(input: QaSerializedPathInput): string[] {
   const episodeDir = resolve(input.episodeDir);
-  if (input.production.branding.logoPath !== GPT_LIVE_CONTENT.branding.logoPath) {
+  const resolvedLogoPath = input.env.AIMH_LOGO_PATH;
+  if (!resolvedLogoPath?.trim() || input.production.branding.logoPath !== resolvedLogoPath) {
     throw new Error("GPT-Live QA path validation failed: logo path");
   }
   const { outroMusicPath, ...audioPolicy } = input.production.audio;
@@ -104,6 +105,8 @@ export function validateSerializedQaPaths(input: QaSerializedPathInput): string[
     ...input.plan.clips.flatMap((clip) => clip.kind === "source_clip"
       ? [clip.mediaPath]
       : [clip.masterPath, ...Object.values(clip.variants).map((variant) => variant.platePath)]),
+    join(episodeDir, "exports", "tella-a.mp4"),
+    join(episodeDir, "exports", "tella-b.mp4"),
     ...input.generation.finalPaths,
     input.generation.reportPath
   ];

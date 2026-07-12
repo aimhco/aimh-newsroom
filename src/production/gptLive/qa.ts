@@ -21,6 +21,7 @@ import {
 import { GPT_LIVE_SCENES, sceneStyle } from "./motion/sceneStyle";
 import { withEpisodeProductionLock } from "./productionLock";
 import type { TellaPlan } from "./tellaPlan";
+import { assertTellaProgramDuration, validateTellaTimelineAudit } from "./tellaState";
 import type {
   GptLiveQaResult,
   GptLiveQaSnapshot,
@@ -377,6 +378,7 @@ const collectSnapshot = async (
     sourceManifestText,
     "source manifest"
   );
+  validateTellaTimelineAudit(plan, tellaState);
 
   await withValidatedQaArtifactPaths({
     episodeDir: options.episodeDir,
@@ -418,6 +420,20 @@ const collectSnapshot = async (
   ];
   const filePresence = await collectFilePresence(expectedPaths, dependencies.stat);
 
+  const exportPaths = [
+    join(options.episodeDir, "exports", "tella-a.mp4"),
+    join(options.episodeDir, "exports", "tella-b.mp4")
+  ] as const;
+  const exportInspections = await Promise.all(
+    exportPaths.map((path) => dependencies.inspectFinalMediaFile(options.ffprobePath, path))
+  );
+  exportInspections.forEach((inspection, index) =>
+    assertTellaProgramDuration(
+      plan,
+      inspection.durationSeconds,
+      `${index === 0 ? "version-a" : "version-b"} Tella export`
+    )
+  );
   const sourceClips = GPT_LIVE_CONTENT.timeline.filter((item) => item.kind === "source_clip");
   const sourceInspections = await Promise.all(
     sourceClips.map(async (clip) => [
@@ -480,6 +496,10 @@ const collectSnapshot = async (
     },
     filePresence,
     media: {
+      exports: {
+        "version-a": exportInspections[0]!,
+        "version-b": exportInspections[1]!
+      },
       sources: Object.fromEntries(sourceInspections),
       masters: Object.fromEntries(masterInspections),
       plates: Object.fromEntries(plateInspections),
@@ -536,6 +556,7 @@ const buildSafeQaReport = (
     generationId: snapshot.generation.generationId,
     generation: {
       generationId: snapshot.generation.generationId,
+      preparationFingerprint: snapshot.generation.preparationFingerprint,
       variants: snapshot.generation.variants
     },
     youtubeUploadEnabled: false,
@@ -584,11 +605,14 @@ const assertUnchangedPublishedGeneration = (
 ): void => {
   const sameIdentity =
     initial.generationId === current.generationId &&
+    initial.preparationFingerprint === current.preparationFingerprint &&
     initial.reportSha256 === current.reportSha256 &&
     initial.variants.length === current.variants.length &&
     initial.variants.every((variant, index) => {
       const currentVariant = current.variants[index];
       return currentVariant?.name === variant.name &&
+        currentVariant.inputSha256 === variant.inputSha256 &&
+        currentVariant.inputByteSize === variant.inputByteSize &&
         currentVariant.sha256 === variant.sha256 &&
         currentVariant.byteSize === variant.byteSize;
     });

@@ -14,8 +14,10 @@ import { basename, join, relative, resolve, sep } from "node:path";
 import { runCommand as defaultRunCommand } from "../../render/process";
 import { writeJsonAtomic as defaultWriteJsonAtomic } from "./atomicFiles";
 import { GPT_LIVE_CONTENT } from "./content";
+import { validatePreparedGeneration } from "./preparation";
 import { withEpisodeProductionLock } from "./productionLock";
 import { validateContainedEpisodePaths } from "./qa/paths";
+import { assertTellaProgramDuration, validateTellaTimelineAudit } from "./tellaState";
 
 const DIALOGUE_VOLUME = 1;
 const OUTRO_MUSIC_VOLUME = 0.16;
@@ -110,6 +112,8 @@ export interface PostProductionVariant {
   readonly outputPath: string;
   readonly inputDurationSeconds: number;
   readonly outputDurationSeconds: number;
+  readonly inputSha256: string;
+  readonly inputByteSize: number;
   readonly sha256: string;
   readonly byteSize: number;
 }
@@ -117,6 +121,7 @@ export interface PostProductionVariant {
 export interface BuildPostProductionManifestOptions {
   readonly productionId: string;
   readonly generationId: string;
+  readonly preparationFingerprint: string;
   readonly logoPath: string;
   readonly outroMusicPath: string;
   readonly outroDurationSeconds: number;
@@ -149,9 +154,12 @@ export interface PublishedGenerationPaths {
 
 export interface PublishedGenerationValidation {
   readonly generationId: string;
+  readonly preparationFingerprint: string;
   readonly reportSha256: string;
   readonly variants: readonly {
     readonly name: "version-a" | "version-b";
+    readonly inputSha256: string;
+    readonly inputByteSize: number;
     readonly sha256: string;
     readonly byteSize: number;
   }[];
@@ -693,6 +701,7 @@ export function buildPostProductionManifest(options: BuildPostProductionManifest
     status: "finished" as const,
     productionId: options.productionId,
     generationId: options.generationId,
+    preparationFingerprint: options.preparationFingerprint,
     assets: {
       logo: basename(options.logoPath),
       logoSha256: options.logoSha256
@@ -742,6 +751,8 @@ export function buildPostProductionManifest(options: BuildPostProductionManifest
       outputPath: safeVariantPath("final", variant.outputPath),
       inputDurationSeconds: variant.inputDurationSeconds,
       outputDurationSeconds: variant.outputDurationSeconds,
+      inputSha256: variant.inputSha256,
+      inputByteSize: variant.inputByteSize,
       sha256: variant.sha256,
       byteSize: variant.byteSize
     }))
@@ -754,6 +765,8 @@ interface PublishedVariantRecord {
   readonly outputPath: string;
   readonly inputDurationSeconds: number;
   readonly outputDurationSeconds: number;
+  readonly inputSha256: string;
+  readonly inputByteSize: number;
   readonly sha256: string;
   readonly byteSize: number;
 }
@@ -762,6 +775,7 @@ interface PublishedGenerationManifest {
   readonly schemaVersion: "0.2.0";
   readonly status: "finished";
   readonly generationId: string;
+  readonly preparationFingerprint: string;
   readonly audioPolicy: {
     readonly introMusic: false;
     readonly bodyMusic: false;
@@ -790,6 +804,7 @@ const PUBLISHED_MANIFEST_KEYS = [
   "status",
   "productionId",
   "generationId",
+  "preparationFingerprint",
   "assets",
   "audioPolicy",
   "settings",
@@ -878,7 +893,8 @@ const parsePublishedAudioContract = (text: string): PublishedAudioContract => {
 const parsePublishedGenerationManifest = (
   text: string,
   expectedAudio: PublishedAudioContract,
-  expectedSourceIntervals: readonly DuckInterval[]
+  expectedSourceIntervals: readonly DuckInterval[],
+  expectedPreparationFingerprint: string
 ): PublishedGenerationManifest => {
   let value: unknown;
   try {
@@ -916,6 +932,7 @@ const parsePublishedGenerationManifest = (
     candidate.productionId !== expectedAudio.productionId ||
     typeof candidate.generationId !== "string" ||
     !candidate.generationId ||
+    candidate.preparationFingerprint !== expectedPreparationFingerprint ||
     !isRecord(assets) ||
     !hasExactKeys(assets, ["logo", "logoSha256"]) ||
     assets.logo !== expectedAudio.logoFile ||
@@ -988,6 +1005,8 @@ const parsePublishedGenerationManifest = (
         "outputPath",
         "inputDurationSeconds",
         "outputDurationSeconds",
+        "inputSha256",
+        "inputByteSize",
         "sha256",
         "byteSize"
       ]) ||
@@ -1000,6 +1019,10 @@ const parsePublishedGenerationManifest = (
       Math.abs(
         (variant.inputDurationSeconds as number) - (variant.outputDurationSeconds as number)
       ) > DURATION_TOLERANCE_SECONDS ||
+      typeof variant.inputSha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(variant.inputSha256) ||
+      !Number.isSafeInteger(variant.inputByteSize) ||
+      (variant.inputByteSize as number) <= 0 ||
       typeof variant.sha256 !== "string" ||
       !/^[a-f0-9]{64}$/.test(variant.sha256) ||
       !Number.isSafeInteger(variant.byteSize) ||
@@ -1171,7 +1194,16 @@ export async function validatePublishedGeneration(
     join(episodeDir, "final", "version-b.mp4")
   ];
   const productionPath = join(episodeDir, "production.json");
+  const voicePath = join(episodeDir, "voice", "narration.json");
   const planPath = join(episodeDir, "tella", "plan.json");
+  const statePath = join(episodeDir, "tella", "state.json");
+  const preparedPath = join(episodeDir, "reports", "prepared.json");
+  const sourceMatrixPath = join(episodeDir, "reports", "source-matrix.md");
+  const sourceManifestPath = join(episodeDir, "reports", "source-manifest.json");
+  const inputPaths = [
+    join(episodeDir, "exports", "tella-a.mp4"),
+    join(episodeDir, "exports", "tella-b.mp4")
+  ] as const;
   const reportPath = options.reportPath ?? join(episodeDir, "reports", "post-production.json");
   const lstat = dependencies.lstat ?? defaultLstat;
   const realpath = dependencies.realpath ?? defaultRealpath;
@@ -1181,17 +1213,48 @@ export async function validatePublishedGeneration(
 
   await validateContainedPaths(
     episodeDir,
-    [productionPath, planPath, finalPaths[0], finalPaths[1], reportPath],
+    [
+      productionPath,
+      voicePath,
+      planPath,
+      statePath,
+      preparedPath,
+      sourceMatrixPath,
+      sourceManifestPath,
+      ...inputPaths,
+      finalPaths[0],
+      finalPaths[1],
+      reportPath
+    ],
     lstat,
     realpath
   );
   let productionText: string;
+  let voiceText: string;
   let planText: string;
+  let stateText: string;
+  let preparedText: string;
+  let sourceMatrix: string;
+  let sourceManifestText: string;
   let manifestText: string;
   try {
-    [productionText, planText, manifestText] = await Promise.all([
+    [
+      productionText,
+      voiceText,
+      planText,
+      stateText,
+      preparedText,
+      sourceMatrix,
+      sourceManifestText,
+      manifestText
+    ] = await Promise.all([
       readFile(productionPath, "utf8"),
+      readFile(voicePath, "utf8"),
       readFile(planPath, "utf8"),
+      readFile(statePath, "utf8"),
+      readFile(preparedPath, "utf8"),
+      readFile(sourceMatrixPath, "utf8"),
+      readFile(sourceManifestPath, "utf8"),
       readFile(reportPath, "utf8")
     ]);
   } catch (error) {
@@ -1199,6 +1262,26 @@ export async function validatePublishedGeneration(
       `Published generation manifest is missing or unreadable: ${error instanceof Error ? error.message : String(error)}`
     );
   }
+  const parseJson = (text: string, label: string): unknown => {
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error(`Invalid ${label} JSON`);
+    }
+  };
+  const plan = parseFinishPlan(planText);
+  const prepared = validatePreparedGeneration(
+    parseJson(preparedText, "prepared generation"),
+    GPT_LIVE_CONTENT.id,
+    {
+      production: parseJson(productionText, "production manifest"),
+      voice: parseJson(voiceText, "voice manifest"),
+      plan: parseJson(planText, "Tella plan"),
+      sourceMatrix,
+      sourceManifest: parseJson(sourceManifestText, "source manifest")
+    }
+  );
+  validateTellaTimelineAudit(plan, parseJson(stateText, "Tella state"));
   const productionContract = parsePublishedAudioContract(productionText);
   let logoBytes: Uint8Array;
   try {
@@ -1212,14 +1295,32 @@ export async function validatePublishedGeneration(
     ...productionContract,
     logoSha256: createHash("sha256").update(logoBytes).digest("hex")
   };
-  const expectedSourceIntervals = deriveSourceDuckIntervals(parseFinishPlan(planText));
+  const expectedSourceIntervals = deriveSourceDuckIntervals(plan);
   const manifest = parsePublishedGenerationManifest(
     manifestText,
     expectedAudio,
-    expectedSourceIntervals
+    expectedSourceIntervals,
+    prepared.manifestFingerprint
   );
 
-  await validateContainedPaths(episodeDir, [finalPaths[0], finalPaths[1]], lstat, realpath);
+  await validateContainedPaths(
+    episodeDir,
+    [...inputPaths, finalPaths[0], finalPaths[1]],
+    lstat,
+    realpath
+  );
+  for (const [index, name] of (["version-a", "version-b"] as const).entries()) {
+    const bytes = await readFileBytes(inputPaths[index]!);
+    const expected = manifest.variants.find((variant) => variant.name === name)!;
+    const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+    if (bytes.byteLength !== expected.inputByteSize || actualSha256 !== expected.inputSha256) {
+      throw new Error(
+        `Published Tella input mismatch for ${name}: expected ` +
+        `${expected.inputByteSize} bytes/${expected.inputSha256}, received ` +
+        `${bytes.byteLength} bytes/${actualSha256}`
+      );
+    }
+  }
   for (const [index, name] of (["version-a", "version-b"] as const).entries()) {
     let bytes: Uint8Array;
     try {
@@ -1241,10 +1342,17 @@ export async function validatePublishedGeneration(
 
   return {
     generationId: manifest.generationId,
+    preparationFingerprint: manifest.preparationFingerprint,
     reportSha256: createHash("sha256").update(manifestText).digest("hex"),
     variants: (["version-a", "version-b"] as const).map((name) => {
       const variant = manifest.variants.find((record) => record.name === name)!;
-      return { name, sha256: variant.sha256, byteSize: variant.byteSize };
+      return {
+        name,
+        inputSha256: variant.inputSha256,
+        inputByteSize: variant.inputByteSize,
+        sha256: variant.sha256,
+        byteSize: variant.byteSize
+      };
     }),
     finalPaths: [finalPaths[0], finalPaths[1]],
     reportPath
@@ -1423,12 +1531,18 @@ async function finishGptLiveProductionUnlocked(
   }
 
   const planPath = join(options.episodeDir, "tella", "plan.json");
+  const statePath = join(options.episodeDir, "tella", "state.json");
+  const productionPath = join(options.episodeDir, "production.json");
+  const voicePath = join(options.episodeDir, "voice", "narration.json");
   const exportsDirectory = join(options.episodeDir, "exports");
   const finalDirectory = join(options.episodeDir, "final");
   const reportsDirectory = join(options.episodeDir, "reports");
   const inputPaths = [join(exportsDirectory, "tella-a.mp4"), join(exportsDirectory, "tella-b.mp4")];
   const finalPaths = [join(finalDirectory, "version-a.mp4"), join(finalDirectory, "version-b.mp4")];
   const reportPath = join(reportsDirectory, "post-production.json");
+  const preparedPath = join(reportsDirectory, "prepared.json");
+  const sourceMatrixPath = join(reportsDirectory, "source-matrix.md");
+  const sourceManifestPath = join(reportsDirectory, "source-manifest.json");
   const priorQaPaths = [
     join(reportsDirectory, "qa.json"),
     join(reportsDirectory, "comparison.md"),
@@ -1439,6 +1553,12 @@ async function finishGptLiveProductionUnlocked(
     options.episodeDir,
     [
       planPath,
+      statePath,
+      productionPath,
+      voicePath,
+      preparedPath,
+      sourceMatrixPath,
+      sourceManifestPath,
       exportsDirectory,
       ...inputPaths,
       finalDirectory,
@@ -1449,7 +1569,36 @@ async function finishGptLiveProductionUnlocked(
     lstat,
     realpath
   );
-  const plan = parseFinishPlan(await readFile(planPath, "utf8"));
+  const [productionText, voiceText, planText, stateText, preparedText, sourceMatrix, sourceManifestText] =
+    await Promise.all([
+      readFile(productionPath, "utf8"),
+      readFile(voicePath, "utf8"),
+      readFile(planPath, "utf8"),
+      readFile(statePath, "utf8"),
+      readFile(preparedPath, "utf8"),
+      readFile(sourceMatrixPath, "utf8"),
+      readFile(sourceManifestPath, "utf8")
+    ]);
+  const parseJson = (text: string, label: string): unknown => {
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error(`Invalid ${label} JSON`);
+    }
+  };
+  const plan = parseFinishPlan(planText);
+  const prepared = validatePreparedGeneration(
+    parseJson(preparedText, "prepared generation"),
+    GPT_LIVE_CONTENT.id,
+    {
+      production: parseJson(productionText, "production manifest"),
+      voice: parseJson(voiceText, "voice manifest"),
+      plan: parseJson(planText, "Tella plan"),
+      sourceMatrix,
+      sourceManifest: parseJson(sourceManifestText, "source manifest")
+    }
+  );
+  validateTellaTimelineAudit(plan, parseJson(stateText, "Tella state"));
   const duckIntervals = deriveSourceDuckIntervals(plan);
   await mkdir(finalDirectory, { recursive: true });
   await mkdir(reportsDirectory, { recursive: true });
@@ -1459,6 +1608,11 @@ async function finishGptLiveProductionUnlocked(
     lstat,
     realpath
   );
+  const inputBytes = await Promise.all(inputPaths.map((path) => readFileBytes(path)));
+  const inputIntegrity = inputBytes.map((bytes) => ({
+    inputSha256: createHash("sha256").update(bytes).digest("hex"),
+    inputByteSize: bytes.byteLength
+  }));
   const logoSha256 = createHash("sha256").update(await readFileBytes(logoPath)).digest("hex");
 
   const transactionId = randomUUID();
@@ -1499,6 +1653,9 @@ async function finishGptLiveProductionUnlocked(
     for (const inspection of inputInspections) {
       requirePositiveDuration(inspection.durationSeconds, "Tella export");
     }
+    inputInspections.forEach((inspection, index) =>
+      assertTellaProgramDuration(plan, inspection.durationSeconds, `version ${index === 0 ? "A" : "B"} export`)
+    );
     assertSharedOutroTiming(
       inputInspections.map(({ durationSeconds }) => durationSeconds),
       GPT_LIVE_CONTENT.audio.outroDurationSeconds,
@@ -1588,6 +1745,7 @@ async function finishGptLiveProductionUnlocked(
 
     const variantMetadata = definitions.map((definition, index) => ({
       ...definition,
+      ...inputIntegrity[index]!,
       inputDurationSeconds: inputInspections[index]!.durationSeconds,
       outputDurationSeconds: outputInspections[index]!.durationSeconds
     }));
@@ -1633,6 +1791,7 @@ async function finishGptLiveProductionUnlocked(
           manifest = buildPostProductionManifest({
             productionId: plan.productionId,
             generationId: transactionId,
+            preparationFingerprint: prepared.manifestFingerprint,
             logoPath,
             outroMusicPath,
             outroDurationSeconds: GPT_LIVE_CONTENT.audio.outroDurationSeconds,

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import {
   access as defaultAccess,
@@ -22,6 +21,7 @@ import {
 } from "./atomicFiles";
 import { resolveEvidenceAssetPath, validateEvidenceAssets } from "./evidence";
 import { extractSourceClip as defaultExtractSourceClip } from "./media";
+import { buildPreparationFingerprint } from "./preparation";
 import {
   assertNarrationSlateContract,
   inspectMediaFile as defaultInspectMediaFile
@@ -452,9 +452,13 @@ export async function prepareGptLiveProduction(
     }
   };
   const sourceMatrix = renderSourceMatrix();
-  const manifestFingerprint = createHash("sha256")
-    .update(JSON.stringify({ production, voice, plan, sourceMatrix, sourceManifest }))
-    .digest("hex");
+  const manifestFingerprint = buildPreparationFingerprint({
+    production,
+    voice,
+    plan,
+    sourceMatrix,
+    sourceManifest
+  });
   const prepared = {
     schemaVersion: "0.1.0",
     status: "prepared",

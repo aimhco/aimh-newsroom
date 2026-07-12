@@ -1,7 +1,7 @@
 # Evidence-First Newsroom Video Revision Design
 
-**Date:** 2026-07-11  
-**Status:** Approved  
+**Date:** 2026-07-11
+**Status:** Approved
 **Applies to:** GPT-Live revision and the next three newsroom calibration episodes
 
 ## Purpose
@@ -296,4 +296,3 @@ The revised GPT-Live video is acceptable only when:
 4. Render, run automated QA, and complete human playback review.
 5. Push the feature branch and open a draft pull request against `main`.
 6. Merge only after the revised video and code are approved.
-

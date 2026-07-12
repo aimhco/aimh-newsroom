@@ -142,6 +142,7 @@ export interface GptLiveQaSnapshot {
   logo: { path: string; sha256: string };
   filePresence: Record<string, boolean>;
   media: {
+    exports: Record<QaVariantName, FinalMediaInspection>;
     sources: Record<string, QaPreparedMediaInspection>;
     masters: Record<string, QaPreparedMediaInspection>;
     plates: Record<string, QaPreparedMediaInspection>;
