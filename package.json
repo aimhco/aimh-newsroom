@@ -20,6 +20,7 @@
     "newsroom:resume": "tsx src/cli/index.ts resume",
     "newsroom:dry-run": "tsx src/cli/index.ts overnight --dry-run --fixtures --date 2026-07-09 --no-upload",
     "gpt-live:prepare": "tsx src/production/gptLive/cli.ts prepare",
+    "gpt-live:seal-exports": "tsx src/production/gptLive/cli.ts seal-exports",
     "gpt-live:motion-smoke": "tsx src/production/gptLive/motion/renderSmoke.ts",
     "gpt-live:finish": "tsx src/production/gptLive/cli.ts finish",
     "gpt-live:qa": "tsx src/production/gptLive/cli.ts qa"

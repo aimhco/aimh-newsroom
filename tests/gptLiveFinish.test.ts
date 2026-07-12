@@ -38,8 +38,13 @@ import {
   parsePreparedGenerationRecord,
   validatePreparedGeneration
 } from "../src/production/gptLive/preparation";
-import { buildTellaPlan } from "../src/production/gptLive/tellaPlan";
+import { buildTellaPlan, type TellaPlan } from "../src/production/gptLive/tellaPlan";
 import { buildTellaTimelineAudit } from "../src/production/gptLive/tellaState";
+import { sealTellaExports } from "../src/production/gptLive/tellaExportReceipt";
+import {
+  SOURCE_FULLSCREEN_SSIM_THRESHOLD,
+  deriveSourceFullscreenExpectations
+} from "../src/production/gptLive/sourceFullscreen";
 import { runCommand } from "../src/render/process";
 
 const plan = (durations = [3, 5.5, 2.25, 1]): FinishPlan => ({
@@ -102,6 +107,37 @@ const fakeProgramAudioBindings = () => canonicalProgramAudio().inputs.map((input
   byteSize: index + 1,
   durationSeconds: input.durationSeconds
 }));
+
+const fakeTellaExports = () => [
+  {
+    version: "version-a" as const,
+    sourceVariant: "dynamic_editorial" as const,
+    remoteVideoId: "video-a",
+    workflowId: "export-video-a-job-a",
+    exportPath: "exports/tella-a.mp4" as const,
+    sha256: "1".repeat(64),
+    byteSize: 90
+  },
+  {
+    version: "version-b" as const,
+    sourceVariant: "aimh_visual_host" as const,
+    remoteVideoId: "video-b",
+    workflowId: "export-video-b-job-b",
+    exportPath: "exports/tella-b.mp4" as const,
+    sha256: "1".repeat(64),
+    byteSize: 90
+  }
+] as const;
+
+const fakeSourceFullscreen = (value: TellaPlan = plan() as unknown as TellaPlan) =>
+  deriveSourceFullscreenExpectations(value).map((sample) => ({
+    ...sample,
+    ssim: 0.93,
+    threshold: SOURCE_FULLSCREEN_SSIM_THRESHOLD
+  }));
+
+const passingSourceFullscreen = async ({ plan: value }: { plan: TellaPlan }) =>
+  fakeSourceFullscreen(value);
 
 const preparedArtifact = (logicalId = "source:clip_translation") => ({
   logicalId,
@@ -796,6 +832,23 @@ describe("GPT-Live post-production publication", () => {
       artifacts,
       manifestFingerprint: preparationFingerprint
     }), "utf8");
+    await sealTellaExports({
+      episodeDir,
+      exports: [
+        {
+          version: "version-a",
+          sourceVariant: "dynamic_editorial",
+          remoteVideoId: "video-a",
+          workflowId: "export-video-a-job-a"
+        },
+        {
+          version: "version-b",
+          sourceVariant: "aimh_visual_host",
+          remoteVideoId: "video-b",
+          workflowId: "export-video-b-job-b"
+        }
+      ]
+    });
     return episodeDir;
   };
 
@@ -838,6 +891,33 @@ describe("GPT-Live post-production publication", () => {
       byteSize: index + 1,
       durationSeconds: input.durationSeconds
     }));
+    const tellaExports = [
+      {
+        version: "version-a" as const,
+        sourceVariant: "dynamic_editorial" as const,
+        remoteVideoId: "vid_dynamic",
+        workflowId: "export-vid_dynamic-job-a",
+        exportPath: "exports/tella-a.mp4" as const,
+        sha256: sha256("export-a"),
+        byteSize: 8
+      },
+      {
+        version: "version-b" as const,
+        sourceVariant: "aimh_visual_host" as const,
+        remoteVideoId: "vid_host",
+        workflowId: "export-vid_host-job-b",
+        exportPath: "exports/tella-b.mp4" as const,
+        sha256: sha256("export-b"),
+        byteSize: 8
+      }
+    ] as const;
+    const sourceFullscreen = deriveSourceFullscreenExpectations(
+      plan() as unknown as TellaPlan
+    ).map((sample) => ({
+      ...sample,
+      ssim: 0.93,
+      threshold: SOURCE_FULLSCREEN_SSIM_THRESHOLD
+    }));
     const manifest = buildPostProductionManifest({
       productionId: GPT_LIVE_CONTENT.id,
       generationId: "00000000-0000-4000-8000-000000000000",
@@ -849,6 +929,8 @@ describe("GPT-Live post-production publication", () => {
       programAudio: programAudioBindings,
       sourceGains: [],
       logoEvidence: [],
+      tellaExports,
+      sourceFullscreen,
       variants: [
         {
           name: "version-a",
@@ -888,7 +970,9 @@ describe("GPT-Live post-production publication", () => {
       variants: [
         { inputSha256: sha256("export-a"), inputByteSize: 8 },
         { inputSha256: sha256("export-b"), inputByteSize: 8 }
-      ]
+      ],
+      tellaExports,
+      sourceFullscreen
     });
   });
 
@@ -939,6 +1023,10 @@ describe("GPT-Live post-production publication", () => {
           outputSha256: (index === 0 ? "c" : "e").repeat(64)
         }))
       })),
+      tellaExports: JSON.parse(
+        await readFile(join(episodeDir, "reports", "tella-export-receipt.json"), "utf8")
+      ).exports,
+      sourceFullscreen: fakeSourceFullscreen(episodePlan),
       variants: [
         {
           name: "version-a",
@@ -1110,6 +1198,8 @@ describe("GPT-Live post-production publication", () => {
           samples: [{ timeSeconds: 1, inputSha256: "d".repeat(64), outputSha256: "e".repeat(64) }]
         }
       ],
+      tellaExports: fakeTellaExports(),
+      sourceFullscreen: fakeSourceFullscreen(),
       variants: [
         {
           name: "version-a",
@@ -1138,7 +1228,7 @@ describe("GPT-Live post-production publication", () => {
     const serialized = JSON.stringify(manifest);
 
     expect(manifest).toMatchObject({
-      schemaVersion: "0.2.0",
+      schemaVersion: "0.3.0",
       status: "finished",
       generationId: "00000000-0000-4000-8000-000000000000",
       assets: {
@@ -1196,6 +1286,8 @@ describe("GPT-Live post-production publication", () => {
       programAudio: fakeProgramAudioBindings(),
       sourceGains: [],
       logoEvidence: [],
+      tellaExports: fakeTellaExports(),
+      sourceFullscreen: fakeSourceFullscreen(),
       variants: (["version-a", "version-b"] as const).map((name) => ({
         name,
         inputPath: `/episode/exports/${name}.mp4`,
@@ -1622,6 +1714,54 @@ describe("GPT-Live post-production publication", () => {
     }
   });
 
+  it("rejects a same-duration Tella export substitution after sealing before FFmpeg", async () => {
+    const episodeDir = await createContainedEpisode();
+    await writeFile(join(episodeDir, "exports", "tella-a.mp4"), "changed!");
+    const inspectFinalMediaFile = vi.fn(async () => validInspection(11.75));
+    const measureIntervalLoudness = vi.fn(async () => -23);
+    const runCommand = vi.fn(async () => {
+      throw new Error("FFmpeg must not run for a substituted sealed export");
+    });
+
+    try {
+      await expect(finishGptLiveProduction(finishOptions(episodeDir), {
+        access: async () => undefined,
+        inspectFinalMediaFile,
+        measureIntervalLoudness,
+        runCommand
+      })).rejects.toThrow(/Tella export receipt.*version-a|receipt mismatch.*version-a/i);
+      expect(inspectFinalMediaFile).not.toHaveBeenCalled();
+      expect(measureIntervalLoudness).not.toHaveBeenCalled();
+      expect(runCommand).not.toHaveBeenCalled();
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects failed source fullscreen evidence before loudness or finishing FFmpeg", async () => {
+    const episodeDir = await createContainedEpisode();
+    const measureIntervalLoudness = vi.fn(async () => -23);
+    const runCommand = vi.fn(async () => ({ stdout: "", stderr: "" }));
+    const verifySourceFullscreen = vi.fn(async () => {
+      throw new Error("Invalid source fullscreen evidence: SSIM below 0.88");
+    });
+
+    try {
+      await expect(finishGptLiveProduction(finishOptions(episodeDir), {
+        access: async () => undefined,
+        inspectFinalMediaFile: async () => validInspection(11.75),
+        measureIntervalLoudness,
+        runCommand,
+        verifySourceFullscreen
+      } as any)).rejects.toThrow(/source fullscreen.*0\.88/i);
+      expect(verifySourceFullscreen).toHaveBeenCalledOnce();
+      expect(measureIntervalLoudness).not.toHaveBeenCalled();
+      expect(runCommand).not.toHaveBeenCalled();
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     {
       name: "source clip",
@@ -1748,6 +1888,8 @@ describe("GPT-Live post-production publication", () => {
         preparedArtifacts: [],
         variants: publishedVariants,
         programAudio: fakeProgramAudioBindings(),
+        tellaExports: fakeTellaExports(),
+        sourceFullscreen: fakeSourceFullscreen(),
         finalPaths: [
           join(episodeDir, "final", "version-a.mp4"),
           join(episodeDir, "final", "version-b.mp4")
@@ -1760,6 +1902,7 @@ describe("GPT-Live post-production publication", () => {
       await finishGptLiveProduction(finishOptions(episodeDir), {
         access: async () => undefined,
         randomUUID: () => transactionId,
+        verifySourceFullscreen: passingSourceFullscreen,
         readFileBytes: async (path) => {
           if (path === "/assets/logo.png") return new Uint8Array([1, 2, 3]);
           if (path.endsWith("version-a.mp4")) events.push("hash-a");
@@ -1848,6 +1991,7 @@ describe("GPT-Live post-production publication", () => {
       await finishGptLiveProduction(finishOptions(episodeDir), {
         access: async () => undefined,
         randomUUID: () => transactionId,
+        verifySourceFullscreen: passingSourceFullscreen,
         readFileBytes: async (path) =>
           path === "/assets/logo.png" ? new Uint8Array([1, 2, 3]) : readFile(path),
         inspectFinalMediaFile: async () => validInspection(11.75),
@@ -1865,6 +2009,8 @@ describe("GPT-Live post-production publication", () => {
           preparedArtifacts: [],
           variants: publishedVariants,
           programAudio: fakeProgramAudioBindings(),
+          tellaExports: fakeTellaExports(),
+          sourceFullscreen: fakeSourceFullscreen(),
           finalPaths: [
             join(episodeDir, "final", "version-a.mp4"),
             join(episodeDir, "final", "version-b.mp4")
@@ -1898,6 +2044,7 @@ describe("GPT-Live post-production publication", () => {
         finishGptLiveProduction(finishOptions(episodeDir), {
           access: async () => undefined,
           randomUUID: () => transactionId,
+          verifySourceFullscreen: passingSourceFullscreen,
           readFileBytes: async (path) =>
             path === "/assets/logo.png" ? new Uint8Array([1, 2, 3]) : readFile(path),
           inspectFinalMediaFile: async () => validInspection(11.75),
@@ -1936,6 +2083,7 @@ describe("GPT-Live post-production publication", () => {
       const result = await finishGptLiveProduction(finishOptions(episodeDir), {
         access: async () => undefined,
         randomUUID: () => transactionId,
+        verifySourceFullscreen: passingSourceFullscreen,
         readFileBytes: async (path) =>
           path === "/assets/logo.png" ? new Uint8Array([1, 2, 3]) : readFile(path),
         inspectFinalMediaFile: async () => validInspection(11.75),
@@ -1968,6 +2116,8 @@ describe("GPT-Live post-production publication", () => {
           preparedArtifacts: [],
           variants: publishedVariants,
           programAudio: fakeProgramAudioBindings(),
+          tellaExports: fakeTellaExports(),
+          sourceFullscreen: fakeSourceFullscreen(),
           finalPaths: [
             join(episodeDir, "final", "version-a.mp4"),
             join(episodeDir, "final", "version-b.mp4")
@@ -1998,6 +2148,7 @@ describe("GPT-Live post-production publication", () => {
           finishOptions(episodeDir),
           {
             access: async () => undefined,
+            verifySourceFullscreen: passingSourceFullscreen,
             readFileBytes: async (path) =>
               path === "/assets/logo.png" ? new Uint8Array([1, 2, 3]) : readFile(path),
             inspectFinalMediaFile: async () => validInspection(11.75),
@@ -2039,6 +2190,7 @@ describe("GPT-Live post-production publication", () => {
           {
             access: async () => undefined,
             randomUUID: () => transactionId,
+            verifySourceFullscreen: passingSourceFullscreen,
             readFileBytes: async (path) => readFile(path),
             inspectFinalMediaFile: async () => validInspection(11.75),
             measureIntervalLoudness: async () => -23,
@@ -2100,6 +2252,7 @@ describe("GPT-Live post-production publication", () => {
         await finishGptLiveProduction(finishOptions(episodeDir), {
           access: async () => undefined,
           randomUUID: () => transactionId,
+          verifySourceFullscreen: passingSourceFullscreen,
           readFileBytes: async (path) => readFile(path),
           inspectFinalMediaFile: async () => validInspection(11.75),
           measureIntervalLoudness: async () => -23,

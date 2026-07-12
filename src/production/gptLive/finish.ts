@@ -23,6 +23,16 @@ import {
 } from "./preparation";
 import { withEpisodeProductionLock } from "./productionLock";
 import { validateContainedEpisodePaths } from "./qa/paths";
+import {
+  assertSourceFullscreenEvidence,
+  verifySourceFullscreen as defaultVerifySourceFullscreen,
+  type SourceFullscreenEvidence
+} from "./sourceFullscreen";
+import {
+  tellaExportReceiptPath,
+  validateSealedTellaExports as defaultValidateSealedTellaExports,
+  type TellaExportReceipt
+} from "./tellaExportReceipt";
 import { assertTellaProgramDuration, validateTellaTimelineAudit } from "./tellaState";
 import type { TellaPlan } from "./tellaPlan";
 
@@ -162,6 +172,8 @@ export interface BuildPostProductionManifestOptions {
   readonly programAudio: readonly ProgramAudioBinding[];
   readonly sourceGains: readonly SourceIntervalResult[];
   readonly logoEvidence: readonly LogoEvidence[];
+  readonly tellaExports: TellaExportReceipt["exports"];
+  readonly sourceFullscreen: readonly SourceFullscreenEvidence[];
   readonly variants: readonly PostProductionVariant[];
 }
 
@@ -199,6 +211,8 @@ export interface PublishedGenerationValidation {
     readonly byteSize: number;
   }[];
   readonly programAudio: readonly ProgramAudioBinding[];
+  readonly tellaExports: TellaExportReceipt["exports"];
+  readonly sourceFullscreen: readonly SourceFullscreenEvidence[];
   readonly finalPaths: readonly [string, string];
   readonly reportPath: string;
 }
@@ -245,6 +259,8 @@ export interface FinishGptLiveDependencies {
   readonly runCommand?: typeof defaultRunCommand;
   readonly sampleLogoCornerFrameHash?: SampleLogoCornerFrameHash;
   readonly validatePublishedGeneration?: ValidatePublishedGeneration;
+  readonly validateSealedTellaExports?: typeof defaultValidateSealedTellaExports;
+  readonly verifySourceFullscreen?: typeof defaultVerifySourceFullscreen;
   readonly writeJsonAtomic?: typeof defaultWriteJsonAtomic;
   readonly withProductionLock?: typeof withEpisodeProductionLock;
 }
@@ -851,7 +867,7 @@ export function buildPostProductionManifest(options: BuildPostProductionManifest
   const programDurationSeconds = options.variants[0]?.inputDurationSeconds ?? 0;
   const outroTiming = deriveOutroTiming(programDurationSeconds, options.outroDurationSeconds);
   return {
-    schemaVersion: "0.2.0" as const,
+    schemaVersion: "0.3.0" as const,
     status: "finished" as const,
     productionId: options.productionId,
     generationId: options.generationId,
@@ -905,6 +921,8 @@ export function buildPostProductionManifest(options: BuildPostProductionManifest
       name: evidence.name,
       samples: evidence.samples.map((sample) => ({ ...sample }))
     })),
+    tellaExports: options.tellaExports.map((record) => ({ ...record })),
+    sourceFullscreen: options.sourceFullscreen.map((record) => ({ ...record })),
     variants: options.variants.map((variant) => ({
       name: variant.name,
       inputPath: safeVariantPath("exports", variant.inputPath),
@@ -932,7 +950,7 @@ interface PublishedVariantRecord {
 }
 
 interface PublishedGenerationManifest {
-  readonly schemaVersion: "0.2.0";
+  readonly schemaVersion: "0.3.0";
   readonly status: "finished";
   readonly generationId: string;
   readonly preparationFingerprint: string;
@@ -953,6 +971,8 @@ interface PublishedGenerationManifest {
     readonly clipOrder: readonly string[];
     readonly inputs: readonly ProgramAudioBinding[];
   };
+  readonly tellaExports: TellaExportReceipt["exports"];
+  readonly sourceFullscreen: readonly SourceFullscreenEvidence[];
   readonly variants: readonly PublishedVariantRecord[];
 }
 
@@ -978,6 +998,8 @@ const PUBLISHED_MANIFEST_KEYS = [
   "settings",
   "sourceDialogue",
   "logoEvidence",
+  "tellaExports",
+  "sourceFullscreen",
   "variants"
 ] as const;
 
@@ -1064,6 +1086,8 @@ const parsePublishedGenerationManifest = (
   expectedAudio: PublishedAudioContract,
   expectedProgramAudio: ProgramAudioPlan,
   expectedSourceIntervals: readonly DuckInterval[],
+  expectedTellaExports: TellaExportReceipt,
+  expectedPlan: TellaPlan,
   expectedPreparationFingerprint: string
 ): PublishedGenerationManifest => {
   let value: unknown;
@@ -1098,7 +1122,7 @@ const parsePublishedGenerationManifest = (
     variantDurationToleranceSeconds: VARIANT_DURATION_TOLERANCE_SECONDS
   } as const;
   if (
-    candidate.schemaVersion !== "0.2.0" ||
+    candidate.schemaVersion !== "0.3.0" ||
     candidate.status !== "finished" ||
     candidate.productionId !== expectedAudio.productionId ||
     typeof candidate.generationId !== "string" ||
@@ -1115,10 +1139,20 @@ const parsePublishedGenerationManifest = (
     !Object.entries(expectedSettings).every(([key, expected]) => settings[key] === expected) ||
     !isRecord(candidate.sourceDialogue) ||
     !Array.isArray(candidate.logoEvidence) ||
+    !Array.isArray(candidate.tellaExports) ||
+    !Array.isArray(candidate.sourceFullscreen) ||
     !Array.isArray(candidate.variants) ||
     candidate.variants.length !== 2
   ) {
     throw new Error("Invalid published generation manifest");
+  }
+  if (JSON.stringify(candidate.tellaExports) !== JSON.stringify(expectedTellaExports.exports)) {
+    throw new Error("Invalid published generation manifest Tella export provenance");
+  }
+  try {
+    assertSourceFullscreenEvidence(expectedPlan, candidate.sourceFullscreen);
+  } catch {
+    throw new Error("Invalid published generation manifest source fullscreen evidence");
   }
   if (
     !isRecord(audioPolicy) ||
@@ -1241,6 +1275,12 @@ const parsePublishedGenerationManifest = (
       throw new Error(`Invalid published generation manifest variant: ${expectation.name}`);
     }
     variants.push(variant as unknown as PublishedVariantRecord);
+  }
+  for (const [index, variant] of variants.entries()) {
+    const sealed = expectedTellaExports.exports[index]!;
+    if (variant.inputSha256 !== sealed.sha256 || variant.inputByteSize !== sealed.byteSize) {
+      throw new Error("Invalid published generation manifest Tella export binding");
+    }
   }
   assertVariantDurationParity(
     variants[0]!.outputDurationSeconds,
@@ -1410,6 +1450,7 @@ export async function validatePublishedGeneration(
   const preparedPath = join(episodeDir, "reports", "prepared.json");
   const sourceMatrixPath = join(episodeDir, "reports", "source-matrix.md");
   const sourceManifestPath = join(episodeDir, "reports", "source-manifest.json");
+  const exportReceiptPath = tellaExportReceiptPath(episodeDir);
   const inputPaths = [
     join(episodeDir, "exports", "tella-a.mp4"),
     join(episodeDir, "exports", "tella-b.mp4")
@@ -1431,6 +1472,7 @@ export async function validatePublishedGeneration(
       preparedPath,
       sourceMatrixPath,
       sourceManifestPath,
+      exportReceiptPath,
       ...inputPaths,
       finalPaths[0],
       finalPaths[1],
@@ -1447,6 +1489,7 @@ export async function validatePublishedGeneration(
   let sourceMatrix: string;
   let sourceManifestText: string;
   let manifestText: string;
+  let exportReceiptText: string;
   try {
     [
       productionText,
@@ -1456,6 +1499,7 @@ export async function validatePublishedGeneration(
       preparedText,
       sourceMatrix,
       sourceManifestText,
+      exportReceiptText,
       manifestText
     ] = await Promise.all([
       readFile(productionPath, "utf8"),
@@ -1465,6 +1509,7 @@ export async function validatePublishedGeneration(
       readFile(preparedPath, "utf8"),
       readFile(sourceMatrixPath, "utf8"),
       readFile(sourceManifestPath, "utf8"),
+      readFile(exportReceiptPath, "utf8"),
       readFile(reportPath, "utf8")
     ]);
   } catch (error) {
@@ -1483,6 +1528,7 @@ export async function validatePublishedGeneration(
   const voiceValue = parseJson(voiceText, "voice manifest");
   const planValue = parseJson(planText, "Tella plan");
   const sourceManifestValue = parseJson(sourceManifestText, "source manifest");
+  const tellaStateValue = parseJson(stateText, "Tella state");
   const plan = parseFinishPlan(planText);
   const expectedProgramAudio = buildProgramAudioPlan(episodeDir, plan as TellaPlan);
   const prepared = await validateCurrentPreparation({
@@ -1497,7 +1543,12 @@ export async function validatePublishedGeneration(
     readFileBytes,
     realpath
   });
-  validateTellaTimelineAudit(plan, parseJson(stateText, "Tella state"));
+  validateTellaTimelineAudit(plan, tellaStateValue);
+  const tellaExportReceipt = await defaultValidateSealedTellaExports({
+    episodeDir,
+    receipt: parseJson(exportReceiptText, "Tella export receipt"),
+    tellaState: tellaStateValue
+  }, { readFileBytes });
   const productionContract = parsePublishedAudioContract(productionText);
   let logoBytes: Uint8Array;
   try {
@@ -1517,6 +1568,8 @@ export async function validatePublishedGeneration(
     expectedAudio,
     expectedProgramAudio,
     expectedSourceIntervals,
+    tellaExportReceipt,
+    plan as TellaPlan,
     prepared.manifestFingerprint
   );
 
@@ -1591,6 +1644,11 @@ export async function validatePublishedGeneration(
       };
     }),
     programAudio: programAudioBindings.map((input) => ({ ...input })),
+    tellaExports: [
+      { ...tellaExportReceipt.exports[0] },
+      { ...tellaExportReceipt.exports[1] }
+    ],
+    sourceFullscreen: manifest.sourceFullscreen.map((record) => ({ ...record })),
     finalPaths: [finalPaths[0], finalPaths[1]],
     reportPath
   };
@@ -1748,6 +1806,12 @@ async function finishGptLiveProductionUnlocked(
   const validateGeneration = dependencies.validatePublishedGeneration ??
     ((input: string | PublishedGenerationPaths) =>
       validatePublishedGeneration(input, { lstat, readFile, readFileBytes, realpath }));
+  const validateSealedExports = dependencies.validateSealedTellaExports ??
+    ((input: Parameters<typeof defaultValidateSealedTellaExports>[0]) =>
+      defaultValidateSealedTellaExports(input, { readFileBytes }));
+  const verifySourceFullscreen = dependencies.verifySourceFullscreen ??
+    ((input: Parameters<typeof defaultVerifySourceFullscreen>[0]) =>
+      defaultVerifySourceFullscreen(input, { runCommand }));
 
   const ffmpegPath = requireConfiguredValue(options.ffmpegPath, "ffmpeg path");
   const ffprobePath = requireConfiguredValue(options.ffprobePath, "ffprobe path");
@@ -1780,6 +1844,7 @@ async function finishGptLiveProductionUnlocked(
   const preparedPath = join(reportsDirectory, "prepared.json");
   const sourceMatrixPath = join(reportsDirectory, "source-matrix.md");
   const sourceManifestPath = join(reportsDirectory, "source-manifest.json");
+  const exportReceiptPath = tellaExportReceiptPath(options.episodeDir);
   const priorQaPaths = [
     join(reportsDirectory, "qa.json"),
     join(reportsDirectory, "comparison.md"),
@@ -1796,6 +1861,7 @@ async function finishGptLiveProductionUnlocked(
       preparedPath,
       sourceMatrixPath,
       sourceManifestPath,
+      exportReceiptPath,
       exportsDirectory,
       ...inputPaths,
       finalDirectory,
@@ -1806,7 +1872,7 @@ async function finishGptLiveProductionUnlocked(
     lstat,
     realpath
   );
-  const [productionText, voiceText, planText, stateText, preparedText, sourceMatrix, sourceManifestText] =
+  const [productionText, voiceText, planText, stateText, preparedText, sourceMatrix, sourceManifestText, exportReceiptText] =
     await Promise.all([
       readFile(productionPath, "utf8"),
       readFile(voicePath, "utf8"),
@@ -1814,7 +1880,8 @@ async function finishGptLiveProductionUnlocked(
       readFile(statePath, "utf8"),
       readFile(preparedPath, "utf8"),
       readFile(sourceMatrixPath, "utf8"),
-      readFile(sourceManifestPath, "utf8")
+      readFile(sourceManifestPath, "utf8"),
+      readFile(exportReceiptPath, "utf8")
     ]);
   const parseJson = (text: string, label: string): unknown => {
     try {
@@ -1827,6 +1894,8 @@ async function finishGptLiveProductionUnlocked(
   const voiceValue = parseJson(voiceText, "voice manifest");
   const planValue = parseJson(planText, "Tella plan");
   const sourceManifestValue = parseJson(sourceManifestText, "source manifest");
+  const tellaStateValue = parseJson(stateText, "Tella state");
+  const exportReceiptValue = parseJson(exportReceiptText, "Tella export receipt");
   const plan = parseFinishPlan(planText);
   const preparedAudioContract = parsePublishedAudioContract(productionText);
   if (logoPath !== preparedAudioContract.logoPath) {
@@ -1847,7 +1916,12 @@ async function finishGptLiveProductionUnlocked(
     readFileBytes,
     realpath
   });
-  validateTellaTimelineAudit(plan, parseJson(stateText, "Tella state"));
+  validateTellaTimelineAudit(plan, tellaStateValue);
+  const tellaExportReceipt: TellaExportReceipt = await validateSealedExports({
+    episodeDir: options.episodeDir,
+    receipt: exportReceiptValue,
+    tellaState: tellaStateValue
+  });
   const programAudio = buildProgramAudioPlan(options.episodeDir, plan as TellaPlan);
   const duckIntervals = deriveSourceDuckIntervals(plan);
   await mkdir(finalDirectory, { recursive: true });
@@ -1930,6 +2004,14 @@ async function finishGptLiveProductionUnlocked(
       GPT_LIVE_CONTENT.audio.outroDurationSeconds,
       "GPT-Live finish preflight failed"
     );
+    const sourceFullscreen: SourceFullscreenEvidence[] = await verifySourceFullscreen({
+      ffmpegPath,
+      plan: plan as TellaPlan,
+      exportPaths: {
+        "version-a": inputPaths[0]!,
+        "version-b": inputPaths[1]!
+      }
+    });
     const sourceInputs = programAudio.inputs.filter((input) => input.kind === "source_clip");
     const sourceLoudness = await Promise.all(
       sourceInputs.map((input) =>
@@ -2072,6 +2154,8 @@ async function finishGptLiveProductionUnlocked(
             programAudio: programAudioBindings,
             sourceGains: sourceResults,
             logoEvidence,
+            tellaExports: tellaExportReceipt.exports,
+            sourceFullscreen,
             variants
           });
           await writeJsonAtomic(stagedReportPath, manifest);

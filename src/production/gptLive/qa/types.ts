@@ -2,6 +2,7 @@ import type { FinalMediaInspection, PublishedGenerationValidation } from "../fin
 import type { MediaInspection } from "../mediaInspection";
 import type { TellaPlan } from "../tellaPlan";
 import type { AudioPolicy, EvidenceSpec } from "../types";
+import type { TellaExportReceipt } from "../tellaExportReceipt";
 
 export type QaVariantName = "version-a" | "version-b";
 
@@ -137,6 +138,7 @@ export interface GptLiveQaSnapshot {
   voice: QaVoice;
   voiceCacheMetadata: Record<string, QaVoiceCacheMetadata | null>;
   plan: TellaPlan;
+  tellaExportReceipt: TellaExportReceipt;
   tellaState: unknown;
   postProduction: Record<string, unknown>;
   logo: { path: string; sha256: string };

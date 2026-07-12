@@ -1,0 +1,156 @@
+import { createHash } from "node:crypto";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import {
+  parseTellaExportReceipt,
+  sealTellaExports,
+  validateSealedTellaExports,
+  type TellaExportReceipt
+} from "../src/production/gptLive/tellaExportReceipt";
+
+const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
+
+const state = {
+  variantVideoIds: {
+    dynamic_editorial: "vid_dynamic",
+    aimh_visual_host: "vid_host"
+  }
+};
+
+const receipt = (): TellaExportReceipt => ({
+  schemaVersion: "0.1.0",
+  productionId: "2026-07-10-gpt-live-tella-ab",
+  exports: [
+    {
+      version: "version-a",
+      sourceVariant: "dynamic_editorial",
+      remoteVideoId: "vid_dynamic",
+      workflowId: "export-vid_dynamic-job-a",
+      exportPath: "exports/tella-a.mp4",
+      sha256: sha256("export-a"),
+      byteSize: 8
+    },
+    {
+      version: "version-b",
+      sourceVariant: "aimh_visual_host",
+      remoteVideoId: "vid_host",
+      workflowId: "export-vid_host-job-b",
+      exportPath: "exports/tella-b.mp4",
+      sha256: sha256("export-b"),
+      byteSize: 8
+    }
+  ]
+});
+
+describe("GPT-Live Tella export receipt", () => {
+  it("accepts the exact deterministic receipt and approved duplicate dynamic export", () => {
+    expect(parseTellaExportReceipt(receipt(), state)).toEqual(receipt());
+
+    const duplicate = receipt();
+    (duplicate.exports as any)[1] = {
+      ...duplicate.exports[1],
+      sourceVariant: "dynamic_editorial",
+      remoteVideoId: "vid_dynamic",
+      workflowId: "export-vid_dynamic-job-b",
+      sha256: duplicate.exports[0].sha256,
+      byteSize: duplicate.exports[0].byteSize
+    };
+    expect(parseTellaExportReceipt(duplicate, state)).toEqual(duplicate);
+  });
+
+  it.each([
+    ["wrong video ID", (value: any) => { value.exports[0].remoteVideoId = "vid_host"; }],
+    ["workflow URL", (value: any) => { value.exports[0].workflowId = "https://tella.example/export"; }],
+    ["workflow secret", (value: any) => { value.exports[0].workflowId = "token-vid_dynamic-secret"; }],
+    ["workflow without video", (value: any) => { value.exports[0].workflowId = "export-job-a"; }],
+    ["wrong source variant", (value: any) => { value.exports[0].sourceVariant = "aimh_visual_host"; }],
+    ["wrong path", (value: any) => { value.exports[0].exportPath = "exports/tella-b.mp4"; }],
+    ["absolute path", (value: any) => { value.exports[0].exportPath = "/tmp/tella-a.mp4"; }],
+    ["missing record", (value: any) => { value.exports.pop(); }],
+    ["extra record", (value: any) => { value.exports.push({ ...value.exports[1] }); }],
+    ["reordered records", (value: any) => { value.exports.reverse(); }],
+    ["missing field", (value: any) => { delete value.exports[0].workflowId; }],
+    ["extra field", (value: any) => { value.exports[0].downloadUrl = "https://secret"; }],
+    ["extra top-level field", (value: any) => { value.signedUrl = "https://secret"; }],
+    ["invalid hash", (value: any) => { value.exports[0].sha256 = "bad"; }],
+    ["invalid byte size", (value: any) => { value.exports[0].byteSize = 0; }]
+  ])("rejects %s", (_name, mutate) => {
+    const value: any = receipt();
+    mutate(value);
+    expect(() => parseTellaExportReceipt(value, state)).toThrow(/Tella export receipt/i);
+  });
+
+  it("seals both current export byte streams and writes only after both are readable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gpt-live-seal-"));
+    const episodeDir = join(root, "episode");
+    await mkdir(join(episodeDir, "exports"), { recursive: true });
+    await mkdir(join(episodeDir, "tella"), { recursive: true });
+    await Promise.all([
+      writeFile(join(episodeDir, "exports", "tella-a.mp4"), "export-a"),
+      writeFile(join(episodeDir, "exports", "tella-b.mp4"), "export-b"),
+      writeFile(join(episodeDir, "tella", "state.json"), JSON.stringify(state))
+    ]);
+
+    try {
+      const result = await sealTellaExports({
+        episodeDir,
+        exports: [
+          {
+            version: "version-a",
+            sourceVariant: "dynamic_editorial",
+            remoteVideoId: "vid_dynamic",
+            workflowId: "export-vid_dynamic-job-a"
+          },
+          {
+            version: "version-b",
+            sourceVariant: "aimh_visual_host",
+            remoteVideoId: "vid_host",
+            workflowId: "export-vid_host-job-b"
+          }
+        ]
+      });
+
+      expect(result.receiptPath).toBe(join(episodeDir, "reports", "tella-export-receipt.json"));
+      expect(result.receipt).toEqual(receipt());
+      expect(JSON.parse(await readFile(result.receiptPath, "utf8"))).toEqual(receipt());
+
+      const writeJsonAtomic = vi.fn(async () => undefined);
+      await rm(join(episodeDir, "exports", "tella-b.mp4"));
+      await expect(sealTellaExports({
+        episodeDir,
+        exports: receipt().exports.map(({ version, sourceVariant, remoteVideoId, workflowId }) => ({
+          version,
+          sourceVariant,
+          remoteVideoId,
+          workflowId
+        }))
+      }, { writeJsonAtomic })).rejects.toThrow();
+      expect(writeJsonAtomic).not.toHaveBeenCalled();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a same-size export substitution after sealing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gpt-live-seal-mutate-"));
+    const episodeDir = join(root, "episode");
+    await mkdir(join(episodeDir, "exports"), { recursive: true });
+    await Promise.all([
+      writeFile(join(episodeDir, "exports", "tella-a.mp4"), "export-a"),
+      writeFile(join(episodeDir, "exports", "tella-b.mp4"), "export-b")
+    ]);
+
+    try {
+      await writeFile(join(episodeDir, "exports", "tella-a.mp4"), "changed!");
+      await expect(validateSealedTellaExports({
+        episodeDir,
+        receipt: receipt(),
+        tellaState: state
+      })).rejects.toThrow(/version-a.*bytes|version-a.*sha256|version-a.*mismatch/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

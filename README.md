@@ -23,6 +23,31 @@ Capture source screenshots, attach them to `shotlist.json`, then render without 
 pnpm newsroom:render --fixtures --capture --no-upload
 ```
 
+## GPT-Live Tella Exports
+
+After both Tella exports have been downloaded to `exports/tella-a.mp4` and
+`exports/tella-b.mp4`, seal their bytes and remote provenance before finishing:
+
+```bash
+pnpm gpt-live:seal-exports -- \
+  --episode-dir episodes/2026-07-10-gpt-live-tella-ab \
+  --version-a-source-variant dynamic_editorial \
+  --version-a-video-id vid_example_a \
+  --version-a-workflow-id export-vid_example_a-job-a \
+  --version-b-source-variant aimh_visual_host \
+  --version-b-video-id vid_example_b \
+  --version-b-workflow-id export-vid_example_b-job-b
+
+pnpm gpt-live:finish -- --episode-dir episodes/2026-07-10-gpt-live-tella-ab
+pnpm gpt-live:qa -- --episode-dir episodes/2026-07-10-gpt-live-tella-ab
+```
+
+Each workflow ID must be a non-URL identifier containing its exact video ID. For the
+approved compatibility copy, set both source variants and video IDs to the
+`dynamic_editorial` values while keeping distinct workflow IDs. Every flag also has a
+`GPT_LIVE_TELLA_VERSION_A_*` or `GPT_LIVE_TELLA_VERSION_B_*` environment equivalent:
+`SOURCE_VARIANT`, `VIDEO_ID`, and `WORKFLOW_ID`.
+
 Default dry-run output:
 
 ```text

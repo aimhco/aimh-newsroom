@@ -56,6 +56,10 @@ import {
 import { assertSafeSourceManifestUrl } from "../src/production/gptLive/qa/validation";
 import { buildTellaPlan } from "../src/production/gptLive/tellaPlan";
 import {
+  SOURCE_FULLSCREEN_SSIM_THRESHOLD,
+  deriveSourceFullscreenExpectations
+} from "../src/production/gptLive/sourceFullscreen";
+import {
   buildTellaTimelineAudit,
   validateTellaTimelineAudit,
   type TellaStateForTimelineAudit,
@@ -197,6 +201,31 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
   const sourceGains = deriveSharedSourceGains(duckIntervals, [-20, -20], [-20, -20]).map(
     (gain) => ({ ...gain, outputLufsA: -23, outputLufsB: -23 })
   );
+  const tellaExports = [
+    {
+      version: "version-a" as const,
+      sourceVariant: "dynamic_editorial" as const,
+      remoteVideoId: "video-a",
+      workflowId: "export-video-a-job-a",
+      exportPath: "exports/tella-a.mp4" as const,
+      sha256: sha("6"),
+      byteSize: 900
+    },
+    {
+      version: "version-b" as const,
+      sourceVariant: "aimh_visual_host" as const,
+      remoteVideoId: "video-b",
+      workflowId: "export-video-b-job-b",
+      exportPath: "exports/tella-b.mp4" as const,
+      sha256: sha("7"),
+      byteSize: 901
+    }
+  ] as const;
+  const sourceFullscreen = deriveSourceFullscreenExpectations(plan).map((sample) => ({
+    ...sample,
+    ssim: 0.93,
+    threshold: SOURCE_FULLSCREEN_SSIM_THRESHOLD
+  }));
   const postProduction = buildPostProductionManifest({
     productionId: GPT_LIVE_CONTENT.id,
     generationId: "00000000-0000-4000-8000-000000000000",
@@ -222,6 +251,8 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
         outputSha256: sha("c")
       }))
     })),
+    tellaExports,
+    sourceFullscreen,
     variants: [
       {
         name: "version-a",
@@ -364,6 +395,8 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
         byteSize: variant.byteSize
       })),
       programAudio: postProduction.programAudio.inputs.map((input) => ({ ...input })),
+      tellaExports,
+      sourceFullscreen,
       finalPaths: [
         join(EPISODE_DIR, "final", "version-a.mp4"),
         join(EPISODE_DIR, "final", "version-b.mp4")
@@ -392,6 +425,11 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
       ])
     ),
     plan,
+    tellaExportReceipt: {
+      schemaVersion: "0.1.0",
+      productionId: GPT_LIVE_CONTENT.id,
+      exports: tellaExports
+    },
     tellaState: state,
     postProduction,
     logo: { path: GPT_LIVE_CONTENT.branding.logoPath, sha256: sha("a") },
@@ -521,6 +559,10 @@ const createQaRunHarness = async () => {
     [join(episodeDir, "reports", "prepared.json"), JSON.stringify(snapshot.prepared)],
     [join(episodeDir, "reports", "source-matrix.md"), snapshot.sourceMatrix],
     [join(episodeDir, "reports", "source-manifest.json"), JSON.stringify(snapshot.sourceManifest)],
+    [
+      join(episodeDir, "reports", "tella-export-receipt.json"),
+      JSON.stringify(snapshot.tellaExportReceipt)
+    ],
     ...snapshot.voice.chunks.map((chunk) => [
       `${chunk.file}.json`,
       JSON.stringify(snapshot.voiceCacheMetadata[chunk.id])
@@ -1321,6 +1363,36 @@ describe("GPT-Live full production QA", () => {
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/Tella input|generation/i);
   });
 
+  it.each([
+    ["missing receipt record", (snapshot: any) => { snapshot.tellaExportReceipt.exports.pop(); }],
+    ["extra receipt record", (snapshot: any) => {
+      snapshot.tellaExportReceipt.exports.push({ ...snapshot.tellaExportReceipt.exports[1] });
+    }],
+    ["receipt/report drift", (snapshot: any) => {
+      snapshot.postProduction.tellaExports[0].workflowId = "export-video-a-other-job";
+    }],
+    ["missing fullscreen score", (snapshot: any) => { snapshot.postProduction.sourceFullscreen.pop(); }],
+    ["extra fullscreen score", (snapshot: any) => {
+      snapshot.postProduction.sourceFullscreen.push({ ...snapshot.postProduction.sourceFullscreen[0] });
+    }],
+    ["wrong fullscreen version", (snapshot: any) => {
+      snapshot.postProduction.sourceFullscreen[0].version = "version-b";
+    }],
+    ["wrong fullscreen source", (snapshot: any) => {
+      snapshot.postProduction.sourceFullscreen[0].clipId = "unexpected";
+    }],
+    ["fullscreen score below threshold", (snapshot: any) => {
+      snapshot.postProduction.sourceFullscreen[0].ssim = 0.87;
+    }],
+    ["generation fullscreen drift", (snapshot: any) => {
+      snapshot.generation.sourceFullscreen[0].ssim = 0.99;
+    }]
+  ])("rejects %s in export/fullscreen QA coverage", (_name, mutate) => {
+    const snapshot = validSnapshot();
+    mutate(snapshot);
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/receipt|Tella export|fullscreen/i);
+  });
+
   it("rejects a Tella export duration outside one 30fps frame of the audited plan", () => {
     const snapshot = validSnapshot();
     snapshot.media.exports["version-a"] = finalInspection(
@@ -1937,7 +2009,9 @@ describe("GPT-Live full production QA", () => {
         generationId: harness.generation.generationId,
         preparationFingerprint: harness.generation.preparationFingerprint,
         variants: harness.generation.variants,
-        programAudio: harness.generation.programAudio
+        programAudio: harness.generation.programAudio,
+        tellaExports: harness.generation.tellaExports,
+        sourceFullscreen: harness.generation.sourceFullscreen
       });
     } finally {
       await rm(harness.episodeDir, { recursive: true, force: true });

@@ -19,6 +19,8 @@ import { GPT_LIVE_SCENES } from "../motion/sceneStyle";
 import { buildSourceManifest } from "../prepare";
 import { assertPlateContract } from "../renderPlates";
 import { buildTellaPlan, type TellaPlan } from "../tellaPlan";
+import { assertSourceFullscreenEvidence } from "../sourceFullscreen";
+import { parseTellaExportReceipt } from "../tellaExportReceipt";
 import {
   assertTellaProgramDuration,
   isUnsafeTellaReference,
@@ -630,10 +632,49 @@ const validateFinals = (snapshot: GptLiveQaSnapshot): void => {
   }
 };
 
+const validateExportProvenance = (snapshot: GptLiveQaSnapshot): void => {
+  const receipt = (() => {
+    try {
+      return parseTellaExportReceipt(snapshot.tellaExportReceipt, snapshot.tellaState);
+    } catch (error) {
+      return fail(
+        `Tella export receipt is invalid: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  })();
+  exact(receipt.exports, snapshot.generation.tellaExports, "Tella export receipt generation lineage");
+  exact(
+    snapshot.postProduction.tellaExports,
+    receipt.exports,
+    "Tella export receipt post-production lineage"
+  );
+  const variants = postVariants(snapshot.postProduction);
+  for (const [index, record] of receipt.exports.entries()) {
+    const variant = variants[index];
+    if (
+      variant?.name !== record.version ||
+      variant.inputSha256 !== record.sha256 ||
+      variant.inputByteSize !== record.byteSize
+    ) {
+      fail(`Tella export receipt bytes do not match ${record.version} publication lineage`);
+    }
+  }
+  const fullscreen = (() => {
+    try {
+      return assertSourceFullscreenEvidence(snapshot.plan, snapshot.postProduction.sourceFullscreen);
+    } catch (error) {
+      return fail(
+        `source fullscreen evidence is invalid: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  })();
+  exact(fullscreen, snapshot.generation.sourceFullscreen, "source fullscreen generation lineage");
+};
+
 const validateBrandingAndAudio = (snapshot: GptLiveQaSnapshot): void => {
   const post = snapshot.postProduction;
   if (
-    post.schemaVersion !== "0.2.0" ||
+    post.schemaVersion !== "0.3.0" ||
     post.status !== "finished" ||
     post.productionId !== GPT_LIVE_CONTENT.id ||
     post.generationId !== snapshot.generation.generationId
@@ -870,6 +911,7 @@ export function validateGptLiveQaSnapshot(snapshot: GptLiveQaSnapshot): void {
   validatePlan(snapshot);
   validatePreparedFingerprint(snapshot);
   validateTellaState(snapshot);
+  validateExportProvenance(snapshot);
   validatePreparedMedia(snapshot);
   validateFinals(snapshot);
   validateBrandingAndAudio(snapshot);

@@ -636,6 +636,23 @@ describe("GPT-Live production environment", () => {
     );
   });
 
+  it("loads all GPT-Live Tella seal provenance variables from the shell", () => {
+    const sealEnv = {
+      GPT_LIVE_TELLA_VERSION_A_SOURCE_VARIANT: "dynamic_editorial",
+      GPT_LIVE_TELLA_VERSION_A_VIDEO_ID: "vid_dynamic",
+      GPT_LIVE_TELLA_VERSION_A_WORKFLOW_ID: "export-vid_dynamic-job-a",
+      GPT_LIVE_TELLA_VERSION_B_SOURCE_VARIANT: "aimh_visual_host",
+      GPT_LIVE_TELLA_VERSION_B_VIDEO_ID: "vid_host",
+      GPT_LIVE_TELLA_VERSION_B_WORKFLOW_ID: "export-vid_host-job-b"
+    };
+    const snapshot = loadEnvSnapshot({ shellEnv: sealEnv });
+    expect(snapshot.values).toMatchObject(sealEnv);
+    for (const key of Object.keys(sealEnv)) {
+      expect(DEFAULT_ENV_KEYS).toContain(key);
+      expect(snapshot.status[key]).toEqual({ present: true, source: "shell" });
+    }
+  });
+
   it("preserves shell, local, and fallback precedence for explicit asset paths", () => {
     const snapshot = loadEnvSnapshot({
       shellEnv: { AIMH_LOGO_PATH: "/shell/logo.png" },
@@ -1194,6 +1211,8 @@ describe("GPT-Live production preparation", () => {
             preparedArtifacts: [],
             variants: [],
             programAudio: [],
+            tellaExports: [] as any,
+            sourceFullscreen: [],
             finalPaths: [
               join(episodeDir, "final", "version-a.mp4"),
               join(episodeDir, "final", "version-b.mp4")
@@ -1681,6 +1700,107 @@ describe("GPT-Live preparation CLI", () => {
       ffmpegPath: "/tools/ffmpeg",
       ffprobePath: "/tools/ffprobe"
     });
+  });
+
+  it("dispatches export sealing with explicit per-version provenance", async () => {
+    const sealTellaExports = vi.fn(async () => ({
+      episodeDir: "/project/episodes/custom",
+      receiptPath: "/project/episodes/custom/reports/tella-export-receipt.json"
+    }));
+
+    await runGptLiveCli([
+      "seal-exports",
+      "--episode-dir", "episodes/custom",
+      "--version-a-source-variant", "dynamic_editorial",
+      "--version-a-video-id", "vid_dynamic",
+      "--version-a-workflow-id", "export-vid_dynamic-job-a",
+      "--version-b-source-variant", "dynamic_editorial",
+      "--version-b-video-id", "vid_dynamic",
+      "--version-b-workflow-id", "export-vid_dynamic-job-b"
+    ], {
+      cwd: () => "/project",
+      loadEnvSnapshotFromFiles: async () => ({ values: {}, status: {} }),
+      sealTellaExports,
+      ...virtualCliFileSystem
+    });
+
+    expect(sealTellaExports).toHaveBeenCalledWith({
+      episodeDir: "/project/episodes/custom",
+      exports: [
+        {
+          version: "version-a",
+          sourceVariant: "dynamic_editorial",
+          remoteVideoId: "vid_dynamic",
+          workflowId: "export-vid_dynamic-job-a"
+        },
+        {
+          version: "version-b",
+          sourceVariant: "dynamic_editorial",
+          remoteVideoId: "vid_dynamic",
+          workflowId: "export-vid_dynamic-job-b"
+        }
+      ]
+    });
+  });
+
+  it("loads export sealing provenance from named environment variables", async () => {
+    const sealTellaExports = vi.fn(async () => ({ episodeDir: "/project/episodes/custom" }));
+    await runGptLiveCli(["seal-exports", "--episode-dir", "episodes/custom"], {
+      cwd: () => "/project",
+      loadEnvSnapshotFromFiles: async () => ({
+        values: {
+          GPT_LIVE_TELLA_VERSION_A_SOURCE_VARIANT: "dynamic_editorial",
+          GPT_LIVE_TELLA_VERSION_A_VIDEO_ID: "vid_dynamic",
+          GPT_LIVE_TELLA_VERSION_A_WORKFLOW_ID: "export-vid_dynamic-job-a",
+          GPT_LIVE_TELLA_VERSION_B_SOURCE_VARIANT: "aimh_visual_host",
+          GPT_LIVE_TELLA_VERSION_B_VIDEO_ID: "vid_host",
+          GPT_LIVE_TELLA_VERSION_B_WORKFLOW_ID: "export-vid_host-job-b"
+        },
+        status: {}
+      }),
+      sealTellaExports,
+      ...virtualCliFileSystem
+    });
+
+    expect(sealTellaExports).toHaveBeenCalledWith(expect.objectContaining({
+      exports: expect.arrayContaining([
+        expect.objectContaining({ version: "version-a", remoteVideoId: "vid_dynamic" }),
+        expect.objectContaining({ version: "version-b", sourceVariant: "aimh_visual_host" })
+      ])
+    }));
+  });
+
+  it("rejects incomplete export sealing provenance before writing a receipt", async () => {
+    const sealTellaExports = vi.fn();
+    await expect(runGptLiveCli(["seal-exports", "--episode-dir", "episodes/custom"], {
+      cwd: () => "/project",
+      loadEnvSnapshotFromFiles: async () => ({ values: {}, status: {} }),
+      sealTellaExports,
+      ...virtualCliFileSystem
+    })).rejects.toThrow(/VERSION_A_SOURCE_VARIANT|version-a-source-variant/i);
+    expect(sealTellaExports).not.toHaveBeenCalled();
+  });
+
+  it("preserves the complete inline seal value for downstream secret validation", async () => {
+    const sealTellaExports = vi.fn(async (options: any) => {
+      expect(options.exports[0].workflowId).toBe("export-vid_dynamic-job-a=token");
+      throw new Error("captured complete workflow value");
+    });
+    await expect(runGptLiveCli([
+      "seal-exports",
+      "--episode-dir=episodes/custom",
+      "--version-a-source-variant=dynamic_editorial",
+      "--version-a-video-id=vid_dynamic",
+      "--version-a-workflow-id=export-vid_dynamic-job-a=token",
+      "--version-b-source-variant=aimh_visual_host",
+      "--version-b-video-id=vid_host",
+      "--version-b-workflow-id=export-vid_host-job-b"
+    ], {
+      cwd: () => "/project",
+      loadEnvSnapshotFromFiles: async () => ({ values: {}, status: {} }),
+      sealTellaExports,
+      ...virtualCliFileSystem
+    })).rejects.toThrow("captured complete workflow value");
   });
 
   it.each([

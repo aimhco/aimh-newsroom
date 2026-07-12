@@ -22,6 +22,10 @@ import { GPT_LIVE_SCENES, sceneStyle } from "./motion/sceneStyle";
 import { withEpisodeProductionLock } from "./productionLock";
 import type { TellaPlan } from "./tellaPlan";
 import { assertTellaProgramDuration, validateTellaTimelineAudit } from "./tellaState";
+import {
+  parseTellaExportReceipt,
+  tellaExportReceiptPath
+} from "./tellaExportReceipt";
 import type {
   GptLiveQaResult,
   GptLiveQaSnapshot,
@@ -334,6 +338,7 @@ const collectSnapshot = async (
   const preparedPath = join(options.episodeDir, "reports", "prepared.json");
   const sourceMatrixPath = join(options.episodeDir, "reports", "source-matrix.md");
   const sourceManifestPath = join(options.episodeDir, "reports", "source-manifest.json");
+  const exportReceiptPath = tellaExportReceiptPath(options.episodeDir);
   const humanPlaybackPath = join(options.episodeDir, "reports", "human-playback.json");
 
   await validateNoSymlinkPaths(options.episodeDir, [
@@ -345,6 +350,7 @@ const collectSnapshot = async (
     preparedPath,
     sourceMatrixPath,
     sourceManifestPath,
+    exportReceiptPath,
     humanPlaybackPath
   ], dependencies);
 
@@ -356,7 +362,8 @@ const collectSnapshot = async (
     postText,
     preparedText,
     sourceMatrix,
-    sourceManifestText
+    sourceManifestText,
+    exportReceiptText
   ] =
     await Promise.all([
       dependencies.readFile(productionPath, "utf8"),
@@ -366,7 +373,8 @@ const collectSnapshot = async (
       dependencies.readFile(generation.reportPath, "utf8"),
       dependencies.readFile(preparedPath, "utf8"),
       dependencies.readFile(sourceMatrixPath, "utf8"),
-      dependencies.readFile(sourceManifestPath, "utf8")
+      dependencies.readFile(sourceManifestPath, "utf8"),
+      dependencies.readFile(exportReceiptPath, "utf8")
     ]);
   const production = parseJson<QaProduction>(productionText, "production manifest");
   const voice = parseJson<QaVoice>(voiceText, "voice manifest");
@@ -379,6 +387,10 @@ const collectSnapshot = async (
     "source manifest"
   );
   validateTellaTimelineAudit(plan, tellaState);
+  const tellaExportReceipt = parseTellaExportReceipt(
+    parseJson<unknown>(exportReceiptText, "Tella export receipt"),
+    tellaState
+  );
 
   await withValidatedQaArtifactPaths({
     episodeDir: options.episodeDir,
@@ -488,6 +500,7 @@ const collectSnapshot = async (
     voice,
     voiceCacheMetadata: Object.fromEntries(voiceCacheEntries),
     plan,
+    tellaExportReceipt,
     tellaState,
     postProduction,
     logo: {
@@ -558,7 +571,9 @@ const buildSafeQaReport = (
       generationId: snapshot.generation.generationId,
       preparationFingerprint: snapshot.generation.preparationFingerprint,
       variants: snapshot.generation.variants,
-      programAudio: snapshot.generation.programAudio
+      programAudio: snapshot.generation.programAudio,
+      tellaExports: snapshot.generation.tellaExports,
+      sourceFullscreen: snapshot.generation.sourceFullscreen
     },
     youtubeUploadEnabled: false,
     checks: {
@@ -566,6 +581,8 @@ const buildSafeQaReport = (
       clipAndVoiceProvenance: true,
       mediaStreamContracts: true,
       tellaPlanAndState: true,
+      tellaExportProvenance: true,
+      sourceClipsFullscreen: true,
       finalGenerationIntegrity: true,
       brandingAndSafeArea: true,
       audioTreatmentAndTailSignal: true,
@@ -626,6 +643,8 @@ const assertUnchangedPublishedGeneration = (
         currentInput.byteSize === input.byteSize &&
         currentInput.durationSeconds === input.durationSeconds;
     }) &&
+    JSON.stringify(initial.tellaExports) === JSON.stringify(current.tellaExports) &&
+    JSON.stringify(initial.sourceFullscreen) === JSON.stringify(current.sourceFullscreen) &&
     initial.variants.length === current.variants.length &&
     initial.variants.every((variant, index) => {
       const currentVariant = current.variants[index];
