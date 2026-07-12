@@ -294,7 +294,130 @@ const EXPECTED_SOURCE_CLIPS = [
   }
 ] as const;
 
+const EXPECTED_EVIDENCE = [
+  {
+    id: "evidence_translation_video",
+    scene: "hook",
+    sourceId: "src_openai_article",
+    assetPath: "source/clip_translation.mp4",
+    canonicalUrl: "https://openai.com/index/introducing-gpt-live/",
+    mediaUrl: "https://openai.com/index/introducing-gpt-live/?video=1208096618",
+    displayUrl: "OPENAI.COM / GPT-LIVE",
+    publisher: "OpenAI",
+    sourceType: "primary",
+    playbackDecision: "full_screen_original_audio",
+    placement: "left",
+    takeaway: "Live translation without waiting for turns.",
+    detail: "Official GPT-Live demonstration.",
+    focalRect: { x: 0, y: 0, width: 1, height: 1 },
+    youtubeDescription: true
+  },
+  {
+    id: "evidence_interruption_video",
+    scene: "full_duplex",
+    sourceId: "src_openai_article",
+    assetPath: "source/clip_interruption.mp4",
+    canonicalUrl: "https://openai.com/index/introducing-gpt-live/",
+    mediaUrl: "https://openai.com/index/introducing-gpt-live/?video=1208152658",
+    displayUrl: "OPENAI.COM / GPT-LIVE",
+    publisher: "OpenAI",
+    sourceType: "primary",
+    playbackDecision: "full_screen_original_audio",
+    placement: "left",
+    takeaway: "Interrupt and redirect without restarting.",
+    detail: "Official GPT-Live demonstration.",
+    focalRect: { x: 0, y: 0, width: 1, height: 1 },
+    youtubeDescription: true
+  },
+  {
+    id: "evidence_openai_full_duplex",
+    scene: "full_duplex",
+    sourceId: "src_openai_article",
+    assetPath: "evidence/openai-gpt-live-full-duplex.png",
+    canonicalUrl: "https://openai.com/index/introducing-gpt-live/",
+    displayUrl: "OPENAI.COM / GPT-LIVE",
+    publisher: "OpenAI",
+    sourceType: "primary",
+    playbackDecision: "captured_source",
+    placement: "left",
+    takeaway: "Listen and speak at the same time.",
+    detail: "This is why GPT-Live feels like a call instead of a walkie-talkie.",
+    focalRect: { x: 0.18, y: 0.18, width: 0.64, height: 0.34 },
+    youtubeDescription: true
+  },
+  {
+    id: "evidence_toms_guide_translation",
+    scene: "evidence",
+    sourceId: "src_toms_guide",
+    assetPath: "evidence/toms-guide-world-cup-translation.png",
+    canonicalUrl:
+      "https://www.tomsguide.com/ai/i-used-chatgpts-new-voice-mode-to-translate-the-world-cup-in-real-time-heres-what-happened",
+    displayUrl: "TOMSGUIDE.COM / AI",
+    publisher: "Tom's Guide",
+    sourceType: "reporting",
+    playbackDecision: "captured_source",
+    placement: "right",
+    takeaway: "A live broadcast became continuous interpretation.",
+    detail: "Tom's Guide reported English interpretation over rapid Spanish commentary.",
+    focalRect: { x: 0.08, y: 0.22, width: 0.78, height: 0.46 },
+    youtubeDescription: true
+  },
+  {
+    id: "evidence_openai_availability",
+    scene: "availability",
+    sourceId: "src_openai_help",
+    assetPath: "evidence/openai-chatgpt-voice-availability.png",
+    canonicalUrl: "https://help.openai.com/en/articles/20001274/",
+    displayUrl: "HELP.OPENAI.COM / CHATGPT VOICE",
+    publisher: "OpenAI Help Center",
+    sourceType: "primary",
+    playbackDecision: "captured_source",
+    placement: "left",
+    takeaway: "Free gets mini. Paid plans get GPT-Live-1.",
+    detail: "Launch access and limitations remain visible beside the explanation.",
+    focalRect: { x: 0.12, y: 0.18, width: 0.76, height: 0.5 },
+    youtubeDescription: true
+  },
+  {
+    id: "evidence_openai_realtime",
+    scene: "future",
+    sourceId: "src_openai_realtime",
+    assetPath: "evidence/openai-realtime-future.png",
+    canonicalUrl:
+      "https://openai.com/index/advancing-voice-intelligence-with-new-models-in-the-api/",
+    displayUrl: "OPENAI.COM / REALTIME",
+    publisher: "OpenAI",
+    sourceType: "primary",
+    playbackDecision: "captured_source",
+    placement: "right",
+    takeaway: "Voice becomes an interface for action.",
+    detail:
+      "Realtime tools point toward scheduling, support, travel changes, and multilingual work.",
+    focalRect: { x: 0.08, y: 0.2, width: 0.82, height: 0.48 },
+    youtubeDescription: true
+  }
+] as const;
+
+const EXPECTED_AUDIO = {
+  introMusic: false,
+  bodyMusic: false,
+  outroMusicPath:
+    "/Users/dennywii/Documents/dev/aimh-video-engine/assets/music/Outro_Much_Higher_Causmic.mp3",
+  outroDurationSeconds: 7
+} as const;
+
 const cloneProduction = (): GptLiveProduction => structuredClone(GPT_LIVE_CONTENT);
+
+const replaceEvidence = (
+  production: GptLiveProduction,
+  index: number,
+  changes: Record<string, unknown>
+): GptLiveProduction => ({
+  ...production,
+  evidence: production.evidence.map((item, itemIndex) =>
+    itemIndex === index ? { ...item, ...changes } : item
+  ) as GptLiveProduction["evidence"]
+});
 
 const EPISODE_DIR = "/tmp/gpt-live-episode";
 const narrationAssets = GPT_LIVE_CONTENT.narration.map((item, index) => ({
@@ -370,9 +493,13 @@ describe("GPT-Live production environment", () => {
 
     expect(DEFAULT_ENV_KEYS).toContain("AIMH_LOGO_PATH");
     expect(DEFAULT_ENV_KEYS).toContain("AIMH_BODY_MUSIC_PATH");
+    expect(DEFAULT_ENV_KEYS).toContain("AIMH_OUTRO_MUSIC_PATH");
     expect(snapshot.values.AIMH_LOGO_PATH).toBe("/opt/aimh-video-engine/assets/logo.png");
     expect(snapshot.values.AIMH_BODY_MUSIC_PATH).toBe(
       "/opt/aimh-video-engine/assets/music/Body_Komorebi_Futuremono.mp3"
+    );
+    expect(snapshot.values.AIMH_OUTRO_MUSIC_PATH).toBe(
+      "/opt/aimh-video-engine/assets/music/Outro_Much_Higher_Causmic.mp3"
     );
   });
 
@@ -605,7 +732,8 @@ describe("GPT-Live production preparation", () => {
       expect(JSON.parse(productionText)).toMatchObject({
         id: GPT_LIVE_CONTENT.id,
         branding: { logoPath: "/assets/logo.png" },
-        musicPath: "/assets/music.mp3"
+        evidence: EXPECTED_EVIDENCE,
+        audio: EXPECTED_AUDIO
       });
       expect(JSON.parse(voiceText)).toEqual(successfulVoiceResult(join(episodeDir, "voice")));
       expect(JSON.parse(planText)).toEqual(result.plan);
@@ -1130,6 +1258,8 @@ describe("GPT-Live controlled production content", () => {
     expect(GPT_LIVE_CONTENT.sources).toEqual(EXPECTED_SOURCES);
     expect(GPT_LIVE_CONTENT.claims).toEqual(EXPECTED_CLAIMS);
     expect(GPT_LIVE_CONTENT.narration).toEqual(EXPECTED_NARRATION);
+    expect(GPT_LIVE_CONTENT.evidence).toEqual(EXPECTED_EVIDENCE);
+    expect(GPT_LIVE_CONTENT.audio).toEqual(EXPECTED_AUDIO);
     expect(GPT_LIVE_CONTENT.branding).toEqual({
       logoPath: "/Users/dennywii/Documents/dev/aimh-video-engine/assets/logo.png",
       width: 150,
@@ -1137,9 +1267,7 @@ describe("GPT-Live controlled production content", () => {
       marginRight: 24,
       opacity: 0.85
     });
-    expect(GPT_LIVE_CONTENT.musicPath).toBe(
-      "/Users/dennywii/Documents/dev/aimh-video-engine/assets/music/Body_Komorebi_Futuremono.mp3"
-    );
+    expect(GPT_LIVE_CONTENT).not.toHaveProperty("musicPath");
   });
 
   it("pins the ordered timeline IDs and kinds", () => {
@@ -1207,6 +1335,15 @@ describe("GPT-Live controlled production content", () => {
       build: () => {
         const production = cloneProduction();
         return { ...production, timeline: [...production.timeline, production.timeline[0]!] };
+      }
+    },
+    {
+      name: "duplicate evidence IDs",
+      expectedError:
+        'Invalid GPT-Live production: duplicate evidence id "evidence_translation_video"',
+      build: () => {
+        const production = cloneProduction();
+        return { ...production, evidence: [...production.evidence, production.evidence[0]!] };
       }
     },
     {
@@ -1310,6 +1447,123 @@ describe("GPT-Live controlled production content", () => {
         const [narration, ...narrations] = production.narration;
         return { ...production, narration: [{ ...narration!, claimIds: [] }, ...narrations] };
       }
+    },
+    {
+      name: "evidence with an unknown source",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" references unknown source "src_missing"',
+      build: () => replaceEvidence(cloneProduction(), 0, { sourceId: "src_missing" })
+    },
+    {
+      name: "evidence with a non-canonical source URL",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" canonical URL does not match source "src_openai_article"',
+      build: () => replaceEvidence(cloneProduction(), 0, { canonicalUrl: "https://openai.com/" })
+    },
+    {
+      name: "evidence with a non-HTTPS media URL",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" media URL must be a valid HTTPS URL',
+      build: () =>
+        replaceEvidence(cloneProduction(), 0, {
+          mediaUrl: "http://openai.com/index/introducing-gpt-live/?video=1208096618"
+        })
+    },
+    {
+      name: "evidence with a media URL on another publisher domain",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" media URL must use the source publisher domain',
+      build: () =>
+        replaceEvidence(cloneProduction(), 0, {
+          mediaUrl: "https://example.com/index/introducing-gpt-live/?video=1208096618"
+        })
+    },
+    {
+      name: "captured evidence with an absolute asset path",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_openai_full_duplex" asset path must be relative and below evidence/',
+      build: () =>
+        replaceEvidence(cloneProduction(), 2, {
+          assetPath: "/evidence/openai-gpt-live-full-duplex.png"
+        })
+    },
+    {
+      name: "captured evidence with a traversing asset path",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_openai_full_duplex" asset path must be relative and below evidence/',
+      build: () =>
+        replaceEvidence(cloneProduction(), 2, {
+          assetPath: "evidence/../source/clip_interruption.mp4"
+        })
+    },
+    {
+      name: "source video evidence outside the source directory",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" asset path must be relative and below source/',
+      build: () =>
+        replaceEvidence(cloneProduction(), 0, {
+          assetPath: "evidence/clip_translation.mp4"
+        })
+    },
+    {
+      name: "evidence with a non-finite focal value",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" focal x must be finite and within 0..1',
+      build: () =>
+        replaceEvidence(cloneProduction(), 0, {
+          focalRect: { x: Number.NaN, y: 0, width: 1, height: 1 }
+        })
+    },
+    {
+      name: "evidence with a missing focal value",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" focal width must be finite and within 0..1',
+      build: () =>
+        replaceEvidence(cloneProduction(), 0, {
+          focalRect: { x: 0, y: 0, height: 1 }
+        })
+    },
+    {
+      name: "evidence with a focal value below zero",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" focal y must be finite and within 0..1',
+      build: () =>
+        replaceEvidence(cloneProduction(), 0, {
+          focalRect: { x: 0, y: -0.1, width: 1, height: 1 }
+        })
+    },
+    {
+      name: "evidence with a focal value above one",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" focal width must be finite and within 0..1',
+      build: () =>
+        replaceEvidence(cloneProduction(), 0, {
+          focalRect: { x: 0, y: 0, width: 1.1, height: 1 }
+        })
+    },
+    {
+      name: "evidence whose horizontal focal bounds exceed one",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_openai_full_duplex" focal x + width must not exceed 1',
+      build: () =>
+        replaceEvidence(cloneProduction(), 2, {
+          focalRect: { x: 0.5, y: 0.18, width: 0.64, height: 0.34 }
+        })
+    },
+    {
+      name: "evidence whose vertical focal bounds exceed one",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_openai_full_duplex" focal y + height must not exceed 1',
+      build: () =>
+        replaceEvidence(cloneProduction(), 2, {
+          focalRect: { x: 0.18, y: 0.8, width: 0.64, height: 0.34 }
+        })
+    },
+    {
+      name: "evidence with an unknown narration scene",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" references unknown narration scene "missing"',
+      build: () => replaceEvidence(cloneProduction(), 0, { scene: "missing" })
     }
   ])("rejects $name", ({ build, expectedError }) => {
     expect(() => validateProductionManifest(build())).toThrow(expectedError);
@@ -1327,6 +1581,10 @@ describe("GPT-Live controlled production content", () => {
       GPT_LIVE_CONTENT.narration,
       GPT_LIVE_CONTENT.narration[0],
       GPT_LIVE_CONTENT.narration[0]?.claimIds,
+      GPT_LIVE_CONTENT.evidence,
+      GPT_LIVE_CONTENT.evidence[0],
+      GPT_LIVE_CONTENT.evidence[0]?.focalRect,
+      GPT_LIVE_CONTENT.audio,
       GPT_LIVE_TIMELINE,
       GPT_LIVE_TIMELINE[0],
       GPT_LIVE_CONTENT.branding
@@ -1339,13 +1597,23 @@ describe("GPT-Live controlled production content", () => {
 
   it("prevents mutation of frozen nested records and arrays", () => {
     const mutableBranding = GPT_LIVE_CONTENT.branding as unknown as { width: number };
+    const mutableFocalRect = GPT_LIVE_CONTENT.evidence[0]!.focalRect as unknown as { width: number };
+    const mutableAudio = GPT_LIVE_CONTENT.audio as unknown as { outroDurationSeconds: number };
     const mutableTimeline = GPT_LIVE_TIMELINE as unknown as unknown[];
 
     expect(() => {
       mutableBranding.width = 200;
     }).toThrow(TypeError);
+    expect(() => {
+      mutableFocalRect.width = 0.5;
+    }).toThrow(TypeError);
+    expect(() => {
+      mutableAudio.outroDurationSeconds = 8;
+    }).toThrow(TypeError);
     expect(() => mutableTimeline.push({})).toThrow(TypeError);
     expect(GPT_LIVE_CONTENT.branding.width).toBe(150);
+    expect(GPT_LIVE_CONTENT.evidence[0]!.focalRect.width).toBe(1);
+    expect(GPT_LIVE_CONTENT.audio.outroDurationSeconds).toBe(7);
     expect(GPT_LIVE_TIMELINE).toHaveLength(9);
   });
 });

@@ -1,4 +1,5 @@
 import type {
+  EvidenceSpec,
   GptLiveProduction,
   GptLiveVisualContent,
   NarrationSpec,
@@ -47,13 +48,94 @@ const narrationExactlyMatches = (timelineItem: NarrationSpec, canonical: Narrati
   timelineItem.claimIds.length === canonical.claimIds.length &&
   timelineItem.claimIds.every((claimId, index) => claimId === canonical.claimIds[index]);
 
+const normalizePublisherHost = (hostname: string): string =>
+  hostname.toLowerCase().replace(/^www\./, "");
+
+const isSamePublisherDomain = (left: string, right: string): boolean => {
+  const leftHost = normalizePublisherHost(left);
+  const rightHost = normalizePublisherHost(right);
+  return (
+    leftHost === rightHost ||
+    leftHost.endsWith(`.${rightHost}`) ||
+    rightHost.endsWith(`.${leftHost}`)
+  );
+};
+
+const isRelativeAssetBelow = (assetPath: string, directory: string): boolean => {
+  if (!assetPath || assetPath.startsWith("/") || /^[A-Za-z]:[\\/]/.test(assetPath)) return false;
+  const segments = assetPath.split("/");
+  return (
+    segments[0] === directory &&
+    segments.length > 1 &&
+    segments.slice(1).every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+  );
+};
+
+const assertEvidenceIsValid = (
+  evidence: EvidenceSpec,
+  sources: ReadonlyMap<string, ProductionSource>,
+  narrationScenes: ReadonlySet<string>
+): void => {
+  const source =
+    sources.get(evidence.sourceId) ??
+    invalidProduction(`evidence "${evidence.id}" references unknown source "${evidence.sourceId}"`);
+
+  if (evidence.canonicalUrl !== source.url) {
+    invalidProduction(`evidence "${evidence.id}" canonical URL does not match source "${source.id}"`);
+  }
+  if (evidence.mediaUrl !== undefined) {
+    const mediaUrl = (() => {
+      try {
+        return new URL(evidence.mediaUrl);
+      } catch {
+        return invalidProduction(`evidence "${evidence.id}" media URL must be a valid HTTPS URL`);
+      }
+    })();
+    const canonicalUrl = new URL(source.url);
+    if (mediaUrl.protocol !== "https:") {
+      invalidProduction(`evidence "${evidence.id}" media URL must be a valid HTTPS URL`);
+    }
+    if (!isSamePublisherDomain(mediaUrl.hostname, canonicalUrl.hostname)) {
+      invalidProduction(`evidence "${evidence.id}" media URL must use the source publisher domain`);
+    }
+  }
+
+  const requiredAssetDirectory =
+    evidence.playbackDecision === "captured_source" ? "evidence" : "source";
+  if (!isRelativeAssetBelow(evidence.assetPath, requiredAssetDirectory)) {
+    invalidProduction(
+      `evidence "${evidence.id}" asset path must be relative and below ${requiredAssetDirectory}/`
+    );
+  }
+
+  const focalRect = evidence.focalRect;
+  for (const name of ["x", "y", "width", "height"] as const) {
+    const value = focalRect?.[name];
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+      invalidProduction(`evidence "${evidence.id}" focal ${name} must be finite and within 0..1`);
+    }
+  }
+  if (focalRect.x + focalRect.width > 1) {
+    invalidProduction(`evidence "${evidence.id}" focal x + width must not exceed 1`);
+  }
+  if (focalRect.y + focalRect.height > 1) {
+    invalidProduction(`evidence "${evidence.id}" focal y + height must not exceed 1`);
+  }
+  if (!narrationScenes.has(evidence.scene)) {
+    invalidProduction(`evidence "${evidence.id}" references unknown narration scene "${evidence.scene}"`);
+  }
+};
+
 export const validateProductionManifest = (production: GptLiveProduction): void => {
   assertUniqueIds("source", production.sources);
   assertUniqueIds("claim", production.claims);
   assertUniqueIds("narration", production.narration);
+  assertUniqueIds("evidence", production.evidence);
 
   const sourceIds = new Set(production.sources.map(({ id }) => id));
+  const sources = new Map(production.sources.map((source) => [source.id, source]));
   const claimIds = new Set(production.claims.map(({ id }) => id));
+  const narrationScenes = new Set(production.narration.map(({ scene }) => scene));
 
   for (const claim of production.claims) {
     if (claim.sourceIds.length === 0) {
@@ -67,6 +149,9 @@ export const validateProductionManifest = (production: GptLiveProduction): void 
   }
 
   assertNarrationClaimsResolve(production.narration, claimIds);
+  for (const evidence of production.evidence) {
+    assertEvidenceIsValid(evidence, sources, narrationScenes);
+  }
 
   const canonicalNarration = new Map(production.narration.map((item) => [item.id, item]));
   const narrationOccurrences = new Map(production.narration.map((item) => [item.id, 0]));
@@ -392,6 +477,110 @@ const CLIP_INTERRUPTION = {
   sourceId: "src_openai_article"
 } as const satisfies SourceClipSpec;
 
+const GPT_LIVE_EVIDENCE = [
+  {
+    id: "evidence_translation_video",
+    scene: "hook",
+    sourceId: "src_openai_article",
+    assetPath: "source/clip_translation.mp4",
+    canonicalUrl: "https://openai.com/index/introducing-gpt-live/",
+    mediaUrl: "https://openai.com/index/introducing-gpt-live/?video=1208096618",
+    displayUrl: "OPENAI.COM / GPT-LIVE",
+    publisher: "OpenAI",
+    sourceType: "primary",
+    playbackDecision: "full_screen_original_audio",
+    placement: "left",
+    takeaway: "Live translation without waiting for turns.",
+    detail: "Official GPT-Live demonstration.",
+    focalRect: { x: 0, y: 0, width: 1, height: 1 },
+    youtubeDescription: true
+  },
+  {
+    id: "evidence_interruption_video",
+    scene: "full_duplex",
+    sourceId: "src_openai_article",
+    assetPath: "source/clip_interruption.mp4",
+    canonicalUrl: "https://openai.com/index/introducing-gpt-live/",
+    mediaUrl: "https://openai.com/index/introducing-gpt-live/?video=1208152658",
+    displayUrl: "OPENAI.COM / GPT-LIVE",
+    publisher: "OpenAI",
+    sourceType: "primary",
+    playbackDecision: "full_screen_original_audio",
+    placement: "left",
+    takeaway: "Interrupt and redirect without restarting.",
+    detail: "Official GPT-Live demonstration.",
+    focalRect: { x: 0, y: 0, width: 1, height: 1 },
+    youtubeDescription: true
+  },
+  {
+    id: "evidence_openai_full_duplex",
+    scene: "full_duplex",
+    sourceId: "src_openai_article",
+    assetPath: "evidence/openai-gpt-live-full-duplex.png",
+    canonicalUrl: "https://openai.com/index/introducing-gpt-live/",
+    displayUrl: "OPENAI.COM / GPT-LIVE",
+    publisher: "OpenAI",
+    sourceType: "primary",
+    playbackDecision: "captured_source",
+    placement: "left",
+    takeaway: "Listen and speak at the same time.",
+    detail: "This is why GPT-Live feels like a call instead of a walkie-talkie.",
+    focalRect: { x: 0.18, y: 0.18, width: 0.64, height: 0.34 },
+    youtubeDescription: true
+  },
+  {
+    id: "evidence_toms_guide_translation",
+    scene: "evidence",
+    sourceId: "src_toms_guide",
+    assetPath: "evidence/toms-guide-world-cup-translation.png",
+    canonicalUrl:
+      "https://www.tomsguide.com/ai/i-used-chatgpts-new-voice-mode-to-translate-the-world-cup-in-real-time-heres-what-happened",
+    displayUrl: "TOMSGUIDE.COM / AI",
+    publisher: "Tom's Guide",
+    sourceType: "reporting",
+    playbackDecision: "captured_source",
+    placement: "right",
+    takeaway: "A live broadcast became continuous interpretation.",
+    detail: "Tom's Guide reported English interpretation over rapid Spanish commentary.",
+    focalRect: { x: 0.08, y: 0.22, width: 0.78, height: 0.46 },
+    youtubeDescription: true
+  },
+  {
+    id: "evidence_openai_availability",
+    scene: "availability",
+    sourceId: "src_openai_help",
+    assetPath: "evidence/openai-chatgpt-voice-availability.png",
+    canonicalUrl: "https://help.openai.com/en/articles/20001274/",
+    displayUrl: "HELP.OPENAI.COM / CHATGPT VOICE",
+    publisher: "OpenAI Help Center",
+    sourceType: "primary",
+    playbackDecision: "captured_source",
+    placement: "left",
+    takeaway: "Free gets mini. Paid plans get GPT-Live-1.",
+    detail: "Launch access and limitations remain visible beside the explanation.",
+    focalRect: { x: 0.12, y: 0.18, width: 0.76, height: 0.5 },
+    youtubeDescription: true
+  },
+  {
+    id: "evidence_openai_realtime",
+    scene: "future",
+    sourceId: "src_openai_realtime",
+    assetPath: "evidence/openai-realtime-future.png",
+    canonicalUrl:
+      "https://openai.com/index/advancing-voice-intelligence-with-new-models-in-the-api/",
+    displayUrl: "OPENAI.COM / REALTIME",
+    publisher: "OpenAI",
+    sourceType: "primary",
+    playbackDecision: "captured_source",
+    placement: "right",
+    takeaway: "Voice becomes an interface for action.",
+    detail:
+      "Realtime tools point toward scheduling, support, travel changes, and multilingual work.",
+    focalRect: { x: 0.08, y: 0.2, width: 0.82, height: 0.48 },
+    youtubeDescription: true
+  }
+] as const satisfies readonly EvidenceSpec[];
+
 export const GPT_LIVE_TIMELINE = deepFreeze([
   CLIP_TRANSLATION,
   NARRATION_HOOK,
@@ -411,16 +600,30 @@ const GPT_LIVE_CONTENT_MANIFEST = {
   claims: GPT_LIVE_CLAIMS,
   narration: GPT_LIVE_NARRATION,
   timeline: GPT_LIVE_TIMELINE,
+  evidence: GPT_LIVE_EVIDENCE,
+  audio: {
+    introMusic: false,
+    bodyMusic: false,
+    outroMusicPath:
+      "/Users/dennywii/Documents/dev/aimh-video-engine/assets/music/Outro_Much_Higher_Causmic.mp3",
+    outroDurationSeconds: 7
+  },
   branding: {
     logoPath: "/Users/dennywii/Documents/dev/aimh-video-engine/assets/logo.png",
     width: 150,
     marginTop: 24,
     marginRight: 24,
     opacity: 0.85
-  },
-  musicPath: "/Users/dennywii/Documents/dev/aimh-video-engine/assets/music/Body_Komorebi_Futuremono.mp3"
+  }
 } as const satisfies GptLiveProduction;
 
 validateProductionManifest(GPT_LIVE_CONTENT_MANIFEST);
 
-export const GPT_LIVE_CONTENT = deepFreeze(GPT_LIVE_CONTENT_MANIFEST);
+// Allows downstream migration tasks to type-check without restoring musicPath to the manifest.
+type GptLiveContentCompatibility = typeof GPT_LIVE_CONTENT_MANIFEST & {
+  readonly musicPath: string;
+};
+
+export const GPT_LIVE_CONTENT = deepFreeze(
+  GPT_LIVE_CONTENT_MANIFEST
+) as GptLiveContentCompatibility;

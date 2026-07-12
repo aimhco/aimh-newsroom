@@ -11,6 +11,40 @@ export type GptLiveScene =
 
 export type TimelineKind = "source_clip" | "narration";
 
+export type EvidenceBandPlacement = "left" | "right" | "top" | "bottom";
+
+export interface EvidenceFocalRect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface EvidenceSpec {
+  readonly id: string;
+  readonly scene: GptLiveScene;
+  readonly sourceId: string;
+  readonly assetPath: string;
+  readonly canonicalUrl: string;
+  readonly mediaUrl?: string;
+  readonly displayUrl: string;
+  readonly publisher: string;
+  readonly sourceType: "primary" | "reporting" | "social" | "third_party_video";
+  readonly playbackDecision: "full_screen_original_audio" | "captured_source";
+  readonly placement: EvidenceBandPlacement;
+  readonly takeaway: string;
+  readonly detail: string;
+  readonly focalRect: EvidenceFocalRect;
+  readonly youtubeDescription: boolean;
+}
+
+export interface AudioPolicy {
+  readonly introMusic: false;
+  readonly bodyMusic: false;
+  readonly outroMusicPath: string;
+  readonly outroDurationSeconds: number;
+}
+
 export interface ProductionSource {
   readonly id: string;
   readonly title: string;
@@ -128,6 +162,8 @@ export interface GptLiveProduction {
   readonly claims: readonly ProductionClaim[];
   readonly narration: readonly NarrationSpec[];
   readonly timeline: readonly TimelineItem[];
+  readonly evidence: readonly EvidenceSpec[];
+  readonly audio: AudioPolicy;
   readonly branding: {
     readonly logoPath: string;
     readonly width: number;
@@ -135,7 +171,6 @@ export interface GptLiveProduction {
     readonly marginRight: number;
     readonly opacity: number;
   };
-  readonly musicPath: string;
 }
 
 export interface TellaProductionState {
