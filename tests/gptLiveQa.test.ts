@@ -55,7 +55,7 @@ import {
   renderComparisonMarkdown
 } from "../src/production/gptLive/qa/visual";
 import { assertSafeSourceManifestUrl } from "../src/production/gptLive/qa/validation";
-import { buildTellaPlan } from "../src/production/gptLive/tellaPlan";
+import { buildTellaPlan, type TellaPlan } from "../src/production/gptLive/tellaPlan";
 import {
   SOURCE_FULLSCREEN_SSIM_THRESHOLD,
   buildSourceFullscreenTiming,
@@ -1876,10 +1876,10 @@ describe("GPT-Live full production QA", () => {
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/timeline audit/i);
   });
 
-  it("accepts the documented 100ms narration layout duration tolerance", () => {
+  it("accepts a narration layout up to 100ms shorter than its containing clip", () => {
     const snapshot = validSnapshot();
     const audit = (snapshot.tellaState as Record<string, any>).timelineAudit;
-    audit.narrationLayouts.dynamic_editorial[0].durationMs += 100;
+    audit.narrationLayouts.dynamic_editorial[0].durationMs -= 100;
     const refreshedFullscreen = deriveSourceFullscreenExpectations(
       snapshot.plan,
       buildSourceFullscreenTiming(snapshot.tellaExportReceipt, audit)
@@ -1893,6 +1893,15 @@ describe("GPT-Live full production QA", () => {
     snapshot.observedSourceFullscreen = structuredClone(refreshedFullscreen);
 
     expect(() => validateGptLiveQaSnapshot(snapshot)).not.toThrow();
+  });
+
+  it("rejects a narration layout longer than its containing clip", () => {
+    const snapshot = validSnapshot();
+    const audit = (snapshot.tellaState as Record<string, any>).timelineAudit;
+    audit.narrationLayouts.dynamic_editorial[0].durationMs =
+      audit.narrationLayouts.dynamic_editorial[0].clipDurationMs + 1;
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/timeline audit/i);
   });
 
   it("builds and validates the exact timeline audit from queried Tella state maps", () => {
@@ -1984,64 +1993,85 @@ describe("GPT-Live full production QA", () => {
       .toEqual(Object.values(narrationLayoutDurationMs.dynamic_editorial));
   });
 
-  it("keeps queried narration clip and shorter layout durations distinct", () => {
-    const snapshot = validSnapshot();
-    const state = snapshot.tellaState as TellaStateForTimelineAudit;
-    const narrationClips = snapshot.plan.clips.filter((clip) => clip.kind === "narration");
-    const sourceClips = snapshot.plan.clips.filter((clip) => clip.kind === "source_clip");
-    const narrationClipDurationMs = Object.fromEntries(
+  it("accepts the exact queried 176.582-second GPT-Live Tella timing shape", () => {
+    const actualPlan = {
+      clips: [
+        { id: "clip_translation", kind: "source_clip", durationSeconds: 12.35 },
+        { id: "narration_hook", kind: "narration", durationSeconds: 11.145578 },
+        { id: "clip_interruption", kind: "source_clip", durationSeconds: 11.96 },
+        { id: "narration_full_duplex", kind: "narration", durationSeconds: 22.941315 },
+        { id: "narration_use_cases", kind: "narration", durationSeconds: 28.932063 },
+        { id: "narration_evidence", kind: "narration", durationSeconds: 17.925805 },
+        { id: "narration_availability", kind: "narration", durationSeconds: 24.798912 },
+        { id: "narration_future", kind: "narration", durationSeconds: 23.637914 },
+        { id: "narration_cta", kind: "narration", durationSeconds: 22.894875 }
+      ] as const
+    };
+    const narrationIds = actualPlan.clips
+      .filter((clip) => clip.kind === "narration")
+      .map((clip) => clip.id);
+    const allIds = actualPlan.clips.map((clip) => clip.id);
+    const state: TellaStateForTimelineAudit = {
+      variantVideoIds: {
+        dynamic_editorial: "video-dynamic",
+        aimh_visual_host: "video-host"
+      },
+      variantClipIds: Object.fromEntries(GPT_LIVE_CONTENT.variants.map((variant) => [
+        variant,
+        Object.fromEntries(allIds.map((id) => [id, `${variant}-${id}`]))
+      ])) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, string>>,
+      sourceIds: Object.fromEntries([
+        ...allIds.map((id) => [id, `source-${id}`]),
+        ...GPT_LIVE_CONTENT.variants.flatMap((variant) => narrationIds.map((id) => [
+          `plate:${variant}:${id}`,
+          `plate-${variant}-${id}`
+        ]))
+      ]),
+      layoutIds: Object.fromEntries(GPT_LIVE_CONTENT.variants.flatMap((variant) =>
+        narrationIds.map((id) => [`${variant}:${id}`, `layout-${variant}-${id}`])
+      ))
+    };
+    const narrationClipValues = [11_145, 22_941, 28_932, 17_925, 24_798, 23_637, 22_894];
+    const narrationLayoutValues = [11_095, 22_891, 28_882, 17_925, 24_748, 23_637, 22_844];
+    const perVariantMap = (values: readonly number[]) => Object.fromEntries(
       GPT_LIVE_CONTENT.variants.map((variant) => [
         variant,
-        Object.fromEntries(narrationClips.map((clip) => [
-          clip.id,
-          Math.floor(clip.durationSeconds * 1_000)
-        ]))
+        Object.fromEntries(narrationIds.map((id, index) => [id, values[index]!]))
       ])
     ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>;
-    const narrationLayoutDurationMs = Object.fromEntries(
-      GPT_LIVE_CONTENT.variants.map((variant) => [
-        variant,
-        Object.fromEntries(narrationClips.map((clip, index) => [
-          clip.id,
-          Math.floor(clip.durationSeconds * 1_000) - (index % 2 === 0 ? 50 : 0)
-        ]))
-      ])
-    ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>;
-    const sourceClipDurationMs = Object.fromEntries(
-      GPT_LIVE_CONTENT.variants.map((variant) => [
-        variant,
-        Object.fromEntries(sourceClips.map((clip) => [
-          clip.id,
-          Math.floor(clip.durationSeconds * 1_000)
-        ]))
-      ])
-    ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>;
-    const remoteStoryDurationMs = Object.fromEntries(
-      GPT_LIVE_CONTENT.variants.map((variant) => [
-        variant,
-        Object.values(narrationClipDurationMs[variant]).reduce((total, value) => total + value, 0) +
-          Object.values(sourceClipDurationMs[variant]).reduce((total, value) => total + value, 0)
-      ])
-    ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], number>;
+    const sourceClipDurationMs = {
+      dynamic_editorial: { clip_translation: 12_350, clip_interruption: 11_960 },
+      aimh_visual_host: { clip_translation: 12_350, clip_interruption: 11_960 }
+    };
 
     const audit = buildTellaTimelineAudit({
-      plan: snapshot.plan,
+      plan: actualPlan,
       state,
-      remoteStoryDurationMs,
-      narrationClipDurationMs,
-      narrationLayoutDurationMs,
+      remoteStoryDurationMs: {
+        dynamic_editorial: 176_582,
+        aimh_visual_host: 176_582
+      },
+      narrationClipDurationMs: perVariantMap(narrationClipValues),
+      narrationLayoutDurationMs: perVariantMap(narrationLayoutValues),
       sourceClipDurationMs
-    } as any);
+    });
 
-    expect(audit.narrationLayouts.dynamic_editorial.map((layout) => ({
-      clipDurationMs: (layout as any).clipDurationMs,
-      durationMs: layout.durationMs
-    }))).toEqual(narrationClips.map((clip, index) => ({
-      clipDurationMs: Math.floor(clip.durationSeconds * 1_000),
-      durationMs: Math.floor(clip.durationSeconds * 1_000) - (index % 2 === 0 ? 50 : 0)
-    })));
-    expect(validateTellaTimelineAudit(snapshot.plan, { ...state, timelineAudit: audit }))
+    expect(validateTellaTimelineAudit(actualPlan, { ...state, timelineAudit: audit }))
       .toEqual(audit);
+    expect(audit.narrationLayouts.dynamic_editorial.map(({ clipDurationMs, durationMs }) => ({
+      clipDurationMs,
+      durationMs
+    }))).toEqual(narrationClipValues.map((clipDurationMs, index) => ({
+      clipDurationMs,
+      durationMs: narrationLayoutValues[index]
+    })));
+    const expectations = deriveSourceFullscreenExpectations(
+      actualPlan as unknown as TellaPlan,
+      buildSourceFullscreenTiming(validSnapshot().tellaExportReceipt, audit)
+    );
+    expect(expectations.find(({ version, clipId, sampleFraction }) =>
+      version === "version-a" && clipId === "clip_interruption" && sampleFraction === 0.5
+    )?.exportTimeSeconds).toBe(29.475);
   });
 
   it("rejects a remote URL nested in the timeline audit", () => {
