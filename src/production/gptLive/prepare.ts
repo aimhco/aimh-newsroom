@@ -26,6 +26,7 @@ import {
   buildPreparationFingerprint,
   derivePreparedArtifactDescriptors,
   hashPreparedArtifactDescriptors,
+  type PreparedArtifactDescriptor,
   type ReadPreparedArtifactBytes
 } from "./preparation";
 import {
@@ -158,6 +159,28 @@ const runPreflight = async (
     await access(outroMusicPath, constants.R_OK);
   } catch {
     throw new Error("GPT-Live preflight failed: AIMH outro music is not readable");
+  }
+};
+
+const validateAbsolutePreparedArtifacts = async (
+  artifacts: readonly PreparedArtifactDescriptor[],
+  lstat: typeof defaultLstat
+): Promise<void> => {
+  for (const artifact of artifacts.filter((candidate) => isAbsolute(candidate.path))) {
+    let file;
+    try {
+      file = await lstat(artifact.absolutePath);
+    } catch (error) {
+      throw new Error(`Prepared artifact is missing or unreadable: ${artifact.logicalId}`, {
+        cause: error
+      });
+    }
+    if (file.isSymbolicLink()) {
+      throw new Error(`Prepared artifact path must not be a symlink: ${artifact.logicalId}`);
+    }
+    if (file.isDirectory() || !file.isFile()) {
+      throw new Error(`Prepared artifact path is not a regular file: ${artifact.logicalId}`);
+    }
   }
 };
 
@@ -474,6 +497,7 @@ export async function prepareGptLiveProduction(
       .map((artifact) => artifact.absolutePath),
     { lstat, realpath, context: "GPT-Live prepared artifacts" }
   );
+  await validateAbsolutePreparedArtifacts(artifactDescriptors, lstat);
   const artifacts = await hashPreparedArtifactDescriptors(artifactDescriptors, readFileBytes);
   const manifestFingerprint = buildPreparationFingerprint({
     production,

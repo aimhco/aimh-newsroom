@@ -1002,12 +1002,16 @@ describe("GPT-Live production preparation", () => {
 
   it("prepares media, QA-validates a non-default outro, and persists deterministic records", async () => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-prepare-"));
+    const assetDir = await mkdtemp(join(tmpdir(), "gpt-live-prepare-assets-"));
     await materializeEvidenceFixtures(episodeDir);
-    const resolvedOutroPath = "/assets/Outro_Alternate.mp3";
+    const resolvedLogoPath = join(assetDir, "logo.png");
+    const resolvedOutroPath = join(assetDir, "Outro_Alternate.mp3");
+    await writeFile(resolvedLogoPath, "logo-bytes", "utf8");
+    await writeFile(resolvedOutroPath, "outro-bytes", "utf8");
     const prepareEnv = {
       ELEVENLABS_API_KEY: "eleven-secret-do-not-write",
       ELEVENLABS_VOICE_ID: "voice-secret-do-not-write",
-      AIMH_LOGO_PATH: GPT_LIVE_CONTENT.branding.logoPath,
+      AIMH_LOGO_PATH: resolvedLogoPath,
       AIMH_OUTRO_MUSIC_PATH: resolvedOutroPath
     };
     const extractSourceClip = vi.fn(async () => undefined);
@@ -1114,7 +1118,7 @@ describe("GPT-Live production preparation", () => {
 
       expect(JSON.parse(productionText)).toMatchObject({
         id: GPT_LIVE_CONTENT.id,
-        branding: { logoPath: GPT_LIVE_CONTENT.branding.logoPath },
+        branding: { logoPath: resolvedLogoPath },
         evidence: EXPECTED_EVIDENCE,
         audio: { ...EXPECTED_AUDIO, outroMusicPath: resolvedOutroPath }
       });
@@ -1213,8 +1217,58 @@ describe("GPT-Live production preparation", () => {
       expect(result.episodeDir).toBe(episodeDir);
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
+      await rm(assetDir, { recursive: true, force: true });
     }
   });
+
+  it.each(["logo", "outro"] as const)(
+    "rejects an absolute configured %s symlink before hashing prepared artifacts",
+    async (assetKind) => {
+      const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-prepare-asset-link-"));
+      const assetDir = await mkdtemp(join(tmpdir(), "gpt-live-prepare-assets-"));
+      const logoTarget = join(assetDir, "logo-target.png");
+      const outroTarget = join(assetDir, "outro-target.mp3");
+      const linkedAsset = join(assetDir, `${assetKind}-link`);
+      await materializeEvidenceFixtures(episodeDir);
+      await writeFile(logoTarget, "logo-bytes", "utf8");
+      await writeFile(outroTarget, "outro-bytes", "utf8");
+      await symlink(assetKind === "logo" ? logoTarget : outroTarget, linkedAsset);
+      const readFileBytes = vi.fn(async () => new Uint8Array([1, 2, 3]));
+
+      try {
+        await expect(prepareGptLiveProduction(
+          {
+            episodeDir,
+            env: {
+              ELEVENLABS_API_KEY: "test-key",
+              ELEVENLABS_VOICE_ID: "test-voice",
+              AIMH_LOGO_PATH: assetKind === "logo" ? linkedAsset : logoTarget,
+              AIMH_OUTRO_MUSIC_PATH: assetKind === "outro" ? linkedAsset : outroTarget
+            },
+            ffmpegPath: "ffmpeg",
+            ffprobePath: "ffprobe"
+          },
+          {
+            extractSourceClip: async () => undefined,
+            synthesizeNarration: async ({ outDir }) => successfulVoiceResult(outDir),
+            runCommand: async () => ({ stdout: "", stderr: "" }),
+            inspectMediaFile: async (_ffprobePath, path) =>
+              validMediaInspection(durationById.get(basename(path, ".mp4"))!),
+            renderPlates: async () => ({ jobs: [] }),
+            stat: async () => ({ size: 100, isFile: () => true }),
+            readFileBytes
+          }
+        )).rejects.toThrow(/prepared artifact.*symlink|symlink.*prepared artifact/i);
+
+        expect(readFileBytes).not.toHaveBeenCalled();
+        await expect(readFile(join(episodeDir, "reports", "prepared.json"), "utf8"))
+          .rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        await rm(episodeDir, { recursive: true, force: true });
+        await rm(assetDir, { recursive: true, force: true });
+      }
+    }
+  );
 
   it.each([
     {
