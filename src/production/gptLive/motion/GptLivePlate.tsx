@@ -18,9 +18,14 @@ export const evidencePlateLayout = (
   stage: EvidenceStage,
   frameRect: SceneRect,
   contentRect: SceneRect
-): { readonly rect: SceneRect; readonly animateEntrance: boolean } => ({
+): {
+  readonly rect: SceneRect;
+  readonly animateEntrance: boolean;
+  readonly maskReservedTopRight: boolean;
+} => ({
   rect: stage === "establish" ? frameRect : contentRect,
-  animateEntrance: false
+  animateEntrance: false,
+  maskReservedTopRight: stage === "establish"
 });
 
 export const GptLivePlate = (props: GptLivePlateProps) => {
@@ -43,7 +48,7 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
   const frameRect = { x: 0, y: 0, width, height };
   const plateLayout = evidence
     ? evidencePlateLayout(evidenceStage(frame, durationInFrames), frameRect, contentRegion)
-    : { rect: contentRegion, animateEntrance: true };
+    : { rect: contentRegion, animateEntrance: true, maskReservedTopRight: false };
   const entrance = plateLayout.animateEntrance
     ? spring({ frame, fps, config: { damping: 18, stiffness: 130, mass: 0.8 } })
     : 1;
@@ -91,6 +96,19 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
           viewportHeight={plateLayout.rect.height}
         />
       </div>
+      {plateLayout.maskReservedTopRight ? (
+        <div
+          style={{
+            position: "absolute",
+            left: style.reservedTopRight.x,
+            top: style.reservedTopRight.y,
+            width: style.reservedTopRight.width,
+            height: style.reservedTopRight.height,
+            zIndex: 3,
+            background: style.palette.background
+          }}
+        />
+      ) : null}
     </AbsoluteFill>
   );
 };

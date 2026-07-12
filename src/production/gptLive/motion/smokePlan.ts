@@ -1,4 +1,9 @@
 import { GPT_LIVE_CONTENT, GPT_LIVE_VISUAL_CONTENT } from "../content";
+import {
+  evidencePublicAssetPath,
+  type EvidenceAssetDimensions,
+  type EvidenceAssetDimensionsByPath
+} from "../evidence";
 import type { EvidenceSpec, GptLiveVariant, SceneContent } from "../types";
 import { normalizedBeatPlan, SCENE_STATE_COUNTS } from "./beatState";
 import {
@@ -15,6 +20,11 @@ export interface SmokeFramePlanItem {
   readonly frame: number;
   readonly outputName: string;
 }
+
+export const resolveSmokeEvidenceDimensions = (
+  evidence: EvidenceSpec,
+  dimensions: EvidenceAssetDimensionsByPath
+): EvidenceAssetDimensions | undefined => dimensions[evidencePublicAssetPath(evidence)];
 
 const representativeFrame = (content: SceneContent, durationInFrames: number): number => {
   const itemCount = SCENE_STATE_COUNTS[content.scene];

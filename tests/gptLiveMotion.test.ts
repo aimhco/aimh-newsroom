@@ -47,6 +47,7 @@ import {
   buildSmokeFramePlan,
   useCaseTemporalFrames
 } from "../src/production/gptLive/motion/smokePlan";
+import * as smokePlanModule from "../src/production/gptLive/motion/smokePlan";
 import {
   assertPlateContract,
   buildPlateRenderJobs,
@@ -95,9 +96,21 @@ const evidencePlateLayout = (
       stage: "establish" | "explain" | "spotlight",
       frameRect: SceneRect,
       contentRect: SceneRect
-    ) => { readonly rect: SceneRect; readonly animateEntrance: boolean };
+    ) => {
+      readonly rect: SceneRect;
+      readonly animateEntrance: boolean;
+      readonly maskReservedTopRight: boolean;
+    };
   }
 ).evidencePlateLayout;
+const resolveSmokeEvidenceDimensions = (
+  smokePlanModule as unknown as {
+    resolveSmokeEvidenceDimensions?: (
+      evidence: EvidenceSpec,
+      dimensions: Readonly<Record<string, { readonly width: number; readonly height: number }>>
+    ) => { readonly width: number; readonly height: number } | undefined;
+  }
+).resolveSmokeEvidenceDimensions;
 
 const withTimeout = async <T>(
   operation: Promise<T>,
@@ -414,11 +427,13 @@ describe("GPT-Live evidence-first motion contracts", () => {
     const contentRect = { x: 72, y: 90, width: 1580, height: 900 };
     expect(evidencePlateLayout?.("establish", frameRect, contentRect)).toEqual({
       rect: frameRect,
-      animateEntrance: false
+      animateEntrance: false,
+      maskReservedTopRight: true
     });
     expect(evidencePlateLayout?.("explain", frameRect, contentRect)).toEqual({
       rect: contentRect,
-      animateEntrance: false
+      animateEntrance: false,
+      maskReservedTopRight: false
     });
   });
 
@@ -496,6 +511,26 @@ describe("GPT-Live normalized beat scheduling", () => {
 });
 
 describe("GPT-Live rendered smoke planning", () => {
+  it("enforces the rendered safe-area assertion for every smoke stage", () => {
+    const renderSmokeSource = readFileSync(join(MOTION_DIR, "renderSmoke.ts"), "utf8");
+    expect(renderSmokeSource).not.toMatch(/item\.stage\s*!==\s*"establish"/);
+  });
+
+  it("resolves dimensions by the staged public basename for nested evidence", () => {
+    expect(resolveSmokeEvidenceDimensions).toBeTypeOf("function");
+    const evidence = {
+      ...GPT_LIVE_CONTENT.evidence.find(
+        (item) => item.playbackDecision === "captured_source"
+      )!,
+      assetPath: "evidence/nested/capture.png"
+    };
+    expect(
+      resolveSmokeEvidenceDimensions?.(evidence, {
+        "evidence/capture.png": { width: 1280, height: 720 }
+      })
+    ).toEqual({ width: 1280, height: 720 });
+  });
+
   it("plans every evidence stage plus one still for each preserved motion scene", () => {
     const plan = buildSmokeFramePlan(8 * 30);
     expect(plan).toHaveLength(30);

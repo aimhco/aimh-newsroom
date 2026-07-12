@@ -10,6 +10,7 @@ import type { GptLivePlateProps } from "./Root";
 import {
   assertUniformSafeAreaMetadata,
   buildSmokeFramePlan,
+  resolveSmokeEvidenceDimensions,
   useCaseTemporalFrames
 } from "./smokePlan";
 
@@ -124,7 +125,7 @@ export async function renderGptLiveMotionSmoke(
     for (const item of buildSmokeFramePlan(DURATION_IN_FRAMES)) {
       const output = join(framesDir, item.outputName);
       const dimensions = item.evidence
-        ? stagedEvidence.dimensions[item.evidence.assetPath]
+        ? resolveSmokeEvidenceDimensions(item.evidence, stagedEvidence.dimensions)
         : undefined;
       if (item.evidence && !dimensions) {
         throw new Error(`Missing smoke evidence dimensions: ${item.evidence.id}`);
@@ -143,9 +144,7 @@ export async function renderGptLiveMotionSmoke(
             }
           : {})
       });
-      if (item.stage !== "establish") {
-        await assertRenderedSafeArea(ffmpegPath, output);
-      }
+      await assertRenderedSafeArea(ffmpegPath, output);
     }
 
     for (const [index, frame] of useCaseTemporalFrames(DURATION_IN_FRAMES).entries()) {
