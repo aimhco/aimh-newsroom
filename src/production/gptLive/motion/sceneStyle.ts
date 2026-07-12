@@ -38,8 +38,8 @@ export interface GptLiveSceneStyle {
   readonly maxStaticFrames: number;
   readonly beatFrames: readonly number[];
   readonly palette: ScenePalette;
-  readonly layout: "kinetic_full_frame" | "anchored_host_rail";
-  readonly motion: "editorial_cuts" | "responsive_voice_rail";
+  readonly layout: "evidence_editorial";
+  readonly motion: "editorial_cuts";
 }
 
 const RESERVED_TOP_RIGHT: SceneRect = Object.freeze({
@@ -49,24 +49,14 @@ const RESERVED_TOP_RIGHT: SceneRect = Object.freeze({
   height: 198
 });
 
-const DYNAMIC_PALETTE: ScenePalette = Object.freeze({
-  background: "#0B0C0E",
-  foreground: "#F7F4EE",
-  paper: "#E9E6DF",
-  signal: "#FF625B",
-  accent: "#32DED0",
-  support: "#C8F75A",
-  muted: "#8E9694"
-});
-
-const HOST_PALETTE: ScenePalette = Object.freeze({
-  background: "#F1F3F0",
-  foreground: "#101315",
+const EVIDENCE_PALETTE: ScenePalette = Object.freeze({
+  background: "#F7F8F6",
+  foreground: "#111315",
   paper: "#FFFFFF",
-  signal: "#D94B44",
-  accent: "#007C75",
+  signal: "#E85B50",
+  accent: "#3E8F86",
   support: "#5E8500",
-  muted: "#69726F"
+  muted: "#6E7472"
 });
 
 const BEATS: Readonly<Record<GptLiveScene, readonly number[]>> = Object.freeze({
@@ -83,24 +73,18 @@ export function sceneStyle(
   variant: GptLiveVariant,
   scene: GptLiveScene
 ): GptLiveSceneStyle {
-  const persistentHost = variant === "aimh_visual_host";
-  const mainRegion: SceneRect = persistentHost
-    ? { x: 250, y: 90, width: 1400, height: 900 }
-    : { x: 72, y: 90, width: 1580, height: 900 };
-  const contentRegions: SceneRect[] = persistentHost
-    ? [mainRegion, { x: 42, y: 224, width: 138, height: 786 }]
-    : [mainRegion];
+  const mainRegion: SceneRect = { x: 72, y: 90, width: 1580, height: 900 };
 
   return {
     variant,
     scene,
-    persistentHost,
+    persistentHost: false,
     reservedTopRight: { ...RESERVED_TOP_RIGHT },
-    contentRegions,
+    contentRegions: [mainRegion],
     maxStaticFrames: 180,
     beatFrames: [...BEATS[scene]],
-    palette: { ...(persistentHost ? HOST_PALETTE : DYNAMIC_PALETTE) },
-    layout: persistentHost ? "anchored_host_rail" : "kinetic_full_frame",
-    motion: persistentHost ? "responsive_voice_rail" : "editorial_cuts"
+    palette: { ...EVIDENCE_PALETTE },
+    layout: "evidence_editorial",
+    motion: "editorial_cuts"
   };
 }

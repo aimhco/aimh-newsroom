@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import {
   AbsoluteFill,
-  Sequence,
   spring,
   useCurrentFrame,
   useDelayRender,
@@ -10,8 +9,8 @@ import {
 import type { GptLivePlateProps } from "./Root";
 import { SceneRenderer } from "./SceneRenderer";
 import { sceneStateIndex } from "./beatState";
+import { resolveEvidenceAssetUrl } from "./evidenceAsset";
 import { MOTION_SANS_FONT } from "./fonts";
-import { HostRail, labelStyle } from "./scenePrimitives";
 import { sceneStyle } from "./sceneStyle";
 
 export const GptLivePlate = (props: GptLivePlateProps) => {
@@ -26,9 +25,14 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
   const { fps, width, height, durationInFrames } = useVideoConfig();
   const content = props.sceneContent;
   const style = sceneStyle(props.variant, content.scene);
-  const entrance = spring({ frame, fps, config: { damping: 18, stiffness: 130, mass: 0.8 } });
-  const contentLeft = style.persistentHost ? 250 : 72;
-  const contentWidth = style.persistentHost ? 1400 : 1580;
+  const contentRegion = style.contentRegions[0]!;
+  const evidence =
+    props.evidence?.playbackDecision === "captured_source"
+      ? { ...props.evidence, assetUrl: resolveEvidenceAssetUrl(props.evidence.assetPath) }
+      : undefined;
+  const entrance = evidence
+    ? 1
+    : spring({ frame, fps, config: { damping: 18, stiffness: 130, mass: 0.8 } });
   const stateIndex = sceneStateIndex(
     content.scene,
     frame,
@@ -51,10 +55,10 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
       <div
         style={{
           position: "absolute",
-          left: contentLeft,
-          top: 90,
-          width: contentWidth,
-          height: 900,
+          left: contentRegion.x,
+          top: contentRegion.y,
+          width: contentRegion.width,
+          height: contentRegion.height,
           boxSizing: "border-box",
           transform: `translateX(${(1 - entrance) * -28}px)`,
           opacity: entrance
@@ -66,25 +70,9 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
           frame={frame}
           stateIndex={stateIndex}
           durationInFrames={durationInFrames}
+          evidence={evidence}
         />
       </div>
-      {style.persistentHost ? <HostRail palette={style.palette} frame={frame} /> : null}
-      <Sequence from={Math.min(45, Math.max(0, durationInFrames - 1))}>
-        <div
-          style={{
-            position: "absolute",
-            left: contentLeft,
-            bottom: 28,
-            width: contentWidth,
-            display: "flex",
-            justifyContent: "space-between",
-            ...labelStyle(style.palette)
-          }}
-        >
-          <span>{content.narrationId.replace("narration_", "PLATE / ")}</span>
-          <span>{style.persistentHost ? "AIMH VISUAL HOST" : "DYNAMIC EDITORIAL"}</span>
-        </div>
-      </Sequence>
     </AbsoluteFill>
   );
 };

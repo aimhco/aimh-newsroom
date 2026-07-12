@@ -24,7 +24,7 @@ export const calculateGptLivePlateMetadata = async ({ props }: { props: GptLiveP
     throw new Error("durationSeconds must be finite and positive");
   }
   return {
-    durationInFrames: Math.max(1, Math.round(props.durationSeconds * 30)),
+    durationInFrames: Math.max(1, Math.ceil(props.durationSeconds * 30)),
     fps: 30,
     width: 1920,
     height: 1080,

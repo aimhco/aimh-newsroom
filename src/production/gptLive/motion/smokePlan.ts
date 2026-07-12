@@ -1,11 +1,12 @@
 import { GPT_LIVE_CONTENT, GPT_LIVE_VISUAL_CONTENT } from "../content";
-import type { GptLiveVariant, SceneContent } from "../types";
+import type { EvidenceSpec, GptLiveVariant, SceneContent } from "../types";
 import { normalizedBeatPlan, SCENE_STATE_COUNTS } from "./beatState";
 import { GPT_LIVE_SCENES } from "./sceneStyle";
 
 export interface SmokeFramePlanItem {
   readonly variant: GptLiveVariant;
   readonly sceneContent: SceneContent;
+  readonly evidence?: EvidenceSpec;
   readonly frame: number;
   readonly outputName: string;
 }
@@ -24,9 +25,13 @@ export function buildSmokeFramePlan(durationInFrames: number): readonly SmokeFra
   return GPT_LIVE_CONTENT.variants.flatMap((variant) =>
     GPT_LIVE_SCENES.map((scene) => {
       const sceneContent = GPT_LIVE_VISUAL_CONTENT[scene];
+      const evidence = GPT_LIVE_CONTENT.evidence.find(
+        (item) => item.scene === scene && item.playbackDecision === "captured_source"
+      );
       return {
         variant,
         sceneContent,
+        ...(evidence ? { evidence } : {}),
         frame: representativeFrame(sceneContent, durationInFrames),
         outputName: `${variant}-${scene}.png`
       };

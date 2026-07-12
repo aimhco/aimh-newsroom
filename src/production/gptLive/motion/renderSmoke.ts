@@ -1,10 +1,11 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { bundle } from "@remotion/bundler";
 import { renderStill, selectComposition } from "@remotion/renderer";
 import { runCommand } from "../../../render/process";
 import { GPT_LIVE_VISUAL_CONTENT } from "../content";
+import { stageEvidencePublicAssets } from "../evidence";
 import type { GptLivePlateProps } from "./Root";
 import {
   assertUniformSafeAreaMetadata,
@@ -15,6 +16,9 @@ import {
 const DURATION_SECONDS = 8;
 const DURATION_IN_FRAMES = DURATION_SECONDS * 30;
 const DEFAULT_OUTPUT_DIR = "/tmp/gpt-live-motion-acceptance";
+const DEFAULT_EPISODE_DIR = fileURLToPath(
+  new URL("../../../../episodes/2026-07-10-gpt-live-tella-ab/", import.meta.url)
+);
 
 const assertRenderedSafeArea = async (ffmpegPath: string, file: string): Promise<void> => {
   const result = await runCommand(ffmpegPath, [
@@ -102,41 +106,49 @@ const createTemporalStrip = async (ffmpegPath: string, outputDir: string): Promi
 
 export async function renderGptLiveMotionSmoke(
   outputDir = DEFAULT_OUTPUT_DIR,
-  ffmpegPath = process.env.FFMPEG_PATH ?? "ffmpeg"
+  ffmpegPath = process.env.FFMPEG_PATH ?? "ffmpeg",
+  episodeDir = DEFAULT_EPISODE_DIR
 ): Promise<{ readonly contactSheetPath: string; readonly temporalStripPath: string }> {
   const framesDir = join(outputDir, "frames");
   const useCasesDir = join(outputDir, "use-cases");
   await rm(outputDir, { recursive: true, force: true });
   await mkdir(framesDir, { recursive: true });
   await mkdir(useCasesDir, { recursive: true });
-  const serveUrl = await bundle({
-    entryPoint: new URL("./Root.tsx", import.meta.url).pathname
-  });
-
-  for (const item of buildSmokeFramePlan(DURATION_IN_FRAMES)) {
-    const output = join(framesDir, item.outputName);
-    await renderFrame(serveUrl, output, item.frame, {
-      variant: item.variant,
-      durationSeconds: DURATION_SECONDS,
-      sceneContent: item.sceneContent
+  const stagedEvidence = await stageEvidencePublicAssets(episodeDir);
+  try {
+    const serveUrl = await bundle({
+      entryPoint: new URL("./Root.tsx", import.meta.url).pathname,
+      publicDir: stagedEvidence.publicDir
     });
-    await assertRenderedSafeArea(ffmpegPath, output);
-  }
 
-  for (const [index, frame] of useCaseTemporalFrames(DURATION_IN_FRAMES).entries()) {
-    const output = join(useCasesDir, `${String(index + 1).padStart(2, "0")}.png`);
-    await renderFrame(serveUrl, output, frame, {
-      variant: "dynamic_editorial",
-      durationSeconds: DURATION_SECONDS,
-      sceneContent: GPT_LIVE_VISUAL_CONTENT.use_cases
-    });
-    await assertRenderedSafeArea(ffmpegPath, output);
-  }
+    for (const item of buildSmokeFramePlan(DURATION_IN_FRAMES)) {
+      const output = join(framesDir, item.outputName);
+      await renderFrame(serveUrl, output, item.frame, {
+        variant: item.variant,
+        durationSeconds: DURATION_SECONDS,
+        sceneContent: item.sceneContent,
+        ...(item.evidence ? { evidence: item.evidence } : {})
+      });
+      await assertRenderedSafeArea(ffmpegPath, output);
+    }
 
-  return {
-    contactSheetPath: await createContactSheet(ffmpegPath, outputDir),
-    temporalStripPath: await createTemporalStrip(ffmpegPath, outputDir)
-  };
+    for (const [index, frame] of useCaseTemporalFrames(DURATION_IN_FRAMES).entries()) {
+      const output = join(useCasesDir, `${String(index + 1).padStart(2, "0")}.png`);
+      await renderFrame(serveUrl, output, frame, {
+        variant: "dynamic_editorial",
+        durationSeconds: DURATION_SECONDS,
+        sceneContent: GPT_LIVE_VISUAL_CONTENT.use_cases
+      });
+      await assertRenderedSafeArea(ffmpegPath, output);
+    }
+
+    return {
+      contactSheetPath: await createContactSheet(ffmpegPath, outputDir),
+      temporalStripPath: await createTemporalStrip(ffmpegPath, outputDir)
+    };
+  } finally {
+    await stagedEvidence.cleanup();
+  }
 }
 
 const isDirectExecution = (): boolean => {
