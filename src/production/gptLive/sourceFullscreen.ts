@@ -25,6 +25,7 @@ export interface BuildSourceFullscreenSsimArgsOptions {
   readonly sourcePath: string;
   readonly exportTimeSeconds: number;
   readonly sourceTimeSeconds: number;
+  readonly sourceFrameOffset?: -2 | -1 | 0 | 1 | 2;
 }
 
 export interface VerifySourceFullscreenOptions {
@@ -45,6 +46,7 @@ export interface SourceFullscreenDependencies {
 
 const VERSIONS = ["version-a", "version-b"] as const;
 const SAMPLE_FRACTIONS = [0.1, 0.5, 0.9] as const;
+const SOURCE_FRAME_OFFSETS = [-2, -1, 0, 1, 2] as const;
 const EVIDENCE_KEYS = [
   "version",
   "clipId",
@@ -153,7 +155,10 @@ export function buildSourceFullscreenSsimArgs(
   options: BuildSourceFullscreenSsimArgsOptions
 ): string[] {
   const exportFrameIndex = frameIndexAt30Fps(options.exportTimeSeconds);
-  const sourceFrameIndex = frameIndexAt30Fps(options.sourceTimeSeconds);
+  const sourceFrameIndex = Math.max(
+    0,
+    frameIndexAt30Fps(options.sourceTimeSeconds) + (options.sourceFrameOffset ?? 0)
+  );
   return [
     "-hide_banner", "-loglevel", "info",
     "-i", options.exportPath,
@@ -183,13 +188,17 @@ export async function measureSourceFullscreenSsim(
   sourceTimeSeconds: number,
   runCommand: typeof defaultRunCommand = defaultRunCommand
 ): Promise<number> {
-  const result = await runCommand(ffmpegPath, buildSourceFullscreenSsimArgs({
-    exportPath,
-    sourcePath,
-    exportTimeSeconds,
-    sourceTimeSeconds
+  const scores = await Promise.all(SOURCE_FRAME_OFFSETS.map(async (sourceFrameOffset) => {
+    const result = await runCommand(ffmpegPath, buildSourceFullscreenSsimArgs({
+      exportPath,
+      sourcePath,
+      exportTimeSeconds,
+      sourceTimeSeconds,
+      sourceFrameOffset
+    }));
+    return parseSourceFullscreenSsim(`${result.stdout}\n${result.stderr}`);
   }));
-  return parseSourceFullscreenSsim(`${result.stdout}\n${result.stderr}`);
+  return Math.max(...scores);
 }
 
 export function assertSourceFullscreenEvidence(

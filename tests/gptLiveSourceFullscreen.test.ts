@@ -164,6 +164,28 @@ describe("GPT-Live source fullscreen verification", () => {
     expect(() => parseSourceFullscreenSsim("no metric")).toThrow(/SSIM/i);
   });
 
+  it("uses the best SSIM within a deterministic two-frame source window", async () => {
+    const command = vi.fn(async (_command: string, args: string[]) => {
+      const filter = args[args.indexOf("-filter_complex") + 1]!;
+      const sourceFrame = Number([...filter.matchAll(/select='eq\(n,(\d+)\)'/g)][1]?.[1]);
+      const score = sourceFrame === 321 ? 0.992247 : 0.763381;
+      return { stdout: "", stderr: `All:${score}` };
+    });
+
+    await expect(measureSourceFullscreenSsim(
+      "ffmpeg",
+      "/episode/export.mp4",
+      "/episode/source.mp4",
+      34.259,
+      10.764,
+      command
+    )).resolves.toBe(0.992247);
+    expect(command).toHaveBeenCalledTimes(5);
+    expect(command.mock.calls.map(([, args]) =>
+      [...args[args.indexOf("-filter_complex") + 1]!.matchAll(/select='eq\(n,(\d+)\)'/g)][1]?.[1]
+    )).toEqual(["321", "322", "323", "324", "325"]);
+  });
+
   it("orchestrates every expected source/version pair in deterministic order", async () => {
     const command = vi.fn(async (_command: string, _args: string[]) => ({
       stdout: "",
@@ -180,13 +202,13 @@ describe("GPT-Live source fullscreen verification", () => {
     }, { runCommand: command });
 
     expect(result).toEqual(evidence().map((record) => ({ ...record, ssim: 0.931 })));
-    expect(command).toHaveBeenCalledTimes(12);
-    expect(command.mock.calls[3]?.[1]).toEqual(expect.arrayContaining([
+    expect(command).toHaveBeenCalledTimes(60);
+    expect(command.mock.calls[17]?.[1]).toEqual(expect.arrayContaining([
       "/episode/exports/tella-a.mp4",
       "/episode/source/source-two.mp4",
       expect.stringContaining("select='eq(n,276)'")
     ]));
-    expect(command.mock.calls[3]?.[1]).toEqual(expect.arrayContaining([
+    expect(command.mock.calls[17]?.[1]).toEqual(expect.arrayContaining([
       expect.stringContaining("select='eq(n,6)'")
     ]));
   });
