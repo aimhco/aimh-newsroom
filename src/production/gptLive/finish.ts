@@ -637,7 +637,7 @@ const safeVariantPath = (directory: "exports" | "final", file: string): string =
   `${directory}/${basename(file)}`;
 
 export function buildPostProductionManifest(options: BuildPostProductionManifestOptions) {
-  const programDurationSeconds = options.variants[0]?.inputDurationSeconds ?? 0;
+  const programDurationSeconds = options.variants[0]?.outputDurationSeconds ?? 0;
   requirePositiveDuration(programDurationSeconds, "post-production program");
   requirePositiveDuration(options.outroDurationSeconds, "outro music");
   const outroDurationSeconds = roundedSeconds(
@@ -708,7 +708,10 @@ export function buildPostProductionManifest(options: BuildPostProductionManifest
 
 interface PublishedVariantRecord {
   readonly name: "version-a" | "version-b";
+  readonly inputPath: string;
   readonly outputPath: string;
+  readonly inputDurationSeconds: number;
+  readonly outputDurationSeconds: number;
   readonly sha256: string;
   readonly byteSize: number;
 }
@@ -731,59 +734,230 @@ interface PublishedGenerationManifest {
   readonly variants: readonly PublishedVariantRecord[];
 }
 
-const parsePublishedGenerationManifest = (text: string): PublishedGenerationManifest => {
+interface PublishedAudioContract {
+  readonly productionId: string;
+  readonly outroFile: string;
+  readonly outroDurationSeconds: number;
+}
+
+const PUBLISHED_MANIFEST_KEYS = [
+  "schemaVersion",
+  "status",
+  "productionId",
+  "generationId",
+  "assets",
+  "audioPolicy",
+  "settings",
+  "sourceDialogue",
+  "logoEvidence",
+  "variants"
+] as const;
+
+const PUBLISHED_SETTINGS_KEYS = [
+  "logoFilter",
+  "exactAudioDuration",
+  "limiter",
+  "videoCodec",
+  "crf",
+  "preset",
+  "pixelFormat",
+  "framesPerSecond",
+  "audioCodec",
+  "audioBitrate",
+  "audioSampleRate",
+  "audioChannels",
+  "faststart",
+  "durationToleranceSeconds",
+  "variantDurationToleranceSeconds"
+] as const;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+const hasExactKeys = (
+  value: Record<string, unknown>,
+  expectedKeys: readonly string[]
+): boolean => {
+  const actualKeys = Object.keys(value);
+  return actualKeys.length === expectedKeys.length &&
+    expectedKeys.every((key) => Object.hasOwn(value, key));
+};
+
+const portableBasename = (file: string): string => basename(file.replaceAll("\\", "/"));
+
+const isSafeBasename = (file: string): boolean =>
+  file.length > 0 && portableBasename(file) === file && file !== "." && file !== "..";
+
+const parsePublishedAudioContract = (text: string): PublishedAudioContract => {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error("Invalid canonical production manifest JSON");
+  }
+  if (!isRecord(value) || value.id !== GPT_LIVE_CONTENT.id || !isRecord(value.audio)) {
+    throw new Error("Invalid canonical production audio contract");
+  }
+  const audio = value.audio;
+  if (
+    !hasExactKeys(audio, [
+      "introMusic",
+      "bodyMusic",
+      "outroMusicPath",
+      "outroDurationSeconds"
+    ]) ||
+    audio.introMusic !== false ||
+    audio.bodyMusic !== false ||
+    typeof audio.outroMusicPath !== "string" ||
+    !audio.outroMusicPath.trim() ||
+    audio.outroDurationSeconds !== GPT_LIVE_CONTENT.audio.outroDurationSeconds
+  ) {
+    throw new Error("Invalid canonical production audio contract");
+  }
+  return {
+    productionId: value.id,
+    outroFile: portableBasename(audio.outroMusicPath),
+    outroDurationSeconds: audio.outroDurationSeconds
+  };
+};
+
+const parsePublishedGenerationManifest = (
+  text: string,
+  expectedAudio: PublishedAudioContract
+): PublishedGenerationManifest => {
   let value: unknown;
   try {
     value = JSON.parse(text);
   } catch {
     throw new Error("Invalid published generation manifest JSON");
   }
-  if (!value || typeof value !== "object") {
+  if (!isRecord(value) || !hasExactKeys(value, PUBLISHED_MANIFEST_KEYS)) {
     throw new Error("Invalid published generation manifest");
   }
-  const candidate = value as Partial<PublishedGenerationManifest>;
+  const candidate = value;
   const audioPolicy = candidate.audioPolicy;
-  const outro = audioPolicy?.outro;
+  const assets = candidate.assets;
+  const settings = candidate.settings;
   if (
     candidate.schemaVersion !== "0.2.0" ||
     candidate.status !== "finished" ||
+    candidate.productionId !== expectedAudio.productionId ||
     typeof candidate.generationId !== "string" ||
     !candidate.generationId ||
-    audioPolicy?.introMusic !== false ||
-    audioPolicy.bodyMusic !== false ||
-    !outro ||
-    typeof outro.file !== "string" ||
-    !outro.file ||
-    basename(outro.file) !== outro.file ||
-    !Number.isFinite(outro.startSeconds) ||
-    outro.startSeconds < 0 ||
-    !Number.isFinite(outro.durationSeconds) ||
-    outro.durationSeconds <= 0 ||
-    outro.fadeInSeconds !== OUTRO_FADE_IN_SECONDS ||
-    outro.fadeOutSeconds !== OUTRO_FADE_OUT_SECONDS ||
+    !isRecord(assets) ||
+    !hasExactKeys(assets, ["logo", "logoSha256"]) ||
+    typeof assets.logo !== "string" ||
+    !isSafeBasename(assets.logo) ||
+    typeof assets.logoSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(assets.logoSha256) ||
+    !isRecord(settings) ||
+    !hasExactKeys(settings, PUBLISHED_SETTINGS_KEYS) ||
+    !isRecord(candidate.sourceDialogue) ||
+    !Array.isArray(candidate.logoEvidence) ||
     !Array.isArray(candidate.variants) ||
     candidate.variants.length !== 2
   ) {
     throw new Error("Invalid published generation manifest");
   }
+  if (
+    !isRecord(audioPolicy) ||
+    !hasExactKeys(audioPolicy, ["introMusic", "bodyMusic", "outro"]) ||
+    audioPolicy.introMusic !== false ||
+    audioPolicy.bodyMusic !== false ||
+    !isRecord(audioPolicy.outro) ||
+    !hasExactKeys(audioPolicy.outro, [
+      "file",
+      "startSeconds",
+      "durationSeconds",
+      "fadeInSeconds",
+      "fadeOutSeconds"
+    ])
+  ) {
+    throw new Error("Invalid published generation manifest audio policy");
+  }
+  const outro = audioPolicy.outro;
+  if (
+    typeof outro.file !== "string" ||
+    !isSafeBasename(outro.file) ||
+    outro.file !== expectedAudio.outroFile ||
+    !Number.isFinite(outro.startSeconds) ||
+    (outro.startSeconds as number) < 0 ||
+    !Number.isFinite(outro.durationSeconds) ||
+    (outro.durationSeconds as number) <= 0 ||
+    outro.fadeInSeconds !== OUTRO_FADE_IN_SECONDS ||
+    outro.fadeOutSeconds !== OUTRO_FADE_OUT_SECONDS
+  ) {
+    throw new Error("Invalid published generation manifest audio policy");
+  }
   const expected = [
-    { name: "version-a", outputPath: "final/version-a.mp4" },
-    { name: "version-b", outputPath: "final/version-b.mp4" }
+    {
+      name: "version-a",
+      inputPath: "exports/tella-a.mp4",
+      outputPath: "final/version-a.mp4"
+    },
+    {
+      name: "version-b",
+      inputPath: "exports/tella-b.mp4",
+      outputPath: "final/version-b.mp4"
+    }
   ] as const;
+  const variants: PublishedVariantRecord[] = [];
   for (const expectation of expected) {
-    const variant = candidate.variants.find(({ name }) => name === expectation.name);
+    const variant = candidate.variants.find(
+      (record) => isRecord(record) && record.name === expectation.name
+    );
     if (
-      !variant ||
+      !isRecord(variant) ||
+      !hasExactKeys(variant, [
+        "name",
+        "inputPath",
+        "outputPath",
+        "inputDurationSeconds",
+        "outputDurationSeconds",
+        "sha256",
+        "byteSize"
+      ]) ||
+      variant.inputPath !== expectation.inputPath ||
       variant.outputPath !== expectation.outputPath ||
+      !Number.isFinite(variant.inputDurationSeconds) ||
+      (variant.inputDurationSeconds as number) <= 0 ||
+      !Number.isFinite(variant.outputDurationSeconds) ||
+      (variant.outputDurationSeconds as number) <= 0 ||
+      Math.abs(
+        (variant.inputDurationSeconds as number) - (variant.outputDurationSeconds as number)
+      ) > DURATION_TOLERANCE_SECONDS ||
       typeof variant.sha256 !== "string" ||
       !/^[a-f0-9]{64}$/.test(variant.sha256) ||
       !Number.isSafeInteger(variant.byteSize) ||
-      variant.byteSize <= 0
+      (variant.byteSize as number) <= 0
     ) {
       throw new Error(`Invalid published generation manifest variant: ${expectation.name}`);
     }
+    variants.push(variant as unknown as PublishedVariantRecord);
   }
-  return candidate as PublishedGenerationManifest;
+  assertVariantDurationParity(
+    variants[0]!.outputDurationSeconds,
+    variants[1]!.outputDurationSeconds
+  );
+  for (const variant of variants) {
+    const expectedDurationSeconds = Math.min(
+      expectedAudio.outroDurationSeconds,
+      variant.outputDurationSeconds
+    );
+    const expectedStartSeconds = Math.max(
+      0,
+      variant.outputDurationSeconds - expectedDurationSeconds
+    );
+    if (
+      Math.abs((outro.durationSeconds as number) - expectedDurationSeconds) >
+        VARIANT_DURATION_TOLERANCE_SECONDS ||
+      Math.abs((outro.startSeconds as number) - expectedStartSeconds) >
+        VARIANT_DURATION_TOLERANCE_SECONDS
+    ) {
+      throw new Error("Invalid published generation manifest outro timing");
+    }
+  }
+  return value as unknown as PublishedGenerationManifest;
 };
 
 export async function validatePublishedGeneration(
@@ -799,6 +973,7 @@ export async function validatePublishedGeneration(
     join(episodeDir, "final", "version-a.mp4"),
     join(episodeDir, "final", "version-b.mp4")
   ];
+  const productionPath = join(episodeDir, "production.json");
   const reportPath = options.reportPath ?? join(episodeDir, "reports", "post-production.json");
   const lstat = dependencies.lstat ?? defaultLstat;
   const realpath = dependencies.realpath ?? defaultRealpath;
@@ -808,19 +983,24 @@ export async function validatePublishedGeneration(
 
   await validateContainedPaths(
     episodeDir,
-    [finalPaths[0], finalPaths[1], reportPath],
+    [productionPath, finalPaths[0], finalPaths[1], reportPath],
     lstat,
     realpath
   );
+  let productionText: string;
   let manifestText: string;
   try {
-    manifestText = await readFile(reportPath, "utf8");
+    [productionText, manifestText] = await Promise.all([
+      readFile(productionPath, "utf8"),
+      readFile(reportPath, "utf8")
+    ]);
   } catch (error) {
     throw new Error(
       `Published generation manifest is missing or unreadable: ${error instanceof Error ? error.message : String(error)}`
     );
   }
-  const manifest = parsePublishedGenerationManifest(manifestText);
+  const expectedAudio = parsePublishedAudioContract(productionText);
+  const manifest = parsePublishedGenerationManifest(manifestText, expectedAudio);
 
   await validateContainedPaths(episodeDir, [finalPaths[0], finalPaths[1]], lstat, realpath);
   for (const [index, name] of (["version-a", "version-b"] as const).entries()) {

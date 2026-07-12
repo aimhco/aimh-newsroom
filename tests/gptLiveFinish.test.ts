@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { GPT_LIVE_CONTENT } from "../src/production/gptLive/content";
 import {
   assertFinalMediaContract,
   assertSourceOutputLoudness,
@@ -305,6 +306,19 @@ describe("GPT-Live post-production publication", () => {
       )
     );
     await Promise.all([
+      writeFile(
+        join(episodeDir, "production.json"),
+        JSON.stringify({
+          id: GPT_LIVE_CONTENT.id,
+          audio: {
+            introMusic: false,
+            bodyMusic: false,
+            outroMusicPath: "/assets/outro.mp3",
+            outroDurationSeconds: 7
+          }
+        }),
+        "utf8"
+      ),
       writeFile(join(episodeDir, "tella", "plan.json"), JSON.stringify(plan()), "utf8"),
       writeFile(join(episodeDir, "exports", "tella-a.mp4"), "export-a", "utf8"),
       writeFile(join(episodeDir, "exports", "tella-b.mp4"), "export-b", "utf8"),
@@ -337,43 +351,52 @@ describe("GPT-Live post-production publication", () => {
     expectedB: string,
     generationId = "00000000-0000-4000-8000-000000000000"
   ) => {
-    const report = {
-      schemaVersion: "0.2.0",
-      status: "finished",
-      productionId: "test-production",
+    const report = buildPostProductionManifest({
+      productionId: GPT_LIVE_CONTENT.id,
       generationId,
-      audioPolicy: {
-        introMusic: false,
-        bodyMusic: false,
-        outro: {
-          file: "outro.mp3",
-          startSeconds: 3.75,
-          durationSeconds: 7,
-          fadeInSeconds: 0.25,
-          fadeOutSeconds: 0.75
-        }
-      },
+      logoPath: "/assets/logo.png",
+      outroMusicPath: "/assets/outro.mp3",
+      outroDurationSeconds: 7,
+      logoSha256: "a".repeat(64),
+      sourceGains: [],
+      logoEvidence: [],
       variants: [
         {
           name: "version-a",
+          inputPath: "exports/tella-a.mp4",
           outputPath: "final/version-a.mp4",
+          inputDurationSeconds: 10.75,
+          outputDurationSeconds: 10.75,
           sha256: sha256(expectedA),
           byteSize: Buffer.byteLength(expectedA)
         },
         {
           name: "version-b",
+          inputPath: "exports/tella-b.mp4",
           outputPath: "final/version-b.mp4",
+          inputDurationSeconds: 10.75,
+          outputDurationSeconds: 10.75,
           sha256: sha256(expectedB),
           byteSize: Buffer.byteLength(expectedB)
         }
       ]
-    };
+    });
     await writeFile(
       join(episodeDir, "reports", "post-production.json"),
       `${JSON.stringify(report, null, 2)}\n`,
       "utf8"
     );
     return report;
+  };
+
+  const mutateGenerationMarker = async (
+    episodeDir: string,
+    mutate: (report: Record<string, any>) => void
+  ) => {
+    const reportPath = join(episodeDir, "reports", "post-production.json");
+    const report = JSON.parse(await readFile(reportPath, "utf8")) as Record<string, any>;
+    mutate(report);
+    await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   };
 
   it.each([
@@ -478,7 +501,7 @@ describe("GPT-Live post-production publication", () => {
           inputPath: "/private/episode/exports/tella-a.mp4",
           outputPath: "/private/episode/final/version-a.mp4",
           inputDurationSeconds: 10.75,
-          outputDurationSeconds: 10.75,
+          outputDurationSeconds: 10.5,
           sha256: "f".repeat(64),
           byteSize: 1000
         },
@@ -487,7 +510,7 @@ describe("GPT-Live post-production publication", () => {
           inputPath: "/private/episode/exports/tella-b.mp4",
           outputPath: "/private/episode/final/version-b.mp4",
           inputDurationSeconds: 10.75,
-          outputDurationSeconds: 10.75,
+          outputDurationSeconds: 10.5,
           sha256: "9".repeat(64),
           byteSize: 1001
         }
@@ -508,7 +531,7 @@ describe("GPT-Live post-production publication", () => {
         bodyMusic: false,
         outro: {
           file: "Outro_Much_Higher_Causmic.mp3",
-          startSeconds: 3.75,
+          startSeconds: 3.5,
           durationSeconds: 7,
           fadeInSeconds: 0.25,
           fadeOutSeconds: 0.75
@@ -556,6 +579,88 @@ describe("GPT-Live post-production publication", () => {
 
     try {
       await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(/audio policy|manifest/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: "wrong outro file",
+      mutate: (report: Record<string, any>) => {
+        report.audioPolicy.outro.file = "wrong-outro.mp3";
+      }
+    },
+    {
+      name: "wrong outro start",
+      mutate: (report: Record<string, any>) => {
+        report.audioPolicy.outro.startSeconds = 2;
+      }
+    },
+    {
+      name: "wrong outro duration",
+      mutate: (report: Record<string, any>) => {
+        report.audioPolicy.outro.durationSeconds = 6;
+      }
+    },
+    {
+      name: "enabled body music",
+      mutate: (report: Record<string, any>) => {
+        report.audioPolicy.bodyMusic = true;
+      }
+    },
+    {
+      name: "legacy top-level duck intervals",
+      mutate: (report: Record<string, any>) => {
+        report.duckIntervals = [];
+      }
+    },
+    {
+      name: "legacy music loop setting",
+      mutate: (report: Record<string, any>) => {
+        report.settings.musicLoop = true;
+      }
+    },
+    {
+      name: "legacy music asset",
+      mutate: (report: Record<string, any>) => {
+        report.assets.music = "outro.mp3";
+      }
+    },
+    {
+      name: "private Windows outro path",
+      mutate: (report: Record<string, any>) => {
+        report.audioPolicy.outro.file = "C:\\Users\\editor\\private\\outro.mp3";
+      }
+    }
+  ])("rejects a published generation with $name", async ({ mutate }) => {
+    const episodeDir = await createContainedEpisode();
+    await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
+    await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
+    await writeGenerationMarker(episodeDir, "current-a", "current-b");
+    await mutateGenerationMarker(episodeDir, mutate);
+
+    try {
+      await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(/audio|manifest/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects one outro policy that is stale for the second variant", async () => {
+    const episodeDir = await createContainedEpisode();
+    await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
+    await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
+    await writeGenerationMarker(episodeDir, "current-a", "current-b");
+    await mutateGenerationMarker(episodeDir, (report) => {
+      report.variants[1].inputDurationSeconds = 11.251;
+      report.variants[1].outputDurationSeconds = 11.251;
+    });
+
+    try {
+      await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(
+        /duration|audio|outro|manifest/i
+      );
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
     }
