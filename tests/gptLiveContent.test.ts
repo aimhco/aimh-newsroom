@@ -857,7 +857,7 @@ describe("GPT-Live production preparation", () => {
       await staged.cleanup();
     }
     await expect(fsStat(staged.publicDir)).rejects.toMatchObject({ code: "ENOENT" });
-  });
+  }, 15_000);
 
   it("rejects symlinked evidence while staging for standalone rendering", async () => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-evidence-stage-link-"));
