@@ -101,6 +101,9 @@ describe("GPT-Live Tella export receipt", () => {
     ["workflow embedded URL", (value: any) => {
       value.exports[0].workflowId = "Export-Story-vid_dynamic/https://example.com";
     }],
+    ["workflow embedded protocol-relative URL", (value: any) => {
+      value.exports[0].workflowId = "Export-Story-vid_dynamic//example.com/private/path";
+    }],
     ["workflow extended video ID prefix", (value: any) => {
       value.exports[0].workflowId = "Export-Story-vid_dynamic_extra/Story";
     }],

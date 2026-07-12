@@ -117,6 +117,7 @@ const requireWorkflowId = (value: unknown, remoteVideoId: string): string => {
   if (
     typeof value !== "string" ||
     !SAFE_WORKFLOW_ID.test(value) ||
+    value.includes("//") ||
     LEADING_URI_SCHEME.test(value) ||
     PATH_SEGMENT_URI_SCHEME.test(value)
   ) {
