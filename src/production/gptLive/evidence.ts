@@ -152,12 +152,15 @@ const assertPngHeader = (
   return dimensions;
 };
 
-const metadataNumber = (output: string, pattern: RegExp, label: string): number => {
-  const value = Number(output.match(pattern)?.[1]);
-  if (!Number.isFinite(value)) {
+const generatedMetadataNumber = (output: string, key: string, label: string): number => {
+  const values = output.split("\n").flatMap((line) => {
+    const generated = line.match(/^\[Parsed_metadata_[^\]]+ @ [^\]]+\] ([^=]+)=(\S+)$/);
+    return generated?.[1] === key ? [Number(generated[2])] : [];
+  });
+  if (values.length !== 1 || !Number.isFinite(values[0])) {
     throw new Error(`Evidence raster metadata is unreadable: ${label}`);
   }
-  return value;
+  return values[0]!;
 };
 
 const inspectDecodedRaster = async (
@@ -174,7 +177,7 @@ const inspectDecodedRaster = async (
       "-i",
       path,
       "-vf",
-      "format=gray,signalstats,entropy,showinfo,metadata=print",
+      "metadata=mode=delete,format=gray,signalstats,entropy,showinfo,metadata=print",
       "-frames:v",
       "1",
       "-f",
@@ -187,30 +190,34 @@ const inspectDecodedRaster = async (
     });
   }
   const output = `${result.stdout}\n${result.stderr}`;
-  const dimensionsMatch = output.match(/showinfo[^\n]*\bs:(\d+)x(\d+)\b/);
+  const showInfoLines = output.split("\n").filter((line) =>
+    /^\[Parsed_showinfo_[^\]]+ @ [^\]]+\] n:\s*0\b/.test(line)
+  );
+  const dimensionsMatch = showInfoLines[0]?.match(/\bs:(\d+)x(\d+)\b/);
   if (!dimensionsMatch) {
     throw new Error(`Evidence raster metadata is unreadable: dimensions (${evidence.id})`);
   }
   const width = Number(dimensionsMatch[1]);
   const height = Number(dimensionsMatch[2]);
-  const lumaMinimum = metadataNumber(
+  const lumaMinimum = generatedMetadataNumber(
     output,
-    /lavfi\.signalstats\.YMIN=([^\s]+)/,
+    "lavfi.signalstats.YMIN",
     `luma minimum (${evidence.id})`
   );
-  const lumaMaximum = metadataNumber(
+  const lumaMaximum = generatedMetadataNumber(
     output,
-    /lavfi\.signalstats\.YMAX=([^\s]+)/,
+    "lavfi.signalstats.YMAX",
     `luma maximum (${evidence.id})`
   );
-  const lumaStandardDeviation = metadataNumber(
-    output,
-    /showinfo[^\n]*stdev:\[([\d.]+)/,
-    `luma variance (${evidence.id})`
+  const lumaStandardDeviation = Number(
+    showInfoLines[0]?.match(/\bstdev:\[([\d.]+)/)?.[1]
   );
-  const normalizedEntropy = metadataNumber(
+  if (showInfoLines.length !== 1 || !Number.isFinite(lumaStandardDeviation)) {
+    throw new Error(`Evidence raster metadata is unreadable: luma variance (${evidence.id})`);
+  }
+  const normalizedEntropy = generatedMetadataNumber(
     output,
-    /lavfi\.entropy\.normalized_entropy\.normal\.Y=([^\s]+)/,
+    "lavfi.entropy.normalized_entropy.normal.Y",
     `normalized entropy (${evidence.id})`
   );
   const metrics = {

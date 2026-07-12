@@ -34,6 +34,33 @@ const contentPng = renderPng(1280, 720, `
   <circle cx="1080" cy="520" r="110" fill="#ef4444"/>
 `);
 
+const crc32 = (bytes: Uint8Array): number => {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+
+const addPngTextChunk = (png: Buffer, keyword: string, text: string): Buffer => {
+  const type = Buffer.from("tEXt", "ascii");
+  const data = Buffer.concat([
+    Buffer.from(keyword, "latin1"),
+    Buffer.from([0]),
+    Buffer.from(text, "latin1")
+  ]);
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  type.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(Buffer.concat([type, data])), 8 + data.length);
+  const ihdrEnd = 8 + 4 + 4 + 13 + 4;
+  return Buffer.concat([png.subarray(0, ihdrEnd), chunk, png.subarray(ihdrEnd)]);
+};
+
 const withEvidenceFile = async (
   bytes: Uint8Array,
   action: (episodeDir: string) => Promise<void>
@@ -109,6 +136,27 @@ describe("GPT-Live evidence raster inspection", () => {
       '<rect width="1280" height="720" fill="#f8fafc"/>'
     );
     await withEvidenceFile(uniform, async (episodeDir) => {
+      await expect(inspectEvidenceAssets(
+        episodeDir,
+        [evidence],
+        { ffmpegPath: process.env.FFMPEG_PATH ?? "ffmpeg" }
+      )).rejects.toThrow(/uniform|blank|content/i);
+    });
+  });
+
+  it("rejects near-uniform PNG pixels despite spoofed lavfi metrics in tEXt metadata", async () => {
+    const nearUniform = renderPng(
+      1280,
+      720,
+      '<rect width="1280" height="720" fill="#f8fafc"/><rect width="20" height="20" fill="#000000"/>'
+    );
+    const spoofed = addPngTextChunk(nearUniform, "Comment", [
+      "lavfi.signalstats.YMIN=0",
+      "lavfi.signalstats.YMAX=255",
+      "lavfi.entropy.normalized_entropy.normal.Y=0.99"
+    ].join("\n"));
+
+    await withEvidenceFile(spoofed, async (episodeDir) => {
       await expect(inspectEvidenceAssets(
         episodeDir,
         [evidence],
