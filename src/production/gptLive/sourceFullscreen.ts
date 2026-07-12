@@ -45,7 +45,8 @@ const EVIDENCE_KEYS = [
 ] as const;
 
 const roundedSeconds = (value: number): number => Number(value.toFixed(6));
-const fixedSeconds = (value: number): string => roundedSeconds(value).toFixed(6);
+const frameIndexAt30Fps = (timeSeconds: number): number =>
+  Math.max(0, Math.round(roundedSeconds(timeSeconds) * 30));
 
 const fail = (detail: string): never => {
   throw new Error(`Invalid source fullscreen evidence: ${detail}`);
@@ -79,13 +80,15 @@ export function deriveSourceFullscreenExpectations(
 export function buildSourceFullscreenSsimArgs(
   options: BuildSourceFullscreenSsimArgsOptions
 ): string[] {
+  const exportFrameIndex = frameIndexAt30Fps(options.exportTimeSeconds);
+  const sourceFrameIndex = frameIndexAt30Fps(options.sourceTimeSeconds);
   return [
     "-hide_banner", "-loglevel", "info",
-    "-ss", fixedSeconds(options.exportTimeSeconds), "-i", options.exportPath,
-    "-ss", fixedSeconds(options.sourceTimeSeconds), "-i", options.sourcePath,
+    "-i", options.exportPath,
+    "-i", options.sourcePath,
     "-filter_complex",
-    "[0:v]scale=1920:1080:force_original_aspect_ratio=disable,format=yuv420p,setpts=PTS-STARTPTS[export];" +
-      "[1:v]scale=1920:1080:force_original_aspect_ratio=disable,format=yuv420p,setpts=PTS-STARTPTS[source];" +
+    `[0:v]select='eq(n,${exportFrameIndex})',scale=1920:1080:force_original_aspect_ratio=disable,format=yuv420p,setpts=PTS-STARTPTS[export];` +
+      `[1:v]select='eq(n,${sourceFrameIndex})',scale=1920:1080:force_original_aspect_ratio=disable,format=yuv420p,setpts=PTS-STARTPTS[source];` +
       "[export][source]ssim",
     "-frames:v", "1", "-an", "-f", "null", "-"
   ];

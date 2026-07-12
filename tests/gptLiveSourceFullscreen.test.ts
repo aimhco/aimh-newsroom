@@ -73,22 +73,25 @@ describe("GPT-Live source fullscreen verification", () => {
     ]);
   });
 
-  it("builds deterministic one-frame normalized SSIM arguments and parses FFmpeg output", () => {
+  it("selects deterministic decoded frame indices for normalized SSIM", () => {
     expect(buildSourceFullscreenSsimArgs({
       exportPath: "/episode/exports/tella-a.mp4",
       sourcePath: "/episode/source/source-one.mp4",
-      exportTimeSeconds: 2,
-      sourceTimeSeconds: 2
+      exportTimeSeconds: 29.475578,
+      sourceTimeSeconds: 5.98
     })).toEqual([
       "-hide_banner", "-loglevel", "info",
-      "-ss", "2.000000", "-i", "/episode/exports/tella-a.mp4",
-      "-ss", "2.000000", "-i", "/episode/source/source-one.mp4",
+      "-i", "/episode/exports/tella-a.mp4",
+      "-i", "/episode/source/source-one.mp4",
       "-filter_complex",
-      "[0:v]scale=1920:1080:force_original_aspect_ratio=disable,format=yuv420p,setpts=PTS-STARTPTS[export];" +
-        "[1:v]scale=1920:1080:force_original_aspect_ratio=disable,format=yuv420p,setpts=PTS-STARTPTS[source];" +
+      "[0:v]select='eq(n,884)',scale=1920:1080:force_original_aspect_ratio=disable,format=yuv420p,setpts=PTS-STARTPTS[export];" +
+        "[1:v]select='eq(n,179)',scale=1920:1080:force_original_aspect_ratio=disable,format=yuv420p,setpts=PTS-STARTPTS[source];" +
         "[export][source]ssim",
       "-frames:v", "1", "-an", "-f", "null", "-"
     ]);
+  });
+
+  it("parses FFmpeg SSIM output", () => {
     expect(parseSourceFullscreenSsim("[Parsed_ssim_0] SSIM Y:0.94 U:0.92 V:0.91 All:0.932144 (11.7)"))
       .toBe(0.932144);
     expect(() => parseSourceFullscreenSsim("no metric")).toThrow(/SSIM/i);
@@ -111,10 +114,12 @@ describe("GPT-Live source fullscreen verification", () => {
     expect(result).toEqual(evidence().map((record) => ({ ...record, ssim: 0.931 })));
     expect(command).toHaveBeenCalledTimes(4);
     expect(command.mock.calls[1]?.[1]).toEqual(expect.arrayContaining([
-      "10.000000",
       "/episode/exports/tella-a.mp4",
-      "1.000000",
-      "/episode/source/source-two.mp4"
+      "/episode/source/source-two.mp4",
+      expect.stringContaining("select='eq(n,300)'")
+    ]));
+    expect(command.mock.calls[1]?.[1]).toEqual(expect.arrayContaining([
+      expect.stringContaining("select='eq(n,30)'")
     ]));
   });
 
