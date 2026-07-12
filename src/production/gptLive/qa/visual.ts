@@ -31,7 +31,10 @@ interface FrameSample {
   timeSeconds: number;
 }
 
-type TransitionFrameSample = FrameSample & TransitionFrameSampleRecord;
+type TransitionFrameSample = FrameSample &
+  Omit<TransitionFrameSampleRecord, "side"> & {
+    position: "before" | "exact" | "after";
+  };
 
 export interface FrameContentMetrics {
   changedPixelProportion: number;
@@ -216,19 +219,37 @@ export const planTransitionBoundarySamples = (
       "to",
       safeLabel(afterClip.id)
     ].join("-");
-    const boundarySamples = (["before", "after"] as const).map((side) => {
-      const offset = side === "before" ? -FRAME_DURATION_SECONDS : FRAME_DURATION_SECONDS;
+    const boundarySamples = (["before", "exact", "after"] as const).map((position) => {
+      const offset = position === "before"
+        ? -FRAME_DURATION_SECONDS
+        : position === "after"
+          ? FRAME_DURATION_SECONDS
+          : 0;
       const timeSeconds = Math.min(lastSafeTime, Math.max(0, boundaryTime + offset));
       const sampledTimeSeconds = Number(transitionFixed(timeSeconds));
       return {
         boundaryId,
-        side,
-        label: `${boundaryId}-${side}`,
+        position,
+        label: `${boundaryId}-${position}`,
         timeSeconds: sampledTimeSeconds,
         frameIndex: transitionFrameIndex(sampledTimeSeconds, frameCount)
       };
     });
-    const [before, after] = boundarySamples;
+    const [before, exact, after] = boundarySamples;
+    if (before!.frameIndex === exact!.frameIndex) {
+      const earlierFrameIndex = exact!.frameIndex - 1;
+      if (earlierFrameIndex >= 0) {
+        before!.frameIndex = earlierFrameIndex;
+        before!.timeSeconds = Number(transitionFixed(earlierFrameIndex / 30));
+      }
+    }
+    if (after!.frameIndex === exact!.frameIndex) {
+      const laterFrameIndex = exact!.frameIndex + 1;
+      if (laterFrameIndex < frameCount) {
+        after!.frameIndex = laterFrameIndex;
+        after!.timeSeconds = Number(transitionFixed(laterFrameIndex / 30));
+      }
+    }
     if (before!.frameIndex === after!.frameIndex) {
       const earlierFrameIndex = before!.frameIndex - 1;
       const laterFrameIndex = after!.frameIndex + 1;
@@ -245,7 +266,7 @@ export const planTransitionBoundarySamples = (
         `GPT-Live QA failed: ${boundaryId} cannot resolve to two distinct 30fps frames`
       );
     }
-    samples.push(before!, after!);
+    samples.push(before!, exact!, after!);
   }
   return samples;
 };
@@ -394,10 +415,14 @@ export async function generateVisualArtifacts(
           inputPath,
           sample.timeSeconds
         );
+        if (sample.position === "exact") {
+          assertTransitionFrameHasContent(stats);
+          continue;
+        }
         artifacts.transitionContent[name].sampledFrames += 1;
         artifacts.transitionContent[name].samples.push({
           boundaryId: sample.boundaryId,
-          side: sample.side,
+          side: sample.position,
           timeSeconds: sample.timeSeconds,
           frameIndex: sample.frameIndex
         });
@@ -406,7 +431,7 @@ export async function generateVisualArtifacts(
         } catch {
           artifacts.transitionContent[name].blankFrames.push({
             boundaryId: sample.boundaryId,
-            side: sample.side,
+            side: sample.position,
             timeSeconds: sample.timeSeconds
           });
         }
@@ -479,7 +504,7 @@ export function renderComparisonMarkdown(options: {
     `The dynamic-editorial final has source, scene-start, scene-midpoint, transition, and final-CTA frames in ${options.artifacts.transitionFrames["version-a"][0]?.split("/").slice(0, -1).join("/")}. Continuity remains a human playback judgment.`,
     "",
     "## Transition boundary content",
-    `Both compatibility outputs use the same evidence-editorial treatment; all ${options.artifacts.transitionContent["version-a"].sampledFrames + options.artifacts.transitionContent["version-b"].sampledFrames} boundary content checks passed, sampling one frame before and after every interior clip boundary independently of the labeled review screenshots.`,
+    "Both compatibility outputs use the same evidence-editorial treatment; transition boundary content checks passed, sampling the immediately previous, exact cut, and next 30fps frames independently of the labeled review screenshots.",
     "",
     "## Audio and source-dialogue clarity",
     `Both finals contain AAC 48kHz stereo audio with matching treatment. No intro or body music is mixed because program audio is reconstructed from audited source and narration assets. Measured source-dialogue outputs are ${loudnessText}; extracted 10-second tails contain signal through the final 0.5 seconds. The outro-only tail signal does not prove CTA completion or rule out speech truncation. Subjective clarity still requires full real-time playback.`,

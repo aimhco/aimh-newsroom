@@ -791,7 +791,44 @@ describe("GPT-Live full production QA", () => {
       .toThrow(/distinct 30fps frames|two distinct frames/i);
   });
 
-  it("samples both sides of every clip boundary in both variants with safe clamping", async () => {
+  it("samples the exact cut frame between the immediately previous and next frames", () => {
+    const plan = {
+      schemaVersion: "0.1.0" as const,
+      productionId: "transition-test",
+      clips: [
+        { id: "clip-one", kind: "source_clip" as const, durationSeconds: 1 },
+        { id: "clip-two", kind: "source_clip" as const, durationSeconds: 1 }
+      ]
+    } as any;
+
+    expect(planTransitionBoundarySamples(plan, 2).map((sample) => ({
+      label: sample.label,
+      position: sample.position,
+      timeSeconds: sample.timeSeconds,
+      frameIndex: sample.frameIndex
+    }))).toEqual([
+      {
+        label: "boundary-01-clip-one-to-clip-two-before",
+        position: "before",
+        timeSeconds: 0.966666,
+        frameIndex: 29
+      },
+      {
+        label: "boundary-01-clip-one-to-clip-two-exact",
+        position: "exact",
+        timeSeconds: 1,
+        frameIndex: 30
+      },
+      {
+        label: "boundary-01-clip-one-to-clip-two-after",
+        position: "after",
+        timeSeconds: 1.033333,
+        frameIndex: 31
+      }
+    ]);
+  });
+
+  it("samples before, exact, and after frames at every clip boundary with safe clamping", async () => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-transition-content-"));
     const calls: Array<{ command: string; args: string[] }> = [];
     const plan = {
@@ -838,7 +875,7 @@ describe("GPT-Live full production QA", () => {
       const signalCalls = calls.filter(({ args }) =>
         args.some((arg) => arg.includes("signalstats") && arg.endsWith("metadata=print"))
       );
-      expect(signalCalls).toHaveLength(8);
+      expect(signalCalls).toHaveLength(12);
       expect(signalCalls.every(({ args }) =>
         args.includes("crop=iw*0.85:ih*0.92:iw*0.02:ih*0.04,signalstats,entropy,showinfo,metadata=print")
       )).toBe(true);
@@ -847,12 +884,16 @@ describe("GPT-Live full production QA", () => {
         time: args[args.indexOf("-ss") + 1]
       }))).toEqual([
         { input: "/final-a.mp4", time: "0.000000" },
+        { input: "/final-a.mp4", time: "0.020000" },
         { input: "/final-a.mp4", time: "0.053333" },
         { input: "/final-a.mp4", time: "0.033333" },
         { input: "/final-a.mp4", time: "0.066666" },
+        { input: "/final-a.mp4", time: "0.066666" },
         { input: "/final-b.mp4", time: "0.000000" },
+        { input: "/final-b.mp4", time: "0.020000" },
         { input: "/final-b.mp4", time: "0.053333" },
         { input: "/final-b.mp4", time: "0.033333" },
+        { input: "/final-b.mp4", time: "0.066666" },
         { input: "/final-b.mp4", time: "0.066666" }
       ]);
       expect(artifacts.transitionContent).toEqual({
