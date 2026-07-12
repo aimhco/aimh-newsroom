@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -98,6 +98,9 @@ describe("GPT-Live Tella export receipt", () => {
     ["workflow scheme without slashes", (value: any) => {
       value.exports[0].workflowId = "https:Export-Story-vid_dynamic/Story";
     }],
+    ["workflow embedded URL", (value: any) => {
+      value.exports[0].workflowId = "Export-Story-vid_dynamic/https://example.com";
+    }],
     ["workflow extended video ID prefix", (value: any) => {
       value.exports[0].workflowId = "Export-Story-vid_dynamic_extra/Story";
     }],
@@ -172,6 +175,78 @@ describe("GPT-Live Tella export receipt", () => {
         }))
       }, { writeJsonAtomic })).rejects.toThrow();
       expect(writeJsonAtomic).not.toHaveBeenCalled();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["Tella directory", async (episodeDir: string, outsideDir: string) => {
+      await rm(join(episodeDir, "tella"), { recursive: true });
+      await symlink(outsideDir, join(episodeDir, "tella"), "dir");
+    }],
+    ["Tella state", async (episodeDir: string, outsideDir: string) => {
+      await rm(join(episodeDir, "tella", "state.json"));
+      await symlink(join(outsideDir, "sentinel"), join(episodeDir, "tella", "state.json"));
+    }],
+    ["version A export", async (episodeDir: string, outsideDir: string) => {
+      await rm(join(episodeDir, "exports", "tella-a.mp4"));
+      await symlink(join(outsideDir, "sentinel"), join(episodeDir, "exports", "tella-a.mp4"));
+    }],
+    ["version B export", async (episodeDir: string, outsideDir: string) => {
+      await rm(join(episodeDir, "exports", "tella-b.mp4"));
+      await symlink(join(outsideDir, "sentinel"), join(episodeDir, "exports", "tella-b.mp4"));
+    }],
+    ["reports directory", async (episodeDir: string, outsideDir: string) => {
+      await rm(join(episodeDir, "reports"), { recursive: true });
+      await symlink(outsideDir, join(episodeDir, "reports"), "dir");
+    }],
+    ["receipt target", async (episodeDir: string, outsideDir: string) => {
+      await symlink(
+        join(outsideDir, "sentinel"),
+        join(episodeDir, "reports", "tella-export-receipt.json")
+      );
+    }]
+  ])("rejects a symlinked %s before reading or writing", async (_name, attack) => {
+    const root = await mkdtemp(join(tmpdir(), "gpt-live-seal-symlink-"));
+    const episodeDir = join(root, "episode");
+    const outsideDir = join(root, "outside");
+    await Promise.all([
+      mkdir(join(episodeDir, "tella"), { recursive: true }),
+      mkdir(join(episodeDir, "exports"), { recursive: true }),
+      mkdir(join(episodeDir, "reports"), { recursive: true }),
+      mkdir(outsideDir, { recursive: true })
+    ]);
+    await Promise.all([
+      writeFile(join(episodeDir, "tella", "state.json"), JSON.stringify(state)),
+      writeFile(join(episodeDir, "exports", "tella-a.mp4"), "export-a"),
+      writeFile(join(episodeDir, "exports", "tella-b.mp4"), "export-b"),
+      writeFile(join(outsideDir, "state.json"), JSON.stringify(state)),
+      writeFile(join(outsideDir, "sentinel"), "outside-unchanged")
+    ]);
+    await attack(episodeDir, outsideDir);
+    const readFileText = vi.fn(async () => "must-not-read");
+    const readFileBytes = vi.fn(async () => new Uint8Array([1]));
+    const writeJsonAtomic = vi.fn(async () => undefined);
+
+    try {
+      await expect(sealTellaExports({
+        episodeDir,
+        exports: receipt().exports.map(({ version, sourceVariant, remoteVideoId, workflowId }) => ({
+          version,
+          sourceVariant,
+          remoteVideoId,
+          workflowId
+        }))
+      }, {
+        readFile: readFileText,
+        readFileBytes,
+        writeJsonAtomic
+      })).rejects.toThrow(/symlink|escape/i);
+      expect(readFileText).not.toHaveBeenCalled();
+      expect(readFileBytes).not.toHaveBeenCalled();
+      expect(writeJsonAtomic).not.toHaveBeenCalled();
+      expect(await readFile(join(outsideDir, "sentinel"), "utf8")).toBe("outside-unchanged");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

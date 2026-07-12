@@ -669,6 +669,16 @@ const validateExportProvenance = (snapshot: GptLiveQaSnapshot): void => {
     }
   })();
   exact(fullscreen, snapshot.generation.sourceFullscreen, "source fullscreen generation lineage");
+  const observedFullscreen = (() => {
+    try {
+      return assertSourceFullscreenEvidence(snapshot.plan, snapshot.observedSourceFullscreen);
+    } catch (error) {
+      return fail(
+        `fresh measured source fullscreen evidence is invalid: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  })();
+  exact(observedFullscreen, fullscreen, "fresh measured source fullscreen evidence");
 };
 
 const validateBrandingAndAudio = (snapshot: GptLiveQaSnapshot): void => {

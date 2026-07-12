@@ -1743,7 +1743,7 @@ describe("GPT-Live post-production publication", () => {
     const measureIntervalLoudness = vi.fn(async () => -23);
     const runCommand = vi.fn(async () => ({ stdout: "", stderr: "" }));
     const verifySourceFullscreen = vi.fn(async () => {
-      throw new Error("Invalid source fullscreen evidence: SSIM below 0.88");
+      throw new Error("Invalid source fullscreen evidence: SSIM below 0.90");
     });
 
     try {
@@ -1753,7 +1753,7 @@ describe("GPT-Live post-production publication", () => {
         measureIntervalLoudness,
         runCommand,
         verifySourceFullscreen
-      } as any)).rejects.toThrow(/source fullscreen.*0\.88/i);
+      } as any)).rejects.toThrow(/source fullscreen.*0\.90/i);
       expect(verifySourceFullscreen).toHaveBeenCalledOnce();
       expect(measureIntervalLoudness).not.toHaveBeenCalled();
       expect(runCommand).not.toHaveBeenCalled();

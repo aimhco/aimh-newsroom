@@ -41,7 +41,7 @@
 
 ### Task 3: Fullscreen SSIM Verification
 
-- [ ] Write tests that derive cumulative source intervals and exact midpoint samples from `plan.clips`, parse FFmpeg `All:` SSIM output, reject scores below `0.88`, and reject missing/extra/reordered coverage.
+- [ ] Write tests that derive cumulative source intervals and exact midpoint samples from `plan.clips`, parse FFmpeg `All:` SSIM output, reject scores below `0.90`, and reject missing/extra/reordered coverage.
 - [ ] Run `corepack pnpm vitest run tests/gptLiveSourceFullscreen.test.ts` and confirm failure because the verifier does not exist.
 - [ ] Implement deterministic single-frame comparison after normalizing both inputs to 1920x1080 yuv420p, with export seek at the cumulative midpoint and source seek at half its prepared duration.
 - [ ] Add a real FFmpeg regression generating a re-encoded full-screen fixture plus inset/cropped fixtures; require full-screen pass and inset/crop failure.

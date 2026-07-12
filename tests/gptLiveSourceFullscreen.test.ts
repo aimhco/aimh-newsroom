@@ -60,6 +60,10 @@ const evidence = (): SourceFullscreenEvidence[] =>
   }));
 
 describe("GPT-Live source fullscreen verification", () => {
+  it("uses the calibrated 0.90 SSIM publication threshold", () => {
+    expect(SOURCE_FULLSCREEN_SSIM_THRESHOLD).toBe(0.9);
+  });
+
   it("derives exact cumulative midpoint samples for both compatibility versions", () => {
     expect(deriveSourceFullscreenExpectations(plan())).toEqual([
       { version: "version-a", clipId: "source-one", exportTimeSeconds: 2, sourceTimeSeconds: 2 },
@@ -123,7 +127,7 @@ describe("GPT-Live source fullscreen verification", () => {
     ["wrong export midpoint", (records: any[]) => { records[0].exportTimeSeconds += 0.01; return records; }],
     ["wrong source midpoint", (records: any[]) => { records[0].sourceTimeSeconds += 0.01; return records; }],
     ["wrong threshold", (records: any[]) => { records[0].threshold = 0.8; return records; }],
-    ["below threshold", (records: any[]) => { records[0].ssim = 0.879999; return records; }],
+    ["below threshold", (records: any[]) => { records[0].ssim = 0.899999; return records; }],
     ["extra field", (records: any[]) => { records[0].framePath = "/tmp/secret"; return records; }]
   ])("rejects %s fullscreen evidence coverage", (_name, mutate) => {
     expect(() => assertSourceFullscreenEvidence(plan(), mutate(evidence() as any[])))
@@ -135,6 +139,7 @@ describe("GPT-Live source fullscreen verification", () => {
     const sourcePath = join(root, "source.mp4");
     const fullPath = join(root, "full.mp4");
     const insetPath = join(root, "inset.mp4");
+    const smallInsetPath = join(root, "small-inset.mp4");
     const croppedPath = join(root, "cropped.mp4");
     try {
       await runCommand("ffmpeg", [
@@ -151,15 +156,28 @@ describe("GPT-Live source fullscreen verification", () => {
       ]);
       await runCommand("ffmpeg", [
         "-y", "-i", sourcePath,
+        "-vf", "scale=632:356,pad=640:360:4:2:black",
+        "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", smallInsetPath
+      ]);
+      await runCommand("ffmpeg", [
+        "-y", "-i", sourcePath,
         "-vf", "crop=480:360:80:0,scale=640:360",
         "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", croppedPath
       ]);
 
       const full = await measureSourceFullscreenSsim("ffmpeg", fullPath, sourcePath, 1, 1);
       const inset = await measureSourceFullscreenSsim("ffmpeg", insetPath, sourcePath, 1, 1);
+      const smallInset = await measureSourceFullscreenSsim(
+        "ffmpeg",
+        smallInsetPath,
+        sourcePath,
+        1,
+        1
+      );
       const cropped = await measureSourceFullscreenSsim("ffmpeg", croppedPath, sourcePath, 1, 1);
       expect(full).toBeGreaterThanOrEqual(SOURCE_FULLSCREEN_SSIM_THRESHOLD);
       expect(inset).toBeLessThan(SOURCE_FULLSCREEN_SSIM_THRESHOLD);
+      expect(smallInset).toBeLessThan(SOURCE_FULLSCREEN_SSIM_THRESHOLD);
       expect(cropped).toBeLessThan(SOURCE_FULLSCREEN_SSIM_THRESHOLD);
     } finally {
       await rm(root, { recursive: true, force: true });

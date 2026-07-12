@@ -1,7 +1,7 @@
 import { runCommand as defaultRunCommand } from "../../render/process";
 import type { TellaPlan } from "./tellaPlan";
 
-export const SOURCE_FULLSCREEN_SSIM_THRESHOLD = 0.88 as const;
+export const SOURCE_FULLSCREEN_SSIM_THRESHOLD = 0.9 as const;
 
 export type SourceFullscreenVersion = "version-a" | "version-b";
 

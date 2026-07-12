@@ -3,6 +3,7 @@ import type { MediaInspection } from "../mediaInspection";
 import type { TellaPlan } from "../tellaPlan";
 import type { AudioPolicy, EvidenceSpec } from "../types";
 import type { TellaExportReceipt } from "../tellaExportReceipt";
+import type { SourceFullscreenEvidence } from "../sourceFullscreen";
 
 export type QaVariantName = "version-a" | "version-b";
 
@@ -141,6 +142,7 @@ export interface GptLiveQaSnapshot {
   tellaExportReceipt: TellaExportReceipt;
   tellaState: unknown;
   postProduction: Record<string, unknown>;
+  observedSourceFullscreen: readonly SourceFullscreenEvidence[];
   logo: { path: string; sha256: string };
   filePresence: Record<string, boolean>;
   media: {

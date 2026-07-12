@@ -3,6 +3,7 @@ import { readFile as defaultReadFile } from "node:fs/promises";
 import { join } from "node:path";
 import { writeJsonAtomic as defaultWriteJsonAtomic } from "./atomicFiles";
 import { GPT_LIVE_CONTENT } from "./content";
+import { validateContainedEpisodePaths } from "./qa/paths";
 import type { GptLiveVariant } from "./types";
 
 export const TELLA_EXPORT_RECEIPT_SCHEMA_VERSION = "0.1.0" as const;
@@ -72,6 +73,7 @@ const HASH = /^[a-f0-9]{64}$/;
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,199}$/i;
 const SAFE_WORKFLOW_ID = /^[a-z0-9][-a-z0-9._/:]{0,255}$/i;
 const LEADING_URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+const PATH_SEGMENT_URI_SCHEME = /(?:^|\/)[A-Za-z][A-Za-z0-9+.-]*:/;
 const SECRET_LIKE = /(?:api[_-]?key|bearer|credential|password|secret|signature|signed|token|x-amz)/i;
 
 const invalid = (detail: string): never => {
@@ -115,7 +117,8 @@ const requireWorkflowId = (value: unknown, remoteVideoId: string): string => {
   if (
     typeof value !== "string" ||
     !SAFE_WORKFLOW_ID.test(value) ||
-    LEADING_URI_SCHEME.test(value)
+    LEADING_URI_SCHEME.test(value) ||
+    PATH_SEGMENT_URI_SCHEME.test(value)
   ) {
     invalid("workflowId must use the bounded non-URL workflow grammar");
   }
@@ -225,7 +228,16 @@ export async function sealTellaExports(
   const readFileBytes = dependencies.readFileBytes ??
     ((path: string) => defaultReadFile(path) as Promise<Uint8Array>);
   const writeJsonAtomic = dependencies.writeJsonAtomic ?? defaultWriteJsonAtomic;
-  const stateText = await readFile(join(options.episodeDir, "tella", "state.json"), "utf8");
+  const statePath = join(options.episodeDir, "tella", "state.json");
+  const exportPaths = DEFINITIONS.map(({ version }) => tellaExportPath(options.episodeDir, version));
+  const reportsDirectory = join(options.episodeDir, "reports");
+  const receiptPath = tellaExportReceiptPath(options.episodeDir);
+  await validateContainedEpisodePaths(
+    options.episodeDir,
+    [statePath, ...exportPaths, reportsDirectory, receiptPath],
+    { context: "Tella export sealing" }
+  );
+  const stateText = await readFile(statePath, "utf8");
   let tellaState: unknown;
   try {
     tellaState = JSON.parse(stateText);
@@ -237,7 +249,7 @@ export async function sealTellaExports(
   }
 
   const bytes = await Promise.all(
-    DEFINITIONS.map((definition) => readFileBytes(tellaExportPath(options.episodeDir, definition.version)))
+    exportPaths.map((path) => readFileBytes(path))
   );
   const records = DEFINITIONS.map((definition, index) => {
     const identity = options.exports[index];
@@ -255,7 +267,6 @@ export async function sealTellaExports(
     productionId: GPT_LIVE_CONTENT.id,
     exports: records
   }, tellaState);
-  const receiptPath = tellaExportReceiptPath(options.episodeDir);
   await writeJsonAtomic(receiptPath, receipt);
   return { episodeDir: options.episodeDir, receiptPath, receipt };
 }

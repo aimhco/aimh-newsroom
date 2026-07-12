@@ -432,6 +432,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
     },
     tellaState: state,
     postProduction,
+    observedSourceFullscreen: structuredClone(sourceFullscreen),
     logo: { path: GPT_LIVE_CONTENT.branding.logoPath, sha256: sha("a") },
     filePresence: Object.fromEntries([
       ...plan.clips.flatMap((clip) =>
@@ -637,6 +638,8 @@ const createQaRunHarness = async () => {
             : path.endsWith("version-a.mp4")
               ? snapshot.media.finals["version-a"]
               : snapshot.media.finals["version-b"],
+      validateSealedTellaExports: async () => snapshot.tellaExportReceipt,
+      verifySourceFullscreen: async () => snapshot.observedSourceFullscreen,
       generateVisualArtifacts: async () => artifacts
     } as unknown as RunGptLiveQaDependencies
   };
@@ -1391,6 +1394,52 @@ describe("GPT-Live full production QA", () => {
     const snapshot = validSnapshot();
     mutate(snapshot);
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/receipt|Tella export|fullscreen/i);
+  });
+
+  it("rejects a fullscreen score forged identically in both persisted copies", () => {
+    const snapshot = validSnapshot();
+    (snapshot.postProduction.sourceFullscreen as any[])[0].ssim = 0.91;
+    (snapshot.generation.sourceFullscreen as any[])[0].ssim = 0.91;
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/fresh|measured|fullscreen/i);
+  });
+
+  it("revalidates receipt bytes before rejecting changed visual evidence", async () => {
+    const harness = await createQaRunHarness();
+    const events: string[] = [];
+    const validateSealedTellaExports = vi.fn(async () => {
+      events.push("receipt");
+      return harness.snapshot.tellaExportReceipt;
+    });
+    const changedVisual = structuredClone(harness.snapshot.observedSourceFullscreen) as any[];
+    changedVisual[0] = { ...changedVisual[0]!, ssim: 0.91 };
+    const verifySourceFullscreen = vi.fn(async () => {
+      events.push("fullscreen");
+      return changedVisual;
+    });
+    const generateVisualArtifacts = vi.fn(harness.dependencies.generateVisualArtifacts!);
+
+    try {
+      await expect(runGptLiveQa({
+        episodeDir: harness.episodeDir,
+        env: harness.snapshot.env,
+        ffmpegPath: "ffmpeg",
+        ffprobePath: "ffprobe"
+      }, {
+        ...harness.dependencies,
+        validatePublishedGeneration: async () => harness.generation,
+        validateSealedTellaExports,
+        verifySourceFullscreen,
+        generateVisualArtifacts
+      } as any)).rejects.toThrow(/fresh|measured|fullscreen/i);
+
+      expect(events).toEqual(["receipt", "fullscreen"]);
+      expect(validateSealedTellaExports).toHaveBeenCalledOnce();
+      expect(verifySourceFullscreen).toHaveBeenCalledOnce();
+      expect(generateVisualArtifacts).not.toHaveBeenCalled();
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
   });
 
   it("rejects a Tella export duration outside one 30fps frame of the audited plan", () => {

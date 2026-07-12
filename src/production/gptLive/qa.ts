@@ -22,9 +22,12 @@ import { GPT_LIVE_SCENES, sceneStyle } from "./motion/sceneStyle";
 import { withEpisodeProductionLock } from "./productionLock";
 import type { TellaPlan } from "./tellaPlan";
 import { assertTellaProgramDuration, validateTellaTimelineAudit } from "./tellaState";
+import { verifySourceFullscreen as defaultVerifySourceFullscreen } from "./sourceFullscreen";
 import {
   parseTellaExportReceipt,
-  tellaExportReceiptPath
+  tellaExportReceiptPath,
+  validateSealedTellaExports as defaultValidateSealedTellaExports,
+  type TellaExportReceipt
 } from "./tellaExportReceipt";
 import type {
   GptLiveQaResult,
@@ -99,6 +102,10 @@ type StatFile = (path: string) => Promise<{ isFile(): boolean; size: number }>;
 
 export interface RunGptLiveQaDependencies {
   validatePublishedGeneration?: (episodeDir: string) => Promise<PublishedGenerationValidation>;
+  validateSealedTellaExports?: (
+    options: Parameters<typeof defaultValidateSealedTellaExports>[0]
+  ) => Promise<TellaExportReceipt>;
+  verifySourceFullscreen?: typeof defaultVerifySourceFullscreen;
   readFile?: ReadText;
   readFileBytes?: ReadBytes;
   stat?: StatFile;
@@ -328,7 +335,7 @@ const collectSnapshot = async (
   generation: PublishedGenerationValidation,
   dependencies: Required<Pick<
     RunGptLiveQaDependencies,
-    "readFile" | "readFileBytes" | "stat" | "runCommand" | "inspectMediaFile" | "inspectFinalMediaFile" | "lstat" | "realpath"
+    "readFile" | "readFileBytes" | "stat" | "runCommand" | "inspectMediaFile" | "inspectFinalMediaFile" | "lstat" | "realpath" | "validateSealedTellaExports" | "verifySourceFullscreen"
   >>
 ): Promise<GptLiveQaSnapshot> => {
   const productionPath = join(options.episodeDir, "production.json");
@@ -387,10 +394,14 @@ const collectSnapshot = async (
     "source manifest"
   );
   validateTellaTimelineAudit(plan, tellaState);
-  const tellaExportReceipt = parseTellaExportReceipt(
+  const parsedTellaExportReceipt = parseTellaExportReceipt(
     parseJson<unknown>(exportReceiptText, "Tella export receipt"),
     tellaState
   );
+  const exportPaths = [
+    join(options.episodeDir, "exports", "tella-a.mp4"),
+    join(options.episodeDir, "exports", "tella-b.mp4")
+  ] as const;
 
   await withValidatedQaArtifactPaths({
     episodeDir: options.episodeDir,
@@ -402,6 +413,19 @@ const collectSnapshot = async (
     tellaState,
     postProduction
   }, dependencies, async () => undefined);
+  const tellaExportReceipt = await dependencies.validateSealedTellaExports({
+    episodeDir: options.episodeDir,
+    receipt: parsedTellaExportReceipt,
+    tellaState
+  });
+  const observedSourceFullscreen = await dependencies.verifySourceFullscreen({
+    ffmpegPath: options.ffmpegPath,
+    plan,
+    exportPaths: {
+      "version-a": exportPaths[0],
+      "version-b": exportPaths[1]
+    }
+  });
   const logoStat = await dependencies.lstat(production.branding.logoPath);
   if (logoStat.isSymbolicLink()) throw new Error("GPT-Live QA path contains a symlink: logo");
 
@@ -432,10 +456,6 @@ const collectSnapshot = async (
   ];
   const filePresence = await collectFilePresence(expectedPaths, dependencies.stat);
 
-  const exportPaths = [
-    join(options.episodeDir, "exports", "tella-a.mp4"),
-    join(options.episodeDir, "exports", "tella-b.mp4")
-  ] as const;
   const exportInspections = await Promise.all(
     exportPaths.map((path) => dependencies.inspectFinalMediaFile(options.ffprobePath, path))
   );
@@ -503,6 +523,7 @@ const collectSnapshot = async (
     tellaExportReceipt,
     tellaState,
     postProduction,
+    observedSourceFullscreen,
     logo: {
       path: production.branding.logoPath,
       sha256: createHash("sha256").update(logoBytes).digest("hex")
@@ -573,7 +594,7 @@ const buildSafeQaReport = (
       variants: snapshot.generation.variants,
       programAudio: snapshot.generation.programAudio,
       tellaExports: snapshot.generation.tellaExports,
-      sourceFullscreen: snapshot.generation.sourceFullscreen
+      sourceFullscreen: snapshot.observedSourceFullscreen
     },
     youtubeUploadEnabled: false,
     checks: {
@@ -675,6 +696,12 @@ async function runGptLiveQaUnlocked(
   const realpath = dependencies.realpath ?? defaultRealpath;
   const rm = dependencies.rm ?? defaultRm;
   const runCommand = dependencies.runCommand ?? defaultRunCommand;
+  const validateSealedTellaExports = dependencies.validateSealedTellaExports ??
+    ((input: Parameters<typeof defaultValidateSealedTellaExports>[0]) =>
+      defaultValidateSealedTellaExports(input, { readFileBytes }));
+  const verifySourceFullscreen = dependencies.verifySourceFullscreen ??
+    ((input: Parameters<typeof defaultVerifySourceFullscreen>[0]) =>
+      defaultVerifySourceFullscreen(input, { runCommand }));
   const inspectMediaFile = dependencies.inspectMediaFile ??
     ((ffprobePath: string, path: string) => inspectPreparedMediaFile(ffprobePath, path, runCommand));
   const inspectFinalMediaFile = dependencies.inspectFinalMediaFile ??
@@ -695,7 +722,9 @@ async function runGptLiveQaUnlocked(
     inspectMediaFile,
     inspectFinalMediaFile,
     lstat,
-    realpath
+    realpath,
+    validateSealedTellaExports,
+    verifySourceFullscreen
   });
   validateGptLiveQaSnapshot(snapshot);
 
