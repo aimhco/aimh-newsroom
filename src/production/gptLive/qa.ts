@@ -23,7 +23,10 @@ import { GPT_LIVE_SCENES, sceneStyle } from "./motion/sceneStyle";
 import { withEpisodeProductionLock } from "./productionLock";
 import type { TellaPlan } from "./tellaPlan";
 import { assertTellaProgramDuration, validateTellaTimelineAudit } from "./tellaState";
-import { verifySourceFullscreen as defaultVerifySourceFullscreen } from "./sourceFullscreen";
+import {
+  buildSourceFullscreenTiming,
+  verifySourceFullscreen as defaultVerifySourceFullscreen
+} from "./sourceFullscreen";
 import {
   parseTellaExportReceipt,
   tellaExportReceiptPath,
@@ -395,7 +398,7 @@ const collectSnapshot = async (
     sourceManifestText,
     "source manifest"
   );
-  validateTellaTimelineAudit(plan, tellaState);
+  const timelineAudit = validateTellaTimelineAudit(plan, tellaState);
   const parsedTellaExportReceipt = parseTellaExportReceipt(
     parseJson<unknown>(exportReceiptText, "Tella export receipt"),
     tellaState
@@ -420,13 +423,18 @@ const collectSnapshot = async (
     receipt: parsedTellaExportReceipt,
     tellaState
   });
+  const sourceFullscreenTiming = buildSourceFullscreenTiming(
+    tellaExportReceipt,
+    timelineAudit
+  );
   const observedSourceFullscreen = await dependencies.verifySourceFullscreen({
     ffmpegPath: options.ffmpegPath,
     plan,
     exportPaths: {
       "version-a": exportPaths[0],
       "version-b": exportPaths[1]
-    }
+    },
+    timing: sourceFullscreenTiming
   });
   const logoStat = await dependencies.lstat(production.branding.logoPath);
   if (logoStat.isSymbolicLink()) throw new Error("GPT-Live QA path contains a symlink: logo");
@@ -597,7 +605,7 @@ const buildSafeQaReport = (
   }>;
   const status = deriveQaStatus(humanPlayback);
   return {
-    schemaVersion: "0.1.0",
+    schemaVersion: "0.2.0",
     ...status,
     productionId: GPT_LIVE_CONTENT.id,
     generationId: snapshot.generation.generationId,

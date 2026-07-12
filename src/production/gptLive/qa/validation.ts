@@ -19,7 +19,10 @@ import { GPT_LIVE_SCENES } from "../motion/sceneStyle";
 import { buildSourceManifest } from "../prepare";
 import { assertPlateContract } from "../renderPlates";
 import { buildTellaPlan, type TellaPlan } from "../tellaPlan";
-import { assertSourceFullscreenEvidence } from "../sourceFullscreen";
+import {
+  assertSourceFullscreenEvidence,
+  buildSourceFullscreenTiming
+} from "../sourceFullscreen";
 import { parseTellaExportReceipt } from "../tellaExportReceipt";
 import {
   assertTellaProgramDuration,
@@ -651,6 +654,16 @@ const validateExportProvenance = (snapshot: GptLiveQaSnapshot): void => {
       );
     }
   })();
+  const timelineAudit = (() => {
+    try {
+      return validateTellaTimelineAudit(snapshot.plan, snapshot.tellaState);
+    } catch (error) {
+      return fail(
+        `Tella timeline audit is invalid for fullscreen evidence: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  })();
+  const sourceFullscreenTiming = buildSourceFullscreenTiming(receipt, timelineAudit);
   exact(receipt.exports, snapshot.generation.tellaExports, "Tella export receipt generation lineage");
   exact(
     snapshot.postProduction.tellaExports,
@@ -670,7 +683,11 @@ const validateExportProvenance = (snapshot: GptLiveQaSnapshot): void => {
   }
   const fullscreen = (() => {
     try {
-      return assertSourceFullscreenEvidence(snapshot.plan, snapshot.postProduction.sourceFullscreen);
+      return assertSourceFullscreenEvidence(
+        snapshot.plan,
+        snapshot.postProduction.sourceFullscreen,
+        sourceFullscreenTiming
+      );
     } catch (error) {
       return fail(
         `source fullscreen evidence is invalid: ${error instanceof Error ? error.message : String(error)}`
@@ -680,7 +697,11 @@ const validateExportProvenance = (snapshot: GptLiveQaSnapshot): void => {
   exact(fullscreen, snapshot.generation.sourceFullscreen, "source fullscreen generation lineage");
   const observedFullscreen = (() => {
     try {
-      return assertSourceFullscreenEvidence(snapshot.plan, snapshot.observedSourceFullscreen);
+      return assertSourceFullscreenEvidence(
+        snapshot.plan,
+        snapshot.observedSourceFullscreen,
+        sourceFullscreenTiming
+      );
     } catch (error) {
       return fail(
         `fresh measured source fullscreen evidence is invalid: ${error instanceof Error ? error.message : String(error)}`
@@ -693,7 +714,7 @@ const validateExportProvenance = (snapshot: GptLiveQaSnapshot): void => {
 const validateBrandingAndAudio = (snapshot: GptLiveQaSnapshot): void => {
   const post = snapshot.postProduction;
   if (
-    post.schemaVersion !== "0.3.0" ||
+    post.schemaVersion !== "0.4.0" ||
     post.status !== "finished" ||
     post.productionId !== GPT_LIVE_CONTENT.id ||
     post.generationId !== snapshot.generation.generationId

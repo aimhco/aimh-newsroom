@@ -43,7 +43,9 @@ import { buildTellaTimelineAudit } from "../src/production/gptLive/tellaState";
 import { sealTellaExports } from "../src/production/gptLive/tellaExportReceipt";
 import {
   SOURCE_FULLSCREEN_SSIM_THRESHOLD,
-  deriveSourceFullscreenExpectations
+  buildSourceFullscreenTiming,
+  deriveSourceFullscreenExpectations,
+  type SourceFullscreenTiming
 } from "../src/production/gptLive/sourceFullscreen";
 import { runCommand } from "../src/render/process";
 
@@ -113,7 +115,7 @@ const fakeTellaExports = () => [
     version: "version-a" as const,
     sourceVariant: "dynamic_editorial" as const,
     remoteVideoId: "video-a",
-    workflowId: "Export-Story-video-a/Story",
+    workflowId: "Export-Story-video-a/2026-07-12T17:23:26.147Z/Story/1920x1080/30FPS",
     exportPath: "exports/tella-a.mp4" as const,
     sha256: "1".repeat(64),
     byteSize: 90
@@ -122,22 +124,41 @@ const fakeTellaExports = () => [
     version: "version-b" as const,
     sourceVariant: "aimh_visual_host" as const,
     remoteVideoId: "video-b",
-    workflowId: "Export-Story-video-b/Story",
+    workflowId: "Export-Story-video-b/2026-07-12T17:24:26.147Z/Story/1920x1080/30FPS",
     exportPath: "exports/tella-b.mp4" as const,
     sha256: "1".repeat(64),
     byteSize: 90
   }
 ] as const;
 
-const fakeSourceFullscreen = (value: TellaPlan = plan() as unknown as TellaPlan) =>
-  deriveSourceFullscreenExpectations(value).map((sample) => ({
+const fakeSourceFullscreenTiming = (value: TellaPlan): SourceFullscreenTiming => ({
+  narrationDurationMs: {
+    "version-a": value.clips.filter((clip) => clip.kind === "narration")
+      .map((clip) => Math.round(clip.durationSeconds * 1_000)),
+    "version-b": value.clips.filter((clip) => clip.kind === "narration")
+      .map((clip) => Math.round(clip.durationSeconds * 1_000))
+  },
+  sourceDurationMs: {
+    "version-a": value.clips.filter((clip) => clip.kind === "source_clip")
+      .map((clip) => Math.round(clip.durationSeconds * 1_000)),
+    "version-b": value.clips.filter((clip) => clip.kind === "source_clip")
+      .map((clip) => Math.round(clip.durationSeconds * 1_000))
+  }
+});
+
+const fakeSourceFullscreen = (
+  value: TellaPlan = plan() as unknown as TellaPlan,
+  timing: SourceFullscreenTiming = fakeSourceFullscreenTiming(value)
+) =>
+  deriveSourceFullscreenExpectations(value, timing).map((sample) => ({
     ...sample,
     ssim: 0.93,
     threshold: SOURCE_FULLSCREEN_SSIM_THRESHOLD
   }));
 
-const passingSourceFullscreen = async ({ plan: value }: { plan: TellaPlan }) =>
-  fakeSourceFullscreen(value);
+const passingSourceFullscreen = async (
+  { plan: value, timing }: { plan: TellaPlan; timing: SourceFullscreenTiming }
+) => fakeSourceFullscreen(value, timing);
 
 const preparedArtifact = (logicalId = "source:clip_translation") => ({
   logicalId,
@@ -804,6 +825,17 @@ describe("GPT-Live post-production publication", () => {
             ])
           )
         ])
+      ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>,
+      sourceClipDurationMs: Object.fromEntries(
+        GPT_LIVE_CONTENT.variants.map((variant) => [
+          variant,
+          Object.fromEntries(
+            episodePlan.clips.filter((clip) => clip.kind === "source_clip").map((clip) => [
+              clip.id,
+              Math.round(clip.durationSeconds * 1_000)
+            ])
+          )
+        ])
       ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>
     });
     await Promise.all([
@@ -875,15 +907,21 @@ describe("GPT-Live post-production publication", () => {
           version: "version-a",
           sourceVariant: "dynamic_editorial",
           remoteVideoId: "video-a",
-          workflowId: "Export-Story-video-a/Story"
+          workflowId: "Export-Story-video-a/2026-07-12T17:23:26.147Z/Story/1920x1080/30FPS",
+          downloadUrl: "https://prod-compose.tella.tv/video-a/2026-07-12T17:23:26.147Z/video/1920x1080/30FPS/video.mp4?secret-a"
         },
         {
           version: "version-b",
           sourceVariant: "aimh_visual_host",
           remoteVideoId: "video-b",
-          workflowId: "Export-Story-video-b/Story"
+          workflowId: "Export-Story-video-b/2026-07-12T17:24:26.147Z/Story/1920x1080/30FPS",
+          downloadUrl: "https://prod-compose.tella.tv/video-b/2026-07-12T17:24:26.147Z/video/1920x1080/30FPS/video.mp4?secret-b"
         }
       ]
+    }, {
+      fetch: async (input) => new Response(
+        new URL(String(input)).pathname.includes("video-a") ? "export-a" : "export-b"
+      )
     });
     return episodeDir;
   };
@@ -932,7 +970,7 @@ describe("GPT-Live post-production publication", () => {
         version: "version-a" as const,
         sourceVariant: "dynamic_editorial" as const,
         remoteVideoId: "vid_dynamic",
-        workflowId: "Export-Story-vid_dynamic/Story",
+        workflowId: "Export-Story-vid_dynamic/2026-07-12T17:23:26.147Z/Story/1920x1080/30FPS",
         exportPath: "exports/tella-a.mp4" as const,
         sha256: sha256("export-a"),
         byteSize: 8
@@ -941,14 +979,16 @@ describe("GPT-Live post-production publication", () => {
         version: "version-b" as const,
         sourceVariant: "aimh_visual_host" as const,
         remoteVideoId: "vid_host",
-        workflowId: "Export-Story-vid_host/Story",
+        workflowId: "Export-Story-vid_host/2026-07-12T17:24:26.147Z/Story/1920x1080/30FPS",
         exportPath: "exports/tella-b.mp4" as const,
         sha256: sha256("export-b"),
         byteSize: 8
       }
     ] as const;
+    const manifestPlan = plan() as unknown as TellaPlan;
     const sourceFullscreen = deriveSourceFullscreenExpectations(
-      plan() as unknown as TellaPlan
+      manifestPlan,
+      fakeSourceFullscreenTiming(manifestPlan)
     ).map((sample) => ({
       ...sample,
       ssim: 0.93,
@@ -994,6 +1034,8 @@ describe("GPT-Live post-production publication", () => {
     } as Parameters<typeof buildPostProductionManifest>[0] & {
       preparationFingerprint: string;
     });
+
+    expect(sourceFullscreen).toHaveLength(12);
 
     expect(manifest).toMatchObject({
       preparationFingerprint,
@@ -1062,7 +1104,15 @@ describe("GPT-Live post-production publication", () => {
       tellaExports: JSON.parse(
         await readFile(join(episodeDir, "reports", "tella-export-receipt.json"), "utf8")
       ).exports,
-      sourceFullscreen: fakeSourceFullscreen(episodePlan),
+      sourceFullscreen: fakeSourceFullscreen(
+        episodePlan,
+        buildSourceFullscreenTiming(
+          JSON.parse(
+            await readFile(join(episodeDir, "reports", "tella-export-receipt.json"), "utf8")
+          ),
+          JSON.parse(await readFile(join(episodeDir, "tella", "state.json"), "utf8")).timelineAudit
+        )
+      ),
       variants: [
         {
           name: "version-a",
@@ -1264,7 +1314,7 @@ describe("GPT-Live post-production publication", () => {
     const serialized = JSON.stringify(manifest);
 
     expect(manifest).toMatchObject({
-      schemaVersion: "0.3.0",
+      schemaVersion: "0.4.0",
       status: "finished",
       generationId: "00000000-0000-4000-8000-000000000000",
       assets: {
@@ -1580,6 +1630,25 @@ describe("GPT-Live post-production publication", () => {
     }
   });
 
+  it("rejects published fullscreen evidence bound to stale audited remote timing", async () => {
+    const episodeDir = await createContainedEpisode();
+    await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
+    await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
+    await writeGenerationMarker(episodeDir, "current-a", "current-b");
+    const statePath = join(episodeDir, "tella", "state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    state.timelineAudit.narrationLayouts.dynamic_editorial[0].durationMs -= 50;
+    state.timelineAudit.sourceClips.dynamic_editorial[0].durationMs += 50;
+    await writeFile(statePath, JSON.stringify(state), "utf8");
+
+    try {
+      await expect(validatePublishedGeneration(episodeDir))
+        .rejects.toThrow(/source fullscreen|fullscreen evidence/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a Tella export mutated after the generation was published", async () => {
     const episodeDir = await createContainedEpisode();
     await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
@@ -1793,6 +1862,33 @@ describe("GPT-Live post-production publication", () => {
       expect(verifySourceFullscreen).toHaveBeenCalledOnce();
       expect(measureIntervalLoudness).not.toHaveBeenCalled();
       expect(runCommand).not.toHaveBeenCalled();
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("passes independent audited A/B narration timing to fullscreen verification", async () => {
+    const episodeDir = await createContainedEpisode();
+    const statePath = join(episodeDir, "tella", "state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    state.timelineAudit.narrationLayouts.dynamic_editorial[0].durationMs -= 50;
+    state.timelineAudit.narrationLayouts.aimh_visual_host[0].durationMs -= 25;
+    state.timelineAudit.sourceClips.dynamic_editorial[0].durationMs += 50;
+    state.timelineAudit.sourceClips.aimh_visual_host[0].durationMs += 25;
+    await writeFile(statePath, JSON.stringify(state), "utf8");
+    const verifySourceFullscreen = vi.fn(async (options: any) => {
+      expect(options.timing.narrationDurationMs["version-a"][0]).toBe(5_450);
+      expect(options.timing.narrationDurationMs["version-b"][0]).toBe(5_475);
+      throw new Error("captured audited fullscreen timing");
+    });
+
+    try {
+      await expect(finishGptLiveProduction(finishOptions(episodeDir), {
+        access: async () => undefined,
+        inspectFinalMediaFile: async () => validInspection(11.75),
+        verifySourceFullscreen
+      } as any)).rejects.toThrow("captured audited fullscreen timing");
+      expect(verifySourceFullscreen).toHaveBeenCalledOnce();
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
     }

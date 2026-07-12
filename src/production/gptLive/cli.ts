@@ -96,9 +96,11 @@ const SEAL_OPTIONS = [
   "version-a-source-variant",
   "version-a-video-id",
   "version-a-workflow-id",
+  "version-a-download-url",
   "version-b-source-variant",
   "version-b-video-id",
-  "version-b-workflow-id"
+  "version-b-workflow-id",
+  "version-b-download-url"
 ] as const;
 type SealOption = (typeof SEAL_OPTIONS)[number];
 
@@ -160,6 +162,10 @@ const buildSealIdentities = (
       workflowId: required(
         `${version}-workflow-id` as SealOption,
         `GPT_LIVE_TELLA_VERSION_${prefix}_WORKFLOW_ID`
+      ),
+      downloadUrl: required(
+        `${version}-download-url` as SealOption,
+        `GPT_LIVE_TELLA_VERSION_${prefix}_DOWNLOAD_URL`
       )
     } as const;
   };

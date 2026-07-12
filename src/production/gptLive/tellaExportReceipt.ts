@@ -6,8 +6,9 @@ import { GPT_LIVE_CONTENT } from "./content";
 import { validateContainedEpisodePaths } from "./qa/paths";
 import type { GptLiveVariant } from "./types";
 
-export const TELLA_EXPORT_RECEIPT_SCHEMA_VERSION = "0.1.0" as const;
+export const TELLA_EXPORT_RECEIPT_SCHEMA_VERSION = "0.2.0" as const;
 export const TELLA_EXPORT_RECEIPT_RELATIVE_PATH = "reports/tella-export-receipt.json" as const;
+export const TELLA_EXPORT_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 
 export type TellaExportVersion = "version-a" | "version-b";
 
@@ -32,6 +33,7 @@ export interface TellaExportSealIdentity {
   readonly sourceVariant: GptLiveVariant;
   readonly remoteVideoId: string;
   readonly workflowId: string;
+  readonly downloadUrl: string;
 }
 
 export interface SealTellaExportsOptions {
@@ -49,6 +51,7 @@ type ReadText = (path: string, encoding: "utf8") => Promise<string>;
 type ReadBytes = (path: string) => Promise<Uint8Array>;
 
 export interface TellaExportReceiptDependencies {
+  readonly fetch?: typeof globalThis.fetch;
   readonly readFile?: ReadText;
   readonly readFileBytes?: ReadBytes;
   readonly writeJsonAtomic?: typeof defaultWriteJsonAtomic;
@@ -75,6 +78,9 @@ const SAFE_WORKFLOW_ID = /^[a-z0-9][-a-z0-9._/:]{0,255}$/i;
 const LEADING_URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const PATH_SEGMENT_URI_SCHEME = /(?:^|\/)[A-Za-z][A-Za-z0-9+.-]*:/;
 const SECRET_LIKE = /(?:api[_-]?key|bearer|credential|password|secret|signature|signed|token|x-amz)/i;
+const TELLA_DOWNLOAD_HOST = "prod-compose.tella.tv";
+const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_REDIRECTS = 5;
 
 const invalid = (detail: string): never => {
   throw new Error(`Invalid Tella export receipt: ${detail}`);
@@ -113,7 +119,17 @@ const requireVariantVideoIds = (stateValue: unknown): Record<GptLiveVariant, str
   return ids as unknown as Record<GptLiveVariant, string>;
 };
 
-const requireWorkflowId = (value: unknown, remoteVideoId: string): string => {
+interface TellaWorkflowBinding {
+  readonly workflowId: string;
+  readonly remoteVideoId: string;
+  readonly timestamp: string;
+  readonly pathname: string;
+}
+
+const requireWorkflowBinding = (
+  value: unknown,
+  remoteVideoId: string
+): TellaWorkflowBinding => {
   if (
     typeof value !== "string" ||
     !SAFE_WORKFLOW_ID.test(value) ||
@@ -125,16 +141,151 @@ const requireWorkflowId = (value: unknown, remoteVideoId: string): string => {
   }
   const workflowId = value as string;
   if (SECRET_LIKE.test(workflowId)) invalid("workflowId contains secret-like data");
-  if (!workflowId.startsWith(`Export-Story-${remoteVideoId}/`)) {
-    invalid("workflowId must start with the exact Tella remote videoId prefix");
+  const parts = workflowId.split("/");
+  const timestamp = parts[1];
+  if (
+    parts.length !== 5 ||
+    parts[0] !== `Export-Story-${remoteVideoId}` ||
+    !timestamp ||
+    parts[2] !== "Story" ||
+    parts[3] !== "1920x1080" ||
+    parts[4] !== "30FPS"
+  ) {
+    invalid("workflowId must match the exact Tella export workflow shape");
   }
-  return workflowId;
+  const parsedTimestamp = new Date(timestamp);
+  if (!Number.isFinite(parsedTimestamp.getTime()) || parsedTimestamp.toISOString() !== timestamp) {
+    invalid("workflowId timestamp must be canonical ISO-8601");
+  }
+  return {
+    workflowId,
+    remoteVideoId,
+    timestamp,
+    pathname: `/${remoteVideoId}/${timestamp}/video/1920x1080/30FPS/video.mp4`
+  };
+};
+
+const requireWorkflowId = (value: unknown, remoteVideoId: string): string =>
+  requireWorkflowBinding(value, remoteVideoId).workflowId;
+
+const requireDownloadUrl = (
+  value: unknown,
+  binding: TellaWorkflowBinding,
+  version: TellaExportVersion
+): URL => {
+  let url: URL;
+  try {
+    if (typeof value !== "string" || !value) throw new Error("missing");
+    url = new URL(value);
+  } catch {
+    throw new Error(`Invalid Tella download URL for ${version}`);
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== TELLA_DOWNLOAD_HOST ||
+    url.port !== "" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.hash !== "" ||
+    url.pathname !== binding.pathname
+  ) {
+    throw new Error(`Invalid Tella download URL for ${version}`);
+  }
+  return url;
 };
 
 const digest = (bytes: Uint8Array) => ({
   sha256: createHash("sha256").update(bytes).digest("hex"),
   byteSize: bytes.byteLength
 });
+
+const parseContentLength = (value: string | null): number | undefined => {
+  if (value === null) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+};
+
+const cancelResponseBody = async (response: Response): Promise<void> => {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // The seal still fails closed if transport cleanup itself fails.
+  }
+};
+
+const downloadDigest = async (
+  initialUrl: URL,
+  binding: TellaWorkflowBinding,
+  version: TellaExportVersion,
+  fetchImplementation: typeof globalThis.fetch
+): Promise<ReturnType<typeof digest>> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+  let currentUrl = initialUrl;
+  try {
+    for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
+      const response = await fetchImplementation(currentUrl, {
+        redirect: "manual",
+        signal: controller.signal
+      });
+      if (response.url) {
+        try {
+          requireDownloadUrl(response.url, binding, version);
+        } catch (error) {
+          await cancelResponseBody(response);
+          throw error;
+        }
+      }
+      if (response.status >= 300 && response.status < 400) {
+        await cancelResponseBody(response);
+        if (redirectCount === MAX_REDIRECTS) throw new Error("redirect limit");
+        const location = response.headers.get("location");
+        if (!location) throw new Error("redirect location");
+        let nextUrl: URL;
+        try {
+          nextUrl = new URL(location, currentUrl);
+        } catch {
+          throw new Error("redirect URL");
+        }
+        currentUrl = requireDownloadUrl(nextUrl.href, binding, version);
+        continue;
+      }
+      if (!response.ok) {
+        await cancelResponseBody(response);
+        throw new Error("response status");
+      }
+      const declaredSize = parseContentLength(response.headers.get("content-length"));
+      if (declaredSize !== undefined && declaredSize > TELLA_EXPORT_MAX_BYTES) {
+        await cancelResponseBody(response);
+        throw new Error("response size");
+      }
+      if (!response.body) throw new Error("response body");
+      const hash = createHash("sha256");
+      let byteSize = 0;
+      const reader = response.body.getReader();
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          byteSize += chunk.value.byteLength;
+          if (byteSize > TELLA_EXPORT_MAX_BYTES) {
+            await reader.cancel();
+            throw new Error("response size");
+          }
+          hash.update(chunk.value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      return { sha256: hash.digest("hex"), byteSize };
+    }
+    throw new Error("redirect limit");
+  } catch {
+    throw new Error(`Remote Tella export download failed for ${version}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+};
 
 export const tellaExportReceiptPath = (episodeDir: string): string =>
   join(episodeDir, TELLA_EXPORT_RECEIPT_RELATIVE_PATH);
@@ -229,6 +380,7 @@ export async function sealTellaExports(
   const readFileBytes = dependencies.readFileBytes ??
     ((path: string) => defaultReadFile(path) as Promise<Uint8Array>);
   const writeJsonAtomic = dependencies.writeJsonAtomic ?? defaultWriteJsonAtomic;
+  const fetchImplementation = dependencies.fetch ?? globalThis.fetch;
   const statePath = join(options.episodeDir, "tella", "state.json");
   const exportPaths = DEFINITIONS.map(({ version }) => tellaExportPath(options.episodeDir, version));
   const reportsDirectory = join(options.episodeDir, "reports");
@@ -258,7 +410,10 @@ export async function sealTellaExports(
       invalid("seal inputs must be ordered version-a then version-b");
     }
     return {
-      ...identity,
+      version: identity.version,
+      sourceVariant: identity.sourceVariant,
+      remoteVideoId: identity.remoteVideoId,
+      workflowId: identity.workflowId,
       exportPath: definition.exportPath,
       ...digest(bytes[index]!)
     };
@@ -268,6 +423,36 @@ export async function sealTellaExports(
     productionId: GPT_LIVE_CONTENT.id,
     exports: records
   }, tellaState);
+
+  const downloadBindings = receipt.exports.map((record, index) => {
+    const identity = options.exports[index]!;
+    const workflow = requireWorkflowBinding(record.workflowId, record.remoteVideoId);
+    return {
+      version: record.version,
+      workflow,
+      url: requireDownloadUrl(identity.downloadUrl, workflow, record.version)
+    };
+  });
+  const downloads = new Map<string, Promise<ReturnType<typeof digest>>>();
+  const remoteDigests = await Promise.all(downloadBindings.map((binding) => {
+    const key = `${binding.workflow.workflowId}\0${binding.url.href}`;
+    const existing = downloads.get(key);
+    if (existing) return existing;
+    const pending = downloadDigest(
+      binding.url,
+      binding.workflow,
+      binding.version,
+      fetchImplementation
+    );
+    downloads.set(key, pending);
+    return pending;
+  }));
+  for (const [index, record] of receipt.exports.entries()) {
+    const remote = remoteDigests[index]!;
+    if (remote.byteSize !== record.byteSize || remote.sha256 !== record.sha256) {
+      throw new Error(`Remote Tella export bytes for ${record.version} mismatch the local export`);
+    }
+  }
   await writeJsonAtomic(receiptPath, receipt);
   return { episodeDir: options.episodeDir, receiptPath, receipt };
 }

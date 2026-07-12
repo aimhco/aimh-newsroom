@@ -26,8 +26,10 @@ import { withEpisodeProductionLock } from "./productionLock";
 import { validateContainedEpisodePaths } from "./qa/paths";
 import {
   assertSourceFullscreenEvidence,
+  buildSourceFullscreenTiming,
   verifySourceFullscreen as defaultVerifySourceFullscreen,
-  type SourceFullscreenEvidence
+  type SourceFullscreenEvidence,
+  type SourceFullscreenTiming
 } from "./sourceFullscreen";
 import {
   tellaExportReceiptPath,
@@ -870,7 +872,7 @@ export function buildPostProductionManifest(options: BuildPostProductionManifest
   const programDurationSeconds = options.variants[0]?.inputDurationSeconds ?? 0;
   const outroTiming = deriveOutroTiming(programDurationSeconds, options.outroDurationSeconds);
   return {
-    schemaVersion: "0.3.0" as const,
+    schemaVersion: "0.4.0" as const,
     status: "finished" as const,
     productionId: options.productionId,
     generationId: options.generationId,
@@ -953,7 +955,7 @@ interface PublishedVariantRecord {
 }
 
 interface PublishedGenerationManifest {
-  readonly schemaVersion: "0.3.0";
+  readonly schemaVersion: "0.4.0";
   readonly status: "finished";
   readonly generationId: string;
   readonly preparationFingerprint: string;
@@ -1091,6 +1093,7 @@ const parsePublishedGenerationManifest = (
   expectedSourceIntervals: readonly DuckInterval[],
   expectedTellaExports: TellaExportReceipt,
   expectedPlan: TellaPlan,
+  expectedSourceFullscreenTiming: SourceFullscreenTiming,
   expectedPreparationFingerprint: string
 ): PublishedGenerationManifest => {
   let value: unknown;
@@ -1125,7 +1128,7 @@ const parsePublishedGenerationManifest = (
     variantDurationToleranceSeconds: VARIANT_DURATION_TOLERANCE_SECONDS
   } as const;
   if (
-    candidate.schemaVersion !== "0.3.0" ||
+    candidate.schemaVersion !== "0.4.0" ||
     candidate.status !== "finished" ||
     candidate.productionId !== expectedAudio.productionId ||
     typeof candidate.generationId !== "string" ||
@@ -1153,7 +1156,11 @@ const parsePublishedGenerationManifest = (
     throw new Error("Invalid published generation manifest Tella export provenance");
   }
   try {
-    assertSourceFullscreenEvidence(expectedPlan, candidate.sourceFullscreen);
+    assertSourceFullscreenEvidence(
+      expectedPlan,
+      candidate.sourceFullscreen,
+      expectedSourceFullscreenTiming
+    );
   } catch {
     throw new Error("Invalid published generation manifest source fullscreen evidence");
   }
@@ -1546,7 +1553,7 @@ export async function validatePublishedGeneration(
     readFileBytes,
     realpath
   });
-  validateTellaTimelineAudit(plan, tellaStateValue);
+  const timelineAudit = validateTellaTimelineAudit(plan, tellaStateValue);
   const tellaExportReceipt = await defaultValidateSealedTellaExports({
     episodeDir,
     receipt: parseJson(exportReceiptText, "Tella export receipt"),
@@ -1566,6 +1573,10 @@ export async function validatePublishedGeneration(
     logoSha256: createHash("sha256").update(logoBytes).digest("hex")
   };
   const expectedSourceIntervals = deriveSourceDuckIntervals(plan);
+  const sourceFullscreenTiming = buildSourceFullscreenTiming(
+    tellaExportReceipt,
+    timelineAudit
+  );
   const manifest = parsePublishedGenerationManifest(
     manifestText,
     expectedAudio,
@@ -1573,6 +1584,7 @@ export async function validatePublishedGeneration(
     expectedSourceIntervals,
     tellaExportReceipt,
     plan as TellaPlan,
+    sourceFullscreenTiming,
     prepared.manifestFingerprint
   );
 
@@ -1919,12 +1931,16 @@ async function finishGptLiveProductionUnlocked(
     readFileBytes,
     realpath
   });
-  validateTellaTimelineAudit(plan, tellaStateValue);
+  const timelineAudit = validateTellaTimelineAudit(plan, tellaStateValue);
   const tellaExportReceipt: TellaExportReceipt = await validateSealedExports({
     episodeDir: options.episodeDir,
     receipt: exportReceiptValue,
     tellaState: tellaStateValue
   });
+  const sourceFullscreenTiming = buildSourceFullscreenTiming(
+    tellaExportReceipt,
+    timelineAudit
+  );
   const programAudio = buildProgramAudioPlan(options.episodeDir, plan as TellaPlan);
   const duckIntervals = deriveSourceDuckIntervals(plan);
   await mkdir(finalDirectory, { recursive: true });
@@ -2013,7 +2029,8 @@ async function finishGptLiveProductionUnlocked(
       exportPaths: {
         "version-a": inputPaths[0]!,
         "version-b": inputPaths[1]!
-      }
+      },
+      timing: sourceFullscreenTiming
     });
     const sourceInputs = programAudio.inputs.filter((input) => input.kind === "source_clip");
     const sourceLoudness = await Promise.all(

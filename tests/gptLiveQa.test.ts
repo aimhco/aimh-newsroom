@@ -58,7 +58,9 @@ import { assertSafeSourceManifestUrl } from "../src/production/gptLive/qa/valida
 import { buildTellaPlan } from "../src/production/gptLive/tellaPlan";
 import {
   SOURCE_FULLSCREEN_SSIM_THRESHOLD,
-  deriveSourceFullscreenExpectations
+  buildSourceFullscreenTiming,
+  deriveSourceFullscreenExpectations,
+  type SourceFullscreenTiming
 } from "../src/production/gptLive/sourceFullscreen";
 import {
   buildTellaTimelineAudit,
@@ -228,7 +230,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
       version: "version-a" as const,
       sourceVariant: "dynamic_editorial" as const,
       remoteVideoId: "video-a",
-      workflowId: "Export-Story-video-a/Story",
+      workflowId: "Export-Story-video-a/2026-07-12T17:23:26.147Z/Story/1920x1080/30FPS",
       exportPath: "exports/tella-a.mp4" as const,
       sha256: sha("6"),
       byteSize: 900
@@ -237,13 +239,30 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
       version: "version-b" as const,
       sourceVariant: "aimh_visual_host" as const,
       remoteVideoId: "video-b",
-      workflowId: "Export-Story-video-b/Story",
+      workflowId: "Export-Story-video-b/2026-07-12T17:24:26.147Z/Story/1920x1080/30FPS",
       exportPath: "exports/tella-b.mp4" as const,
       sha256: sha("7"),
       byteSize: 901
     }
   ] as const;
-  const sourceFullscreen = deriveSourceFullscreenExpectations(plan).map((sample) => ({
+  const sourceFullscreenTiming: SourceFullscreenTiming = {
+    narrationDurationMs: {
+      "version-a": plan.clips.filter((clip) => clip.kind === "narration")
+        .map((clip) => Math.round(clip.durationSeconds * 1_000)),
+      "version-b": plan.clips.filter((clip) => clip.kind === "narration")
+        .map((clip) => Math.round(clip.durationSeconds * 1_000))
+    },
+    sourceDurationMs: {
+      "version-a": plan.clips.filter((clip) => clip.kind === "source_clip")
+        .map((clip) => Math.round(clip.durationSeconds * 1_000)),
+      "version-b": plan.clips.filter((clip) => clip.kind === "source_clip")
+        .map((clip) => Math.round(clip.durationSeconds * 1_000))
+    }
+  };
+  const sourceFullscreen = deriveSourceFullscreenExpectations(
+    plan,
+    sourceFullscreenTiming
+  ).map((sample) => ({
     ...sample,
     ssim: 0.93,
     threshold: SOURCE_FULLSCREEN_SSIM_THRESHOLD
@@ -337,7 +356,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
     )
   };
   (state as Record<string, unknown>).timelineAudit = {
-    schemaVersion: "0.1.0",
+    schemaVersion: "0.2.0",
     compatibilityVideoIds: structuredClone(state.variantVideoIds),
     orderedClipIds: Object.fromEntries(
       GPT_LIVE_CONTENT.variants.map((variant) => [
@@ -358,6 +377,15 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
           startTimeMs: 0,
           durationMs: Math.round(clip.durationSeconds * 1_000),
           transitionStyle: "hardCut"
+        }))
+      ])
+    ),
+    sourceClips: Object.fromEntries(
+      GPT_LIVE_CONTENT.variants.map((variant) => [
+        variant,
+        plan.clips.filter((clip) => clip.kind === "source_clip").map((clip) => ({
+          clipId: state.variantClipIds[variant][clip.id],
+          durationMs: Math.round(clip.durationSeconds * 1_000)
         }))
       ])
     ),
@@ -451,7 +479,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
     ),
     plan,
     tellaExportReceipt: {
-      schemaVersion: "0.1.0",
+      schemaVersion: "0.2.0",
       productionId: GPT_LIVE_CONTENT.id,
       exports: tellaExports
     },
@@ -1425,11 +1453,17 @@ describe("GPT-Live full production QA", () => {
     ["extra fullscreen score", (snapshot: any) => {
       snapshot.postProduction.sourceFullscreen.push({ ...snapshot.postProduction.sourceFullscreen[0] });
     }],
+    ["reordered fullscreen scores", (snapshot: any) => {
+      snapshot.postProduction.sourceFullscreen.reverse();
+    }],
     ["wrong fullscreen version", (snapshot: any) => {
       snapshot.postProduction.sourceFullscreen[0].version = "version-b";
     }],
     ["wrong fullscreen source", (snapshot: any) => {
       snapshot.postProduction.sourceFullscreen[0].clipId = "unexpected";
+    }],
+    ["tampered fullscreen sample fraction", (snapshot: any) => {
+      snapshot.postProduction.sourceFullscreen[0].sampleFraction = 0.2;
     }],
     ["fullscreen score below threshold", (snapshot: any) => {
       snapshot.postProduction.sourceFullscreen[0].ssim = 0.87;
@@ -1449,6 +1483,16 @@ describe("GPT-Live full production QA", () => {
     (snapshot.generation.sourceFullscreen as any[])[0].ssim = 0.91;
 
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/fresh|measured|fullscreen/i);
+  });
+
+  it("rejects fullscreen lineage bound to stale audited remote timing", () => {
+    const snapshot = validSnapshot();
+    (snapshot.tellaState as any).timelineAudit
+      .narrationLayouts.dynamic_editorial[0].durationMs -= 50;
+    (snapshot.tellaState as any).timelineAudit
+      .sourceClips.dynamic_editorial[0].durationMs += 50;
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/fullscreen|timing/i);
   });
 
   it("revalidates receipt bytes before rejecting changed visual evidence", async () => {
@@ -1484,6 +1528,47 @@ describe("GPT-Live full production QA", () => {
       expect(validateSealedTellaExports).toHaveBeenCalledOnce();
       expect(verifySourceFullscreen).toHaveBeenCalledOnce();
       expect(generateVisualArtifacts).not.toHaveBeenCalled();
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("passes independent audited A/B narration timing to fresh QA measurement", async () => {
+    const harness = await createQaRunHarness();
+    const statePath = join(harness.episodeDir, "tella", "state.json");
+    const state = structuredClone(harness.snapshot.tellaState) as any;
+    state.timelineAudit.narrationLayouts.dynamic_editorial[0].durationMs -= 50;
+    state.timelineAudit.narrationLayouts.aimh_visual_host[0].durationMs -= 25;
+    state.timelineAudit.sourceClips.dynamic_editorial[0].durationMs += 50;
+    state.timelineAudit.sourceClips.aimh_visual_host[0].durationMs += 25;
+    const readSnapshotFile = harness.dependencies.readFile!;
+    const verifySourceFullscreen = vi.fn(async (options: any) => {
+      const preparedDuration = Math.round(
+        harness.snapshot.plan.clips.find((clip) => clip.kind === "narration")!.durationSeconds *
+          1_000
+      );
+      expect(options.timing.narrationDurationMs["version-a"][0])
+        .toBe(preparedDuration - 50);
+      expect(options.timing.narrationDurationMs["version-b"][0])
+        .toBe(preparedDuration - 25);
+      throw new Error("captured audited QA fullscreen timing");
+    });
+
+    try {
+      await expect(runGptLiveQa({
+        episodeDir: harness.episodeDir,
+        env: harness.snapshot.env,
+        ffmpegPath: "ffmpeg",
+        ffprobePath: "ffprobe"
+      }, {
+        ...harness.dependencies,
+        readFile: async (path: string, encoding: "utf8") => path === statePath
+          ? JSON.stringify(state)
+          : readSnapshotFile(path, encoding),
+        validatePublishedGeneration: async () => harness.generation,
+        verifySourceFullscreen
+      } as any)).rejects.toThrow("captured audited QA fullscreen timing");
+      expect(verifySourceFullscreen).toHaveBeenCalledOnce();
     } finally {
       await rm(harness.episodeDir, { recursive: true, force: true });
     }
@@ -1720,6 +1805,30 @@ describe("GPT-Live full production QA", () => {
       }
     },
     {
+      name: "missing queried source clip",
+      mutate: (audit: Record<string, any>) => {
+        audit.sourceClips.dynamic_editorial.pop();
+      }
+    },
+    {
+      name: "reordered queried source clips",
+      mutate: (audit: Record<string, any>) => {
+        audit.sourceClips.aimh_visual_host.reverse();
+      }
+    },
+    {
+      name: "source clip duration outside tolerance",
+      mutate: (audit: Record<string, any>) => {
+        audit.sourceClips.dynamic_editorial[0].durationMs += 251;
+      }
+    },
+    {
+      name: "clip durations that do not reconstruct the story",
+      mutate: (audit: Record<string, any>) => {
+        audit.sourceClips.dynamic_editorial[0].durationMs += 34;
+      }
+    },
+    {
       name: "shifted narration layout",
       mutate: (audit: Record<string, any>) => {
         audit.narrationLayouts.dynamic_editorial[0].startTimeMs = 1;
@@ -1766,6 +1875,18 @@ describe("GPT-Live full production QA", () => {
     const snapshot = validSnapshot();
     const audit = (snapshot.tellaState as Record<string, any>).timelineAudit;
     audit.narrationLayouts.dynamic_editorial[0].durationMs += 100;
+    audit.sourceClips.dynamic_editorial[0].durationMs -= 100;
+    const refreshedFullscreen = deriveSourceFullscreenExpectations(
+      snapshot.plan,
+      buildSourceFullscreenTiming(snapshot.tellaExportReceipt, audit)
+    ).map((sample) => ({
+      ...sample,
+      ssim: 0.93,
+      threshold: SOURCE_FULLSCREEN_SSIM_THRESHOLD
+    }));
+    snapshot.postProduction.sourceFullscreen = structuredClone(refreshedFullscreen);
+    (snapshot.generation as any).sourceFullscreen = structuredClone(refreshedFullscreen);
+    snapshot.observedSourceFullscreen = structuredClone(refreshedFullscreen);
 
     expect(() => validateGptLiveQaSnapshot(snapshot)).not.toThrow();
   });
@@ -1787,6 +1908,14 @@ describe("GPT-Live full production QA", () => {
               expected.narrationLayouts[variant][index]!.durationMs
             ])
           )
+        ])
+      ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>,
+      sourceClipDurationMs: Object.fromEntries(
+        GPT_LIVE_CONTENT.variants.map((variant) => [
+          variant,
+          Object.fromEntries(snapshot.plan.clips
+            .filter((clip) => clip.kind === "source_clip")
+            .map((clip, index) => [clip.id, expected.sourceClips[variant][index]!.durationMs]))
         ])
       ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>
     });
@@ -1817,7 +1946,15 @@ describe("GPT-Live full production QA", () => {
         dynamic_editorial: 129_310,
         aimh_visual_host: 129_310
       },
-      narrationLayoutDurationMs
+      narrationLayoutDurationMs,
+      sourceClipDurationMs: Object.fromEntries(
+        GPT_LIVE_CONTENT.variants.map((variant) => [
+          variant,
+          Object.fromEntries(snapshot.plan.clips
+            .filter((clip) => clip.kind === "source_clip")
+            .map((clip) => [clip.id, Math.round(clip.durationSeconds * 1_000) + 175]))
+        ])
+      ) as Record<(typeof GPT_LIVE_CONTENT.variants)[number], Record<string, number>>
     });
 
     expect(audit.narrationLayouts.dynamic_editorial.map(({ durationMs }) => durationMs))
@@ -2130,6 +2267,8 @@ describe("GPT-Live full production QA", () => {
       );
 
       const report = JSON.parse(await readFile(harness.paths.reportPath, "utf8"));
+      expect(report.schemaVersion).toBe("0.2.0");
+      expect(report.generation.sourceFullscreen).toHaveLength(12);
       expect(report.generation).toEqual({
         generationId: harness.generation.generationId,
         preparationFingerprint: harness.generation.preparationFingerprint,
