@@ -140,6 +140,26 @@ export const calculateFocalRect = (
   height: containedRect.height * focalRect.height
 });
 
+export const spotlightMaskRects = (
+  viewportWidth: number,
+  viewportHeight: number,
+  spotlightRect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
+): readonly { readonly x: number; readonly y: number; readonly width: number; readonly height: number }[] => {
+  const right = spotlightRect.x + spotlightRect.width;
+  const bottom = spotlightRect.y + spotlightRect.height;
+  return [
+    { x: 0, y: 0, width: viewportWidth, height: spotlightRect.y },
+    { x: 0, y: spotlightRect.y, width: spotlightRect.x, height: spotlightRect.height },
+    {
+      x: right,
+      y: spotlightRect.y,
+      width: viewportWidth - right,
+      height: spotlightRect.height
+    },
+    { x: 0, y: bottom, width: viewportWidth, height: viewportHeight - bottom }
+  ];
+};
+
 export const EditorialBand = ({ evidence }: { readonly evidence: EvidenceSpec }) => {
   const isSideBand = evidence.placement === "left" || evidence.placement === "right";
   return (
@@ -259,19 +279,34 @@ export const EvidenceViewport = ({
         }}
       />
       {spotlight ? (
-        <div
-          style={{
-            position: "absolute",
-            left: spotlightRect.x,
-            top: spotlightRect.y,
-            width: spotlightRect.width,
-            height: spotlightRect.height,
-            zIndex: 1,
-            border: "6px solid #E85B50",
-            boxShadow: "0 0 0 9999px rgba(255,255,255,0.4)",
-            boxSizing: "border-box"
-          }}
-        />
+        <>
+          {spotlightMaskRects(viewportWidth, viewportHeight, spotlightRect).map((rect, index) => (
+            <div
+              key={index}
+              style={{
+                position: "absolute",
+                left: rect.x,
+                top: rect.y,
+                width: rect.width,
+                height: rect.height,
+                zIndex: 1,
+                background: "rgba(255,255,255,0.4)"
+              }}
+            />
+          ))}
+          <div
+            style={{
+              position: "absolute",
+              left: spotlightRect.x,
+              top: spotlightRect.y,
+              width: spotlightRect.width,
+              height: spotlightRect.height,
+              zIndex: 2,
+              border: "6px solid #E85B50",
+              boxSizing: "border-box"
+            }}
+          />
+        </>
       ) : null}
       <CompactAttribution evidence={evidence} />
     </div>

@@ -20,7 +20,10 @@ import {
 } from "@remotion/renderer";
 import { describe, expect, it, vi } from "vitest";
 import { GPT_LIVE_CONTENT, GPT_LIVE_VISUAL_CONTENT } from "../src/production/gptLive/content";
-import { stageEvidencePublicAssets } from "../src/production/gptLive/evidence";
+import {
+  evidenceForScene,
+  stageEvidencePublicAssets
+} from "../src/production/gptLive/evidence";
 import {
   SCENE_STATE_COUNTS,
   normalizedBeatIndex,
@@ -42,7 +45,10 @@ import {
 } from "../src/production/gptLive/motion/scenePrimitives";
 import * as plateModule from "../src/production/gptLive/motion/GptLivePlate";
 import * as primitiveModule from "../src/production/gptLive/motion/scenePrimitives";
-import { evidenceStage } from "../src/production/gptLive/motion/SceneRenderer";
+import {
+  evidenceSequenceState,
+  evidenceStage
+} from "../src/production/gptLive/motion/SceneRenderer";
 import {
   assertUniformSafeAreaMetadata,
   buildSmokeFramePlan,
@@ -92,6 +98,15 @@ const calculateFocalRect = (
     calculateFocalRect?: (containedRect: SceneRect, focalRect: EvidenceSpec["focalRect"]) => SceneRect;
   }
 ).calculateFocalRect;
+const spotlightMaskRects = (
+  primitiveModule as unknown as {
+    spotlightMaskRects?: (
+      viewportWidth: number,
+      viewportHeight: number,
+      spotlightRect: SceneRect
+    ) => readonly SceneRect[];
+  }
+).spotlightMaskRects;
 const evidencePlateLayout = (
   plateModule as unknown as {
     evidencePlateLayout?: (
@@ -358,6 +373,17 @@ describe("GPT-Live Remotion composition metadata", () => {
 });
 
 describe("GPT-Live evidence-first motion contracts", () => {
+  it("builds a bounded four-panel spotlight mask around the focal rectangle", () => {
+    expect(spotlightMaskRects).toBeTypeOf("function");
+    expect(spotlightMaskRects?.(640, 1080, { x: 100, y: 200, width: 300, height: 400 }))
+      .toEqual([
+        { x: 0, y: 0, width: 640, height: 200 },
+        { x: 0, y: 200, width: 100, height: 400 },
+        { x: 400, y: 200, width: 240, height: 400 },
+        { x: 0, y: 600, width: 640, height: 480 }
+      ]);
+  });
+
   it("removes internal host, footer, and use-case labels from all motion source", () => {
     const motionSource = readdirSync(MOTION_DIR, { recursive: true })
       .filter((path): path is string => typeof path === "string" && /\.tsx?$/.test(path))
@@ -584,10 +610,10 @@ describe("GPT-Live rendered smoke planning", () => {
     ).toEqual({ width: 1280, height: 720 });
   });
 
-  it("plans every evidence stage plus start and representative stills for non-evidence scenes", () => {
+  it("plans every evidence item and stage plus stills for non-evidence scenes", () => {
     const plan = buildSmokeFramePlan(8 * 30);
-    expect(plan).toHaveLength(36);
-    expect(new Set(plan.map(({ outputName }) => outputName)).size).toBe(36);
+    expect(plan).toHaveLength(48);
+    expect(new Set(plan.map(({ outputName }) => outputName)).size).toBe(48);
     expect(new Set(plan.map(({ sceneContent }) => sceneContent.scene))).toEqual(
       new Set(GPT_LIVE_SCENES)
     );
@@ -605,27 +631,29 @@ describe("GPT-Live rendered smoke planning", () => {
     }
   });
 
-  it("samples establish, explain, and spotlight for every captured evidence scene", () => {
+  it("samples establish, explain, and spotlight for every captured evidence item", () => {
     const plan = buildSmokeFramePlan(8 * 30);
-    const capturedScenes = GPT_LIVE_CONTENT.evidence
-      .filter((evidence) => evidence.playbackDecision === "captured_source")
-      .map(({ scene }) => scene);
+    const captures = GPT_LIVE_CONTENT.evidence.filter(
+      (evidence) => evidence.playbackDecision === "captured_source"
+    );
     for (const variant of VARIANTS) {
-      for (const scene of capturedScenes) {
+      for (const evidence of captures) {
         const items = plan.filter(
-          (item) => item.variant === variant && item.sceneContent.scene === scene
+          (item) => item.variant === variant && item.evidence?.id === evidence.id
         ) as readonly (typeof plan[number] & { readonly stage?: string })[];
         expect(items.map(({ stage }) => stage)).toEqual([
           "establish",
           "explain",
           "spotlight"
         ]);
-        expect(items.map(({ frame }) => frame).map((frame) => evidenceStage(frame, 240))).toEqual([
+        expect(items.map(({ frame }) =>
+          evidenceSequenceState(frame, 240, evidenceForScene(evidence.scene).length).stage
+        )).toEqual([
           "establish",
           "explain",
           "spotlight"
         ]);
-        expect(items.every(({ evidence }) => evidence?.scene === scene)).toBe(true);
+        expect(items.every((item) => item.evidence?.id === evidence.id)).toBe(true);
       }
     }
   });
@@ -787,18 +815,20 @@ describe("GPT-Live plate render planning", () => {
       expect(matching[0]!.inputProps).toHaveProperty("sceneContent.scene", narration.scene);
       expect(matching[0]!.inputProps).toHaveProperty("sceneContent.narrationText", narration.text);
       expect(matching[0]!.inputProps).toHaveProperty("sceneContent.claimIds", narration.claimIds);
-      const capturedEvidence = GPT_LIVE_CONTENT.evidence.find(
+      const capturedEvidence = GPT_LIVE_CONTENT.evidence.filter(
         (item) => item.scene === narration.scene && item.playbackDecision === "captured_source"
       );
-      if (capturedEvidence) {
-        expect(matching[0]!.inputProps.evidence).toMatchObject({
-          ...capturedEvidence,
-          assetWidth: 1920,
-          assetHeight: 1080
-        });
-        expect(matching[0]!.inputProps.evidence).not.toHaveProperty("assetUrl");
+      if (capturedEvidence.length > 0) {
+        expect(matching[0]!.inputProps.evidences).toEqual(
+          capturedEvidence.map((evidence) => ({
+            ...evidence,
+            assetWidth: 1920,
+            assetHeight: 1080
+          }))
+        );
+        expect(matching[0]!.inputProps.evidences).not.toHaveProperty("0.assetUrl");
       } else {
-        expect(matching[0]!.inputProps).not.toHaveProperty("evidence");
+        expect(matching[0]!.inputProps).not.toHaveProperty("evidences");
       }
     }
   });
@@ -898,10 +928,9 @@ describe("GPT-Live plate render planning", () => {
     expect(renderMedia.mock.calls.every(([options]) => options.muted === true)).toBe(true);
     expect(
       renderMedia.mock.calls
-        .map(([options]) => options.inputProps.evidence)
-        .filter(Boolean)
+        .flatMap(([options]) => options.inputProps.evidences ?? [])
         .every((evidence) =>
-          evidence?.assetWidth === 1920 && evidence.assetHeight === 1080
+          evidence.assetWidth === 1920 && evidence.assetHeight === 1080
         )
     ).toBe(true);
     expect(writeJsonAtomic).toHaveBeenCalledOnce();
@@ -1017,9 +1046,7 @@ describe("GPT-Live plate render planning", () => {
         episodeDir,
         narrationRecords,
         evidenceDimensions: staged.dimensions
-      }).find(
-        (job) => job.inputProps.evidence
-      )!;
+      }).find((job) => job.inputProps.evidences && job.inputProps.evidences.length > 0)!;
       const composition = await withTimeout(
         selectRemotionComposition({
           serveUrl: bundleOutput,
@@ -1034,7 +1061,7 @@ describe("GPT-Live plate render planning", () => {
       );
 
       expect(composition).toMatchObject({ id: "GptLivePlate" });
-      const assetUrl = resolveEvidenceAssetUrl(evidenceJob.inputProps.evidence!.assetPath);
+      const assetUrl = resolveEvidenceAssetUrl(evidenceJob.inputProps.evidences![0]!.assetPath);
       await expect(
         readFile(join(bundleOutput, "public", decodeURIComponent(assetUrl.slice(1))))
       ).resolves.toEqual(VALID_PNG);

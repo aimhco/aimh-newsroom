@@ -15,7 +15,7 @@ export interface GptLivePlateProps extends Record<string, unknown> {
   readonly variant: GptLiveVariant;
   readonly durationSeconds: number;
   readonly sceneContent: SceneContent;
-  readonly evidence?: RenderedEvidenceSpec;
+  readonly evidences?: readonly RenderedEvidenceSpec[];
 }
 
 const DEFAULT_PROPS: GptLivePlateProps = {

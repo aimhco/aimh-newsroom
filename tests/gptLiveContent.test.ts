@@ -397,6 +397,22 @@ const EXPECTED_EVIDENCE = [
     youtubeDescription: true
   },
   {
+    id: "evidence_openai_evaluations",
+    scene: "evidence",
+    sourceId: "src_openai_article",
+    assetPath: "evidence/openai-gpt-live-evaluations.png",
+    canonicalUrl: "https://openai.com/index/introducing-gpt-live/",
+    displayUrl: "OPENAI.COM / GPT-LIVE",
+    publisher: "OpenAI",
+    sourceType: "primary",
+    playbackDecision: "captured_source",
+    placement: "left",
+    takeaway: "OpenAI reports stronger science reasoning.",
+    detail: "The GPQA result is vendor-reported, not independent validation.",
+    focalRect: { x: 0.27, y: 0.82, width: 0.5, height: 0.16 },
+    youtubeDescription: true
+  },
+  {
     id: "evidence_openai_availability",
     scene: "availability",
     sourceId: "src_openai_help",
@@ -428,6 +444,22 @@ const EXPECTED_EVIDENCE = [
     detail:
       "Realtime tools point toward scheduling, support, travel changes, and multilingual work.",
     focalRect: { x: 0.35, y: 0.61, width: 0.45, height: 0.2 },
+    youtubeDescription: true
+  },
+  {
+    id: "evidence_openai_api_soon",
+    scene: "future",
+    sourceId: "src_openai_article",
+    assetPath: "evidence/openai-gpt-live-api-soon.png",
+    canonicalUrl: "https://openai.com/index/introducing-gpt-live/",
+    displayUrl: "OPENAI.COM / GPT-LIVE",
+    publisher: "OpenAI",
+    sourceType: "primary",
+    playbackDecision: "captured_source",
+    placement: "left",
+    takeaway: "GPT-Live is coming to the API.",
+    detail: "OpenAI says developers and enterprises can sign up to be notified.",
+    focalRect: { x: 0.26, y: 0.46, width: 0.49, height: 0.18 },
     youtubeDescription: true
   }
 ] as const;
@@ -504,7 +536,7 @@ describe("GPT-Live source manifest", () => {
         "https://openai.com/index/introducing-gpt-live/?video=1208096618",
         "https://openai.com/index/introducing-gpt-live/?video=1208152658"
       ],
-      scenes: ["hook", "full_duplex"],
+      scenes: ["hook", "full_duplex", "evidence", "future"],
       claims: [
         "claim_full_duplex",
         "claim_translation",
@@ -663,13 +695,20 @@ describe("GPT-Live production preparation", () => {
     ).toThrow("Evidence asset must remain inside the episode directory");
   });
 
-  it("finds only captured evidence for a narration scene", () => {
-    expect(evidenceForScene("full_duplex")).toMatchObject({
-      id: "evidence_openai_full_duplex",
-      playbackDecision: "captured_source"
-    });
-    expect(evidenceForScene("hook")).toBeUndefined();
-    expect(evidenceForScene("cta")).toBeUndefined();
+  it("finds every captured evidence item for a narration scene in editorial order", () => {
+    expect(evidenceForScene("full_duplex").map(({ id }) => id)).toEqual([
+      "evidence_openai_full_duplex"
+    ]);
+    expect(evidenceForScene("evidence").map(({ id }) => id)).toEqual([
+      "evidence_toms_guide_translation",
+      "evidence_openai_evaluations"
+    ]);
+    expect(evidenceForScene("future").map(({ id }) => id)).toEqual([
+      "evidence_openai_realtime",
+      "evidence_openai_api_soon"
+    ]);
+    expect(evidenceForScene("hook")).toEqual([]);
+    expect(evidenceForScene("cta")).toEqual([]);
   });
 
   it("rejects a missing captured evidence file", async () => {
@@ -1852,7 +1891,7 @@ describe("GPT-Live controlled production content", () => {
                 : source
             )
           },
-          4,
+          5,
           { canonicalUrl: "http://help.openai.com/en/articles/20001274/" }
         );
       }
@@ -1886,7 +1925,7 @@ describe("GPT-Live controlled production content", () => {
       expectedError:
         'Invalid GPT-Live production: evidence "evidence_openai_availability" media URL must use the source publisher domain',
       build: () =>
-        replaceEvidence(cloneProduction(), 4, {
+        replaceEvidence(cloneProduction(), 5, {
           mediaUrl: "https://openai.com/video"
         })
     },
@@ -1914,7 +1953,7 @@ describe("GPT-Live controlled production content", () => {
                 : source
             )
           },
-          4,
+          5,
           {
             canonicalUrl: "https://co.uk/article",
             mediaUrl: "https://attacker.co.uk/video"
@@ -2064,6 +2103,18 @@ describe("GPT-Live controlled production content", () => {
     });
 
     expect(() => validateProductionManifest(production)).not.toThrow();
+  });
+
+  it("rejects an evidence-backed scene when one narrated claim has no matching source on screen", () => {
+    const production = cloneProduction();
+    const withoutEvaluation = {
+      ...production,
+      evidence: production.evidence.filter(({ id }) => id !== "evidence_openai_evaluations")
+    };
+
+    expect(() => validateProductionManifest(withoutEvaluation)).toThrow(
+      'Invalid GPT-Live production: narration "narration_evidence" claim "claim_benchmark" has no matching captured evidence source'
+    );
   });
 
   it("recursively freezes the exported production graph", () => {

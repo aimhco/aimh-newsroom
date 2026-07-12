@@ -7,6 +7,7 @@ import {
 import type { EvidenceSpec, GptLiveVariant, SceneContent } from "../types";
 import { normalizedBeatPlan, SCENE_STATE_COUNTS } from "./beatState";
 import {
+  evidenceSequenceState,
   evidenceStageFrames,
   type EvidenceStage
 } from "./evidenceStages";
@@ -41,19 +42,26 @@ export function buildSmokeFramePlan(durationInFrames: number): readonly SmokeFra
   return GPT_LIVE_CONTENT.variants.flatMap((variant) =>
     GPT_LIVE_SCENES.flatMap((scene): readonly SmokeFramePlanItem[] => {
       const sceneContent = GPT_LIVE_VISUAL_CONTENT[scene];
-      const evidence = GPT_LIVE_CONTENT.evidence.find(
+      const evidences = GPT_LIVE_CONTENT.evidence.filter(
         (item) => item.scene === scene && item.playbackDecision === "captured_source"
       );
-      if (evidence) {
-        const stageFrames = evidenceStageFrames(durationInFrames);
-        return (["establish", "explain", "spotlight"] as const).map((stage) => ({
-          variant,
-          sceneContent,
-          evidence,
-          stage,
-          frame: stageFrames[stage],
-          outputName: `${variant}-${scene}-${stage}.png`
-        }));
+      if (evidences.length > 0) {
+        return evidences.flatMap((evidence, index) => {
+          const sequence = evidenceSequenceState(
+            Math.floor((index * durationInFrames) / evidences.length),
+            durationInFrames,
+            evidences.length
+          );
+          const stageFrames = evidenceStageFrames(sequence.durationInFrames);
+          return (["establish", "explain", "spotlight"] as const).map((stage) => ({
+            variant,
+            sceneContent,
+            evidence,
+            stage,
+            frame: sequence.startFrame + stageFrames[stage],
+            outputName: `${variant}-${scene}-${evidence.id}-${stage}.png`
+          }));
+        });
       }
       return [
         {

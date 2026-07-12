@@ -289,8 +289,8 @@ export function evidencePublicAssetPath(evidence: EvidenceSpec): string {
   return `evidence/${basename(evidence.assetPath)}`;
 }
 
-export function evidenceForScene(scene: GptLiveScene): EvidenceSpec | undefined {
-  return GPT_LIVE_CONTENT.evidence.find(
+export function evidenceForScene(scene: GptLiveScene): readonly EvidenceSpec[] {
+  return GPT_LIVE_CONTENT.evidence.filter(
     (item) => item.scene === scene && item.playbackDecision === "captured_source"
   );
 }

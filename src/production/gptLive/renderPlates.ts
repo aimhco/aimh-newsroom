@@ -176,14 +176,20 @@ export function buildPlateRenderJobs(options: BuildPlateRenderJobsOptions): read
   const records = narrationMap(options.narrationRecords);
   return GPT_LIVE_CONTENT.narration.flatMap((narration) => {
     const record = records.get(narration.id)!;
-    const evidence = evidenceForScene(narration.scene);
-    const publicAssetPath = evidence ? evidencePublicAssetPath(evidence) : undefined;
-    const assetDimensions = publicAssetPath
-      ? options.evidenceDimensions[publicAssetPath]
-      : undefined;
-    if (evidence && !assetDimensions) {
-      throw new Error(`Missing staged evidence dimensions: ${evidence.id}`);
-    }
+    const evidenceItems = evidenceForScene(narration.scene);
+    const evidences = evidenceItems.map((evidence) => {
+      const publicAssetPath = evidencePublicAssetPath(evidence);
+      const assetDimensions = options.evidenceDimensions[publicAssetPath];
+      if (!assetDimensions) {
+        throw new Error(`Missing staged evidence dimensions: ${evidence.id}`);
+      }
+      return {
+        ...evidence,
+        assetPath: publicAssetPath,
+        assetWidth: assetDimensions.width,
+        assetHeight: assetDimensions.height
+      };
+    });
     return GPT_LIVE_CONTENT.variants.map((variant) => ({
       narrationId: narration.id,
       variant,
@@ -194,16 +200,7 @@ export function buildPlateRenderJobs(options: BuildPlateRenderJobsOptions): read
         variant,
         durationSeconds: record.durationSeconds,
         sceneContent: GPT_LIVE_VISUAL_CONTENT[narration.scene],
-        ...(evidence && publicAssetPath && assetDimensions
-          ? {
-              evidence: {
-                ...evidence,
-                assetPath: publicAssetPath,
-                assetWidth: assetDimensions.width,
-                assetHeight: assetDimensions.height
-              }
-            }
-          : {})
+        ...(evidences.length > 0 ? { evidences } : {})
       }
     }));
   });

@@ -5,7 +5,7 @@ import { bundle } from "@remotion/bundler";
 import { renderStill, selectComposition } from "@remotion/renderer";
 import { runCommand } from "../../../render/process";
 import { GPT_LIVE_VISUAL_CONTENT } from "../content";
-import { stageEvidencePublicAssets } from "../evidence";
+import { evidenceForScene, stageEvidencePublicAssets } from "../evidence";
 import type { GptLivePlateProps } from "./Root";
 import {
   assertContentfulFrameMetadata,
@@ -141,25 +141,18 @@ export async function renderGptLiveMotionSmoke(
 
     for (const item of buildSmokeFramePlan(DURATION_IN_FRAMES)) {
       const output = join(framesDir, item.outputName);
-      const dimensions = item.evidence
-        ? resolveSmokeEvidenceDimensions(item.evidence, stagedEvidence.dimensions)
-        : undefined;
-      if (item.evidence && !dimensions) {
-        throw new Error(`Missing smoke evidence dimensions: ${item.evidence.id}`);
-      }
+      const evidences = evidenceForScene(item.sceneContent.scene).map((evidence) => {
+        const dimensions = resolveSmokeEvidenceDimensions(evidence, stagedEvidence.dimensions);
+        if (!dimensions) {
+          throw new Error(`Missing smoke evidence dimensions: ${evidence.id}`);
+        }
+        return { ...evidence, assetWidth: dimensions.width, assetHeight: dimensions.height };
+      });
       await renderFrame(serveUrl, output, item.frame, {
         variant: item.variant,
         durationSeconds: DURATION_SECONDS,
         sceneContent: item.sceneContent,
-        ...(item.evidence && dimensions
-          ? {
-              evidence: {
-                ...item.evidence,
-                assetWidth: dimensions.width,
-                assetHeight: dimensions.height
-              }
-            }
-          : {})
+        ...(evidences.length > 0 ? { evidences } : {})
       });
       await assertRenderedSafeArea(ffmpegPath, output);
       if (item.verifyContentfulFrame) {

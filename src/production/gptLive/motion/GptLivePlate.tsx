@@ -10,7 +10,7 @@ import type { GptLivePlateProps } from "./Root";
 import { SceneRenderer } from "./SceneRenderer";
 import { sceneStateIndex } from "./beatState";
 import { resolveEvidenceAssetUrl } from "./evidenceAsset";
-import { evidenceStage, type EvidenceStage } from "./evidenceStages";
+import { evidenceSequenceState, type EvidenceStage } from "./evidenceStages";
 import { MOTION_SANS_FONT } from "./fonts";
 import { sceneStyle, type SceneRect } from "./sceneStyle";
 
@@ -51,13 +51,17 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
   const content = props.sceneContent;
   const style = sceneStyle(props.variant, content.scene);
   const contentRegion = style.contentRegions[0]!;
-  const evidence =
-    props.evidence?.playbackDecision === "captured_source"
-      ? { ...props.evidence, assetUrl: resolveEvidenceAssetUrl(props.evidence.assetPath) }
-      : undefined;
+  const evidences = props.evidences?.map((evidence) => ({
+    ...evidence,
+    assetUrl: resolveEvidenceAssetUrl(evidence.assetPath)
+  }));
   const frameRect = { x: 0, y: 0, width, height };
-  const plateLayout = evidence
-    ? evidencePlateLayout(evidenceStage(frame, durationInFrames), frameRect, contentRegion)
+  const plateLayout = evidences && evidences.length > 0
+    ? evidencePlateLayout(
+        evidenceSequenceState(frame, durationInFrames, evidences.length).stage,
+        frameRect,
+        contentRegion
+      )
     : { rect: contentRegion, animateEntrance: true, maskReservedTopRight: false };
   const entrance = plateLayout.animateEntrance
     ? spring({ frame, fps, config: { damping: 18, stiffness: 130, mass: 0.8 } })
@@ -99,7 +103,7 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
           frame={frame}
           stateIndex={stateIndex}
           durationInFrames={durationInFrames}
-          evidence={evidence}
+          evidences={evidences}
           viewportWidth={plateLayout.rect.width}
           viewportHeight={plateLayout.rect.height}
         />

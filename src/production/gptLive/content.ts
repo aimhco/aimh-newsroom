@@ -164,6 +164,27 @@ export const validateProductionManifest = (production: GptLiveProduction): void 
     assertEvidenceIsValid(evidence, sources, narrationScenes);
   }
 
+  const claims = new Map(production.claims.map((claim) => [claim.id, claim]));
+  for (const narration of production.narration) {
+    const sceneEvidenceSources = new Set(
+      production.evidence
+        .filter(
+          (evidence) =>
+            evidence.scene === narration.scene && evidence.playbackDecision === "captured_source"
+        )
+        .map(({ sourceId }) => sourceId)
+    );
+    if (sceneEvidenceSources.size === 0) continue;
+    for (const claimId of narration.claimIds) {
+      const claim = claims.get(claimId)!;
+      if (!claim.sourceIds.some((sourceId) => sceneEvidenceSources.has(sourceId))) {
+        invalidProduction(
+          `narration "${narration.id}" claim "${claimId}" has no matching captured evidence source`
+        );
+      }
+    }
+  }
+
   const canonicalNarration = new Map(production.narration.map((item) => [item.id, item]));
   const narrationOccurrences = new Map(production.narration.map((item) => [item.id, 0]));
 
@@ -557,6 +578,22 @@ const GPT_LIVE_EVIDENCE = [
     youtubeDescription: true
   },
   {
+    id: "evidence_openai_evaluations",
+    scene: "evidence",
+    sourceId: "src_openai_article",
+    assetPath: "evidence/openai-gpt-live-evaluations.png",
+    canonicalUrl: "https://openai.com/index/introducing-gpt-live/",
+    displayUrl: "OPENAI.COM / GPT-LIVE",
+    publisher: "OpenAI",
+    sourceType: "primary",
+    playbackDecision: "captured_source",
+    placement: "left",
+    takeaway: "OpenAI reports stronger science reasoning.",
+    detail: "The GPQA result is vendor-reported, not independent validation.",
+    focalRect: { x: 0.27, y: 0.82, width: 0.5, height: 0.16 },
+    youtubeDescription: true
+  },
+  {
     id: "evidence_openai_availability",
     scene: "availability",
     sourceId: "src_openai_help",
@@ -588,6 +625,22 @@ const GPT_LIVE_EVIDENCE = [
     detail:
       "Realtime tools point toward scheduling, support, travel changes, and multilingual work.",
     focalRect: { x: 0.35, y: 0.61, width: 0.45, height: 0.2 },
+    youtubeDescription: true
+  },
+  {
+    id: "evidence_openai_api_soon",
+    scene: "future",
+    sourceId: "src_openai_article",
+    assetPath: "evidence/openai-gpt-live-api-soon.png",
+    canonicalUrl: "https://openai.com/index/introducing-gpt-live/",
+    displayUrl: "OPENAI.COM / GPT-LIVE",
+    publisher: "OpenAI",
+    sourceType: "primary",
+    playbackDecision: "captured_source",
+    placement: "left",
+    takeaway: "GPT-Live is coming to the API.",
+    detail: "OpenAI says developers and enterprises can sign up to be notified.",
+    focalRect: { x: 0.26, y: 0.46, width: 0.49, height: 0.18 },
     youtubeDescription: true
   }
 ] as const satisfies readonly EvidenceSpec[];

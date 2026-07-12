@@ -8,9 +8,14 @@ import type { ScenePalette } from "./sceneStyle";
 import { HookScene, FullDuplexScene } from "./scenes/ConversationScenes";
 import { EvidenceScene, UseCasesScene } from "./scenes/EditorialScenes";
 import { AvailabilityScene, CtaScene, FutureScene } from "./scenes/ProductScenes";
-import { evidenceStage } from "./evidenceStages";
+import { evidenceSequenceState, evidenceStage } from "./evidenceStages";
 
-export { evidenceStage, evidenceStageFrames, type EvidenceStage } from "./evidenceStages";
+export {
+  evidenceSequenceState,
+  evidenceStage,
+  evidenceStageFrames,
+  type EvidenceStage
+} from "./evidenceStages";
 
 export const EvidenceSequence = ({
   evidence,
@@ -52,7 +57,7 @@ export const SceneRenderer = ({
   frame,
   stateIndex,
   durationInFrames,
-  evidence,
+  evidences,
   viewportWidth,
   viewportHeight
 }: {
@@ -61,16 +66,18 @@ export const SceneRenderer = ({
   readonly frame: number;
   readonly stateIndex: number;
   readonly durationInFrames: number;
-  readonly evidence?: RenderableEvidence;
+  readonly evidences?: readonly RenderableEvidence[];
   readonly viewportWidth: number;
   readonly viewportHeight: number;
 }) => {
-  if (evidence?.playbackDecision === "captured_source") {
+  if (evidences && evidences.length > 0) {
+    const sequence = evidenceSequenceState(frame, durationInFrames, evidences.length);
+    const evidence = evidences[sequence.index]!;
     return (
       <EvidenceSequence
         evidence={evidence}
-        frame={frame}
-        durationInFrames={durationInFrames}
+        frame={sequence.frame}
+        durationInFrames={sequence.durationInFrames}
         viewportWidth={viewportWidth}
         viewportHeight={viewportHeight}
       />
