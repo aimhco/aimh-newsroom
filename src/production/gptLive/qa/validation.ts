@@ -98,7 +98,10 @@ const assertPreparedAudio = (inspection: QaPreparedMediaInspection, label: strin
   if (audio.channels !== 2) fail(`${label} must be stereo`);
 };
 
-const validateProduction = (production: QaProduction): void => {
+const validateProduction = (
+  production: QaProduction,
+  env: Readonly<Record<string, string | undefined>>
+): void => {
   validateProductionManifest(production as unknown as GptLiveProduction);
   if (production.schemaVersion !== "0.1.0") fail("production schema version is invalid");
 
@@ -109,8 +112,7 @@ const validateProduction = (production: QaProduction): void => {
     claims: GPT_LIVE_CONTENT.claims,
     narration: GPT_LIVE_CONTENT.narration,
     timeline: GPT_LIVE_CONTENT.timeline,
-    evidence: GPT_LIVE_CONTENT.evidence,
-    audio: GPT_LIVE_CONTENT.audio
+    evidence: GPT_LIVE_CONTENT.evidence
   };
   exact(
     {
@@ -120,12 +122,23 @@ const validateProduction = (production: QaProduction): void => {
       claims: production.claims,
       narration: production.narration,
       timeline: production.timeline,
-      evidence: production.evidence,
-      audio: production.audio
+      evidence: production.evidence
     },
     approvedCore,
     "production manifest"
   );
+
+  const { outroMusicPath, ...audioPolicy } = production.audio;
+  const canonicalAudioPolicy = {
+    introMusic: GPT_LIVE_CONTENT.audio.introMusic,
+    bodyMusic: GPT_LIVE_CONTENT.audio.bodyMusic,
+    outroDurationSeconds: GPT_LIVE_CONTENT.audio.outroDurationSeconds
+  };
+  exact(audioPolicy, canonicalAudioPolicy, "production audio policy");
+  const resolvedOutroMusicPath = env.AIMH_OUTRO_MUSIC_PATH;
+  if (!resolvedOutroMusicPath?.trim() || outroMusicPath !== resolvedOutroMusicPath) {
+    fail("production outro music path does not match the resolved QA environment");
+  }
 
   const coveredSources = new Set(production.claims.flatMap((claim) => claim.sourceIds));
   for (const source of production.sources) {
@@ -546,7 +559,7 @@ export function validateGptLiveQaSnapshot(snapshot: GptLiveQaSnapshot): void {
   if (snapshot.env.YOUTUBE_UPLOAD_ENABLED !== "false") {
     fail("YouTube upload must be disabled for QA");
   }
-  validateProduction(snapshot.production);
+  validateProduction(snapshot.production, snapshot.env);
   validateVoice(snapshot);
   validatePlan(snapshot);
   validatePreparedFingerprint(snapshot);

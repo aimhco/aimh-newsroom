@@ -15,6 +15,7 @@ interface PathStat {
 
 export interface QaSerializedPathInput {
   episodeDir: string;
+  env: Record<string, string | undefined>;
   production: QaProduction;
   voice: QaVoice;
   plan: TellaPlan;
@@ -50,7 +51,17 @@ export function validateSerializedQaPaths(input: QaSerializedPathInput): string[
   if (input.production.branding.logoPath !== GPT_LIVE_CONTENT.branding.logoPath) {
     throw new Error("GPT-Live QA path validation failed: logo path");
   }
-  exact(input.production.audio, GPT_LIVE_CONTENT.audio, "audio path");
+  const { outroMusicPath, ...audioPolicy } = input.production.audio;
+  const canonicalAudioPolicy = {
+    introMusic: GPT_LIVE_CONTENT.audio.introMusic,
+    bodyMusic: GPT_LIVE_CONTENT.audio.bodyMusic,
+    outroDurationSeconds: GPT_LIVE_CONTENT.audio.outroDurationSeconds
+  };
+  exact(audioPolicy, canonicalAudioPolicy, "audio policy");
+  const resolvedOutroMusicPath = input.env.AIMH_OUTRO_MUSIC_PATH;
+  if (!resolvedOutroMusicPath?.trim() || outroMusicPath !== resolvedOutroMusicPath) {
+    throw new Error("GPT-Live QA path validation failed: audio path");
+  }
   for (const narration of GPT_LIVE_CONTENT.narration) {
     const chunk = input.voice.chunks.find(({ id }) => id === narration.id);
     if (chunk?.file !== join(episodeDir, "voice", `${narration.id}.mp3`)) {

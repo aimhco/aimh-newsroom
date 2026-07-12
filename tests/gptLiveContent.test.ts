@@ -23,6 +23,8 @@ import {
   buildNarrationSlateArgs,
   prepareGptLiveProduction
 } from "../src/production/gptLive/prepare";
+import { validateSerializedQaPaths } from "../src/production/gptLive/qa/paths";
+import type { QaProduction, QaVoice } from "../src/production/gptLive/qa/types";
 import { buildTellaPlan } from "../src/production/gptLive/tellaPlan";
 import type { GptLiveProduction, SourceClipSpec } from "../src/production/gptLive/types";
 
@@ -635,8 +637,16 @@ describe("GPT-Live production preparation", () => {
     ]);
   });
 
-  it("prepares media and persists only deterministic, secret-free production records", async () => {
+  it("prepares media, QA-validates a non-default outro, and persists deterministic records", async () => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-prepare-"));
+    const resolvedOutroPath =
+      "/opt/alternate-video-engine/assets/music/Outro_Much_Higher_Causmic.mp3";
+    const prepareEnv = {
+      ELEVENLABS_API_KEY: "eleven-secret-do-not-write",
+      ELEVENLABS_VOICE_ID: "voice-secret-do-not-write",
+      AIMH_LOGO_PATH: GPT_LIVE_CONTENT.branding.logoPath,
+      AIMH_OUTRO_MUSIC_PATH: resolvedOutroPath
+    };
     const extractSourceClip = vi.fn(async () => undefined);
     const synthesizeNarration = vi.fn(async ({ outDir }: { outDir: string }) =>
       successfulVoiceResult(outDir)
@@ -667,12 +677,7 @@ describe("GPT-Live production preparation", () => {
       const result = await prepareGptLiveProduction(
         {
           episodeDir,
-          env: {
-            ELEVENLABS_API_KEY: "eleven-secret-do-not-write",
-            ELEVENLABS_VOICE_ID: "voice-secret-do-not-write",
-            AIMH_LOGO_PATH: "/assets/logo.png",
-            AIMH_OUTRO_MUSIC_PATH: "/assets/outro.mp3"
-          },
+          env: prepareEnv,
           ffmpegPath: "/tools/ffmpeg",
           ffprobePath: "/tools/ffprobe"
         },
@@ -731,9 +736,9 @@ describe("GPT-Live production preparation", () => {
 
       expect(JSON.parse(productionText)).toMatchObject({
         id: GPT_LIVE_CONTENT.id,
-        branding: { logoPath: "/assets/logo.png" },
+        branding: { logoPath: GPT_LIVE_CONTENT.branding.logoPath },
         evidence: EXPECTED_EVIDENCE,
-        audio: { ...EXPECTED_AUDIO, outroMusicPath: "/assets/outro.mp3" }
+        audio: { ...EXPECTED_AUDIO, outroMusicPath: resolvedOutroPath }
       });
       expect(JSON.parse(productionText)).not.toHaveProperty("musicPath");
       expect(JSON.parse(voiceText)).toEqual(successfulVoiceResult(join(episodeDir, "voice")));
@@ -751,6 +756,24 @@ describe("GPT-Live production preparation", () => {
         productionId: GPT_LIVE_CONTENT.id,
         manifestFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/)
       });
+      expect(() =>
+        validateSerializedQaPaths({
+          episodeDir,
+          env: prepareEnv,
+          production: JSON.parse(productionText) as QaProduction,
+          voice: JSON.parse(voiceText) as QaVoice,
+          plan: result.plan,
+          generation: {
+            generationId: "00000000-0000-4000-8000-000000000000",
+            variants: [],
+            finalPaths: [
+              join(episodeDir, "final", "version-a.mp4"),
+              join(episodeDir, "final", "version-b.mp4")
+            ],
+            reportPath: join(episodeDir, "reports", "post-production.json")
+          }
+        })
+      ).not.toThrow();
       expect(publications).toEqual([
         "plates-complete",
         result.productionPath,
@@ -1462,6 +1485,32 @@ describe("GPT-Live controlled production content", () => {
       build: () => replaceEvidence(cloneProduction(), 0, { canonicalUrl: "https://openai.com/" })
     },
     {
+      name: "evidence with a non-HTTPS canonical URL",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_openai_availability" canonical URL must be a valid HTTPS URL',
+      build: () => {
+        const production = cloneProduction();
+        return replaceEvidence(
+          {
+            ...production,
+            sources: production.sources.map((source) =>
+              source.id === "src_openai_help"
+                ? { ...source, url: "http://help.openai.com/en/articles/20001274/" }
+                : source
+            )
+          },
+          4,
+          { canonicalUrl: "http://help.openai.com/en/articles/20001274/" }
+        );
+      }
+    },
+    {
+      name: "evidence with publisher drift",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" publisher does not match source "src_openai_article"',
+      build: () => replaceEvidence(cloneProduction(), 0, { publisher: "OpenAI News" })
+    },
+    {
       name: "evidence with a non-HTTPS media URL",
       expectedError:
         'Invalid GPT-Live production: evidence "evidence_translation_video" media URL must be a valid HTTPS URL',
@@ -1480,6 +1529,24 @@ describe("GPT-Live controlled production content", () => {
         })
     },
     {
+      name: "evidence with a media URL on the canonical parent domain",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_openai_availability" media URL must use the source publisher domain',
+      build: () =>
+        replaceEvidence(cloneProduction(), 4, {
+          mediaUrl: "https://openai.com/video"
+        })
+    },
+    {
+      name: "evidence with a top-level media domain suffix",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" media URL must use the source publisher domain',
+      build: () =>
+        replaceEvidence(cloneProduction(), 0, {
+          mediaUrl: "https://com/video"
+        })
+    },
+    {
       name: "captured evidence with an absolute asset path",
       expectedError:
         'Invalid GPT-Live production: evidence "evidence_openai_full_duplex" asset path must be relative and below evidence/',
@@ -1495,6 +1562,42 @@ describe("GPT-Live controlled production content", () => {
       build: () =>
         replaceEvidence(cloneProduction(), 2, {
           assetPath: "evidence/../source/clip_interruption.mp4"
+        })
+    },
+    {
+      name: "captured evidence with Windows-style traversal",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_openai_full_duplex" asset path must be relative and below evidence/',
+      build: () =>
+        replaceEvidence(cloneProduction(), 2, {
+          assetPath: "evidence/foo\\..\\..\\outside.png"
+        })
+    },
+    {
+      name: "captured evidence with an empty path segment",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_openai_full_duplex" asset path must be relative and below evidence/',
+      build: () =>
+        replaceEvidence(cloneProduction(), 2, {
+          assetPath: "evidence//openai-gpt-live-full-duplex.png"
+        })
+    },
+    {
+      name: "captured evidence with a dot path segment",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_openai_full_duplex" asset path must be relative and below evidence/',
+      build: () =>
+        replaceEvidence(cloneProduction(), 2, {
+          assetPath: "evidence/./openai-gpt-live-full-duplex.png"
+        })
+    },
+    {
+      name: "source video evidence with a backslash",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" asset path must be relative and below source/',
+      build: () =>
+        replaceEvidence(cloneProduction(), 0, {
+          assetPath: "source/clip\\translation.mp4"
         })
     },
     {
@@ -1568,6 +1671,14 @@ describe("GPT-Live controlled production content", () => {
     }
   ])("rejects $name", ({ build, expectedError }) => {
     expect(() => validateProductionManifest(build())).toThrow(expectedError);
+  });
+
+  it("accepts a media URL on a canonical publisher subdomain", () => {
+    const production = replaceEvidence(cloneProduction(), 0, {
+      mediaUrl: "https://media.openai.com/video"
+    });
+
+    expect(() => validateProductionManifest(production)).not.toThrow();
   });
 
   it("recursively freezes the exported production graph", () => {

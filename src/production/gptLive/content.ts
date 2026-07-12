@@ -48,26 +48,23 @@ const narrationExactlyMatches = (timelineItem: NarrationSpec, canonical: Narrati
   timelineItem.claimIds.length === canonical.claimIds.length &&
   timelineItem.claimIds.every((claimId, index) => claimId === canonical.claimIds[index]);
 
-const normalizePublisherHost = (hostname: string): string =>
-  hostname.toLowerCase().replace(/^www\./, "");
-
-const isSamePublisherDomain = (left: string, right: string): boolean => {
-  const leftHost = normalizePublisherHost(left);
-  const rightHost = normalizePublisherHost(right);
-  return (
-    leftHost === rightHost ||
-    leftHost.endsWith(`.${rightHost}`) ||
-    rightHost.endsWith(`.${leftHost}`)
-  );
-};
+const isSameOrSubdomain = (mediaHost: string, canonicalHost: string): boolean =>
+  mediaHost === canonicalHost || mediaHost.endsWith(`.${canonicalHost}`);
 
 const isRelativeAssetBelow = (assetPath: string, directory: string): boolean => {
-  if (!assetPath || assetPath.startsWith("/") || /^[A-Za-z]:[\\/]/.test(assetPath)) return false;
+  if (
+    !assetPath ||
+    assetPath.includes("\\") ||
+    assetPath.startsWith("/") ||
+    /^[A-Za-z]:[\\/]/.test(assetPath)
+  ) {
+    return false;
+  }
   const segments = assetPath.split("/");
   return (
     segments[0] === directory &&
     segments.length > 1 &&
-    segments.slice(1).every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+    segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
   );
 };
 
@@ -83,6 +80,21 @@ const assertEvidenceIsValid = (
   if (evidence.canonicalUrl !== source.url) {
     invalidProduction(`evidence "${evidence.id}" canonical URL does not match source "${source.id}"`);
   }
+  if (evidence.publisher !== source.publisher) {
+    invalidProduction(`evidence "${evidence.id}" publisher does not match source "${source.id}"`);
+  }
+  const canonicalUrl = (() => {
+    try {
+      return new URL(evidence.canonicalUrl);
+    } catch {
+      return invalidProduction(
+        `evidence "${evidence.id}" canonical URL must be a valid HTTPS URL`
+      );
+    }
+  })();
+  if (canonicalUrl.protocol !== "https:") {
+    invalidProduction(`evidence "${evidence.id}" canonical URL must be a valid HTTPS URL`);
+  }
   if (evidence.mediaUrl !== undefined) {
     const mediaUrl = (() => {
       try {
@@ -91,11 +103,10 @@ const assertEvidenceIsValid = (
         return invalidProduction(`evidence "${evidence.id}" media URL must be a valid HTTPS URL`);
       }
     })();
-    const canonicalUrl = new URL(source.url);
     if (mediaUrl.protocol !== "https:") {
       invalidProduction(`evidence "${evidence.id}" media URL must be a valid HTTPS URL`);
     }
-    if (!isSamePublisherDomain(mediaUrl.hostname, canonicalUrl.hostname)) {
+    if (!isSameOrSubdomain(mediaUrl.hostname, canonicalUrl.hostname)) {
       invalidProduction(`evidence "${evidence.id}" media URL must use the source publisher domain`);
     }
   }

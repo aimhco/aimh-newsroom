@@ -360,6 +360,7 @@ const collectSnapshot = async (
 
   await withValidatedQaArtifactPaths({
     episodeDir: options.episodeDir,
+    env: options.env,
     production,
     voice,
     plan,

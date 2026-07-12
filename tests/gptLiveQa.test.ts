@@ -113,7 +113,8 @@ const validSnapshot = (): GptLiveQaSnapshot => {
   const env = {
     YOUTUBE_UPLOAD_ENABLED: "false",
     ELEVENLABS_VOICE_ID: "qa-test-voice",
-    ELEVENLABS_MODEL_ID: "eleven_multilingual_v2"
+    ELEVENLABS_MODEL_ID: "eleven_multilingual_v2",
+    AIMH_OUTRO_MUSIC_PATH: GPT_LIVE_CONTENT.audio.outroMusicPath
   };
   const voice = {
     provider: "elevenlabs" as const,
@@ -305,6 +306,19 @@ const validSnapshot = (): GptLiveQaSnapshot => {
       voice: Object.fromEntries(voice.chunks.map((chunk) => [chunk.id, sha("2")]))
     }
   } as unknown as GptLiveQaSnapshot;
+};
+
+const refreshPreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
+  snapshot.prepared.manifestFingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        production: snapshot.production,
+        voice: snapshot.voice,
+        plan: snapshot.plan,
+        sourceMatrix: snapshot.sourceMatrix
+      })
+    )
+    .digest("hex");
 };
 
 const createQaRunHarness = async () => {
@@ -547,14 +561,36 @@ describe("GPT-Live full production QA", () => {
     expect(() => validateGptLiveQaSnapshot(validSnapshot())).not.toThrow();
   });
 
-  it("rejects a production with an altered audio policy", () => {
+  it("accepts a prepared production using the resolved non-default outro path", () => {
+    const snapshot = validSnapshot();
+    const resolvedOutroPath =
+      "/opt/alternate-video-engine/assets/music/Outro_Much_Higher_Causmic.mp3";
+    snapshot.env.AIMH_OUTRO_MUSIC_PATH = resolvedOutroPath;
+    snapshot.production.audio = {
+      ...snapshot.production.audio,
+      outroMusicPath: resolvedOutroPath
+    };
+    refreshPreparedFingerprint(snapshot);
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).not.toThrow();
+  });
+
+  it("rejects a production with altered immutable audio policy", () => {
     const snapshot = validSnapshot();
     snapshot.production.audio = {
       ...snapshot.production.audio,
-      outroMusicPath: "/outside/outro.mp3"
-    };
+      bodyMusic: true
+    } as unknown as typeof snapshot.production.audio;
+    refreshPreparedFingerprint(snapshot);
 
-    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/production manifest|audio/i);
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/audio policy|production manifest/i);
+  });
+
+  it("rejects QA without a resolved outro path", () => {
+    const snapshot = validSnapshot();
+    delete snapshot.env.AIMH_OUTRO_MUSIC_PATH;
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/resolved QA environment/i);
   });
 
   it("rejects an unexpected serialized outro path", () => {
@@ -567,6 +603,7 @@ describe("GPT-Live full production QA", () => {
     expect(() =>
       validateSerializedQaPaths({
         episodeDir: snapshot.episodeDir,
+        env: snapshot.env,
         production: snapshot.production,
         voice: snapshot.voice,
         plan: snapshot.plan,
@@ -626,6 +663,7 @@ describe("GPT-Live full production QA", () => {
 
     await expect(withValidatedQaArtifactPaths({
       episodeDir: EPISODE_DIR,
+      env: snapshot.env,
       production: snapshot.production,
       voice: snapshot.voice,
       plan,
