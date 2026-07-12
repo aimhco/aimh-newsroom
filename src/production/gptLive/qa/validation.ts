@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
 import { GPT_LIVE_CONTENT, validateProductionManifest } from "../content";
 import {
@@ -12,6 +11,10 @@ import {
   type SourceIntervalGain
 } from "../finish";
 import { assertNarrationSlateContract } from "../mediaInspection";
+import {
+  buildPreparationFingerprint,
+  parsePreparedGenerationRecord
+} from "../preparation";
 import { GPT_LIVE_SCENES } from "../motion/sceneStyle";
 import { buildSourceManifest } from "../prepare";
 import { assertPlateContract } from "../renderPlates";
@@ -351,21 +354,21 @@ const validateProduction = (
 };
 
 const validatePreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
-  const expected = createHash("sha256")
-    .update(JSON.stringify({
-      production: snapshot.production,
-      voice: snapshot.voice,
-      plan: snapshot.plan,
-      sourceMatrix: snapshot.sourceMatrix,
-      sourceManifest: snapshot.sourceManifest
-    }))
-    .digest("hex");
-  if (
-    snapshot.prepared.schemaVersion !== "0.1.0" ||
-    snapshot.prepared.status !== "prepared" ||
-    snapshot.prepared.productionId !== GPT_LIVE_CONTENT.id ||
-    snapshot.prepared.manifestFingerprint !== expected
-  ) {
+  let prepared;
+  try {
+    prepared = parsePreparedGenerationRecord(snapshot.prepared, GPT_LIVE_CONTENT.id);
+  } catch {
+    return fail("prepared generation record is invalid");
+  }
+  const expected = buildPreparationFingerprint({
+    production: snapshot.production,
+    voice: snapshot.voice,
+    plan: snapshot.plan,
+    sourceMatrix: snapshot.sourceMatrix,
+    sourceManifest: snapshot.sourceManifest,
+    artifacts: prepared.artifacts
+  });
+  if (prepared.manifestFingerprint !== expected) {
     fail("prepared generation fingerprint does not match production records");
   }
   if (
@@ -374,6 +377,11 @@ const validatePreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
   ) {
     fail("published generation preparation fingerprint is stale or unrelated");
   }
+  exact(
+    snapshot.generation.preparedArtifacts,
+    prepared.artifacts,
+    "published generation prepared artifact bindings"
+  );
 };
 
 const validateVoice = (snapshot: GptLiveQaSnapshot): void => {

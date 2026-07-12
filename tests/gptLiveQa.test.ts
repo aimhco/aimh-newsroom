@@ -20,6 +20,7 @@ import {
   type PublishedGenerationValidation
 } from "../src/production/gptLive/finish";
 import type { MediaInspection } from "../src/production/gptLive/mediaInspection";
+import { derivePreparedArtifactDescriptors } from "../src/production/gptLive/preparation";
 import { GPT_LIVE_SCENES, sceneStyle } from "../src/production/gptLive/motion/sceneStyle";
 import { runCommand } from "../src/render/process";
 import {
@@ -313,8 +314,26 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
   };
   const sourceMatrix = "canonical source matrix";
   const sourceManifest = canonicalSourceManifest();
+  const preparedArtifacts = derivePreparedArtifactDescriptors({
+    episodeDir: EPISODE_DIR,
+    production,
+    voice,
+    plan
+  }).map((artifact, index) => ({
+    logicalId: artifact.logicalId,
+    path: artifact.path,
+    sha256: createHash("sha256").update(`artifact-${index}`).digest("hex"),
+    byteSize: index + 1
+  }));
   const manifestFingerprint = createHash("sha256")
-    .update(JSON.stringify({ production, voice, plan, sourceMatrix, sourceManifest }))
+    .update(JSON.stringify({
+      production,
+      voice,
+      plan,
+      sourceMatrix,
+      sourceManifest,
+      artifacts: preparedArtifacts
+    }))
     .digest("hex");
   (postProduction as { preparationFingerprint: string }).preparationFingerprint = manifestFingerprint;
   const masters = Object.fromEntries(
@@ -335,6 +354,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
     generation: {
       generationId: postProduction.generationId,
       preparationFingerprint: manifestFingerprint,
+      preparedArtifacts,
       reportSha256: sha("f"),
       variants: postProduction.variants.map((variant) => ({
         name: variant.name,
@@ -357,6 +377,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
       schemaVersion: "0.1.0",
       status: "prepared",
       productionId: GPT_LIVE_CONTENT.id,
+      artifacts: preparedArtifacts,
       manifestFingerprint
     },
     voice,
@@ -430,7 +451,8 @@ const refreshPreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
         voice: snapshot.voice,
         plan: snapshot.plan,
         sourceMatrix: snapshot.sourceMatrix,
-        sourceManifest: snapshot.sourceManifest
+        sourceManifest: snapshot.sourceManifest,
+        artifacts: snapshot.prepared.artifacts
       })
     )
     .digest("hex");
@@ -455,7 +477,8 @@ const createQaRunHarness = async () => {
       voice: snapshot.voice,
       plan: snapshot.plan,
       sourceMatrix: snapshot.sourceMatrix,
-      sourceManifest: snapshot.sourceManifest
+      sourceManifest: snapshot.sourceManifest,
+      artifacts: snapshot.prepared.artifacts
     }))
     .digest("hex");
   (snapshot.generation as { preparationFingerprint: string }).preparationFingerprint =
@@ -1246,6 +1269,44 @@ describe("GPT-Live full production QA", () => {
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/prepar|fingerprint/i);
   });
 
+  it.each([
+    ["missing", (artifacts: any[]) => artifacts.slice(1)],
+    ["extra", (artifacts: any[]) => [...artifacts, {
+      logicalId: "source:unexpected",
+      path: "source/unexpected.mp4",
+      sha256: sha("8"),
+      byteSize: 8
+    }]]
+  ])("rejects $name prepared artifact coverage hidden behind recomputed metadata", (_name, mutate) => {
+    const snapshot = validSnapshot();
+    const artifacts = mutate(structuredClone(snapshot.prepared.artifacts) as any[]);
+    snapshot.prepared.artifacts = artifacts;
+    const forgedFingerprint = createHash("sha256").update(JSON.stringify({
+      production: snapshot.production,
+      voice: snapshot.voice,
+      plan: snapshot.plan,
+      sourceMatrix: snapshot.sourceMatrix,
+      sourceManifest: snapshot.sourceManifest,
+      artifacts
+    })).digest("hex");
+    snapshot.prepared.manifestFingerprint = forgedFingerprint;
+    (snapshot.generation as { preparationFingerprint: string }).preparationFingerprint =
+      forgedFingerprint;
+    snapshot.postProduction.preparationFingerprint = forgedFingerprint;
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/prepared artifact|generation/i);
+  });
+
+  it("rejects a generation whose validated prepared artifact bytes differ", () => {
+    const snapshot = validSnapshot();
+    const artifacts = snapshot.generation.preparedArtifacts as Array<
+      (typeof snapshot.generation.preparedArtifacts)[number]
+    >;
+    artifacts[0] = { ...artifacts[0]!, sha256: sha("9") };
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/prepared artifact|generation/i);
+  });
+
   it("rejects published Tella input lineage that differs from the post-production report", () => {
     const snapshot = validSnapshot();
     const variants = snapshot.generation.variants as Array<
@@ -1799,6 +1860,15 @@ describe("GPT-Live full production QA", () => {
       mutate: (generation: PublishedGenerationValidation) => ({
         ...generation,
         preparationFingerprint: sha("9")
+      })
+    },
+    {
+      name: "prepared artifact hash",
+      mutate: (generation: PublishedGenerationValidation) => ({
+        ...generation,
+        preparedArtifacts: generation.preparedArtifacts.map((artifact, index) => index === 0
+          ? { ...artifact, sha256: sha("9") }
+          : artifact)
       })
     },
     {

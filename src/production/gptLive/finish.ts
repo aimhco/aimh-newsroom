@@ -10,11 +10,17 @@ import {
   rename as defaultRename,
   rm as defaultRm
 } from "node:fs/promises";
-import { basename, join, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { runCommand as defaultRunCommand } from "../../render/process";
 import { writeJsonAtomic as defaultWriteJsonAtomic } from "./atomicFiles";
 import { GPT_LIVE_CONTENT } from "./content";
-import { validatePreparedGeneration } from "./preparation";
+import {
+  derivePreparedArtifactDescriptors,
+  hashPreparedArtifactDescriptors,
+  validatePreparedGeneration,
+  type PreparedArtifactBinding,
+  type PreparedGenerationRecord
+} from "./preparation";
 import { withEpisodeProductionLock } from "./productionLock";
 import { validateContainedEpisodePaths } from "./qa/paths";
 import { assertTellaProgramDuration, validateTellaTimelineAudit } from "./tellaState";
@@ -183,6 +189,7 @@ export interface PublishedGenerationPaths {
 export interface PublishedGenerationValidation {
   readonly generationId: string;
   readonly preparationFingerprint: string;
+  readonly preparedArtifacts: readonly PreparedArtifactBinding[];
   readonly reportSha256: string;
   readonly variants: readonly {
     readonly name: "version-a" | "version-b";
@@ -334,6 +341,49 @@ const validateContainedPaths = async (
     lstat,
     realpath,
     context: "GPT-Live finish"
+  });
+};
+
+interface ValidateCurrentPreparationOptions {
+  readonly episodeDir: string;
+  readonly production: unknown;
+  readonly voice: unknown;
+  readonly plan: unknown;
+  readonly sourceMatrix: string;
+  readonly sourceManifest: unknown;
+  readonly prepared: unknown;
+  readonly lstat: Lstat;
+  readonly readFileBytes: ReadBytes;
+  readonly realpath: Realpath;
+}
+
+const validateCurrentPreparation = async (
+  options: ValidateCurrentPreparationOptions
+): Promise<PreparedGenerationRecord> => {
+  const descriptors = derivePreparedArtifactDescriptors({
+    episodeDir: options.episodeDir,
+    production: options.production,
+    voice: options.voice,
+    plan: options.plan
+  });
+  const containedPaths = descriptors
+    .filter((artifact) => !isAbsolute(artifact.path))
+    .map((artifact) => artifact.absolutePath);
+  await validateContainedPaths(options.episodeDir, containedPaths, options.lstat, options.realpath);
+  for (const artifact of descriptors.filter((candidate) => isAbsolute(candidate.path))) {
+    const file = await options.lstat(artifact.absolutePath);
+    if (file.isSymbolicLink() || file.isDirectory()) {
+      throw new Error(`Prepared artifact path is not a regular file: ${artifact.logicalId}`);
+    }
+  }
+  const artifacts = await hashPreparedArtifactDescriptors(descriptors, options.readFileBytes);
+  return validatePreparedGeneration(options.prepared, GPT_LIVE_CONTENT.id, {
+    production: options.production,
+    voice: options.voice,
+    plan: options.plan,
+    sourceMatrix: options.sourceMatrix,
+    sourceManifest: options.sourceManifest,
+    artifacts
   });
 };
 
@@ -911,6 +961,7 @@ interface PublishedAudioContract {
   readonly logoPath: string;
   readonly logoFile: string;
   readonly logoSha256?: string;
+  readonly outroMusicPath: string;
   readonly outroFile: string;
   readonly outroDurationSeconds: number;
 }
@@ -1002,6 +1053,7 @@ const parsePublishedAudioContract = (text: string): PublishedAudioContract => {
     productionId: value.id,
     logoPath: value.branding.logoPath,
     logoFile: portableBasename(value.branding.logoPath),
+    outroMusicPath: audio.outroMusicPath,
     outroFile: portableBasename(audio.outroMusicPath),
     outroDurationSeconds: audio.outroDurationSeconds
   };
@@ -1427,19 +1479,24 @@ export async function validatePublishedGeneration(
       throw new Error(`Invalid ${label} JSON`);
     }
   };
+  const productionValue = parseJson(productionText, "production manifest");
+  const voiceValue = parseJson(voiceText, "voice manifest");
+  const planValue = parseJson(planText, "Tella plan");
+  const sourceManifestValue = parseJson(sourceManifestText, "source manifest");
   const plan = parseFinishPlan(planText);
   const expectedProgramAudio = buildProgramAudioPlan(episodeDir, plan as TellaPlan);
-  const prepared = validatePreparedGeneration(
-    parseJson(preparedText, "prepared generation"),
-    GPT_LIVE_CONTENT.id,
-    {
-      production: parseJson(productionText, "production manifest"),
-      voice: parseJson(voiceText, "voice manifest"),
-      plan: parseJson(planText, "Tella plan"),
-      sourceMatrix,
-      sourceManifest: parseJson(sourceManifestText, "source manifest")
-    }
-  );
+  const prepared = await validateCurrentPreparation({
+    episodeDir,
+    production: productionValue,
+    voice: voiceValue,
+    plan: planValue,
+    sourceMatrix,
+    sourceManifest: sourceManifestValue,
+    prepared: parseJson(preparedText, "prepared generation"),
+    lstat,
+    readFileBytes,
+    realpath
+  });
   validateTellaTimelineAudit(plan, parseJson(stateText, "Tella state"));
   const productionContract = parsePublishedAudioContract(productionText);
   let logoBytes: Uint8Array;
@@ -1521,6 +1578,7 @@ export async function validatePublishedGeneration(
   return {
     generationId: manifest.generationId,
     preparationFingerprint: manifest.preparationFingerprint,
+    preparedArtifacts: prepared.artifacts.map((artifact) => ({ ...artifact })),
     reportSha256: createHash("sha256").update(manifestText).digest("hex"),
     variants: (["version-a", "version-b"] as const).map((name) => {
       const variant = manifest.variants.find((record) => record.name === name)!;
@@ -1765,18 +1823,30 @@ async function finishGptLiveProductionUnlocked(
       throw new Error(`Invalid ${label} JSON`);
     }
   };
+  const productionValue = parseJson(productionText, "production manifest");
+  const voiceValue = parseJson(voiceText, "voice manifest");
+  const planValue = parseJson(planText, "Tella plan");
+  const sourceManifestValue = parseJson(sourceManifestText, "source manifest");
   const plan = parseFinishPlan(planText);
-  const prepared = validatePreparedGeneration(
-    parseJson(preparedText, "prepared generation"),
-    GPT_LIVE_CONTENT.id,
-    {
-      production: parseJson(productionText, "production manifest"),
-      voice: parseJson(voiceText, "voice manifest"),
-      plan: parseJson(planText, "Tella plan"),
-      sourceMatrix,
-      sourceManifest: parseJson(sourceManifestText, "source manifest")
-    }
-  );
+  const preparedAudioContract = parsePublishedAudioContract(productionText);
+  if (logoPath !== preparedAudioContract.logoPath) {
+    throw new Error("Runtime logo path does not match the prepared production asset path");
+  }
+  if (outroMusicPath !== preparedAudioContract.outroMusicPath) {
+    throw new Error("Runtime outro path does not match the prepared production asset path");
+  }
+  const prepared = await validateCurrentPreparation({
+    episodeDir: options.episodeDir,
+    production: productionValue,
+    voice: voiceValue,
+    plan: planValue,
+    sourceMatrix,
+    sourceManifest: sourceManifestValue,
+    prepared: parseJson(preparedText, "prepared generation"),
+    lstat,
+    readFileBytes,
+    realpath
+  });
   validateTellaTimelineAudit(plan, parseJson(stateText, "Tella state"));
   const programAudio = buildProgramAudioPlan(options.episodeDir, plan as TellaPlan);
   const duckIntervals = deriveSourceDuckIntervals(plan);

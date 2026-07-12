@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import {
   access as defaultAccess,
   lstat as defaultLstat,
+  readFile as defaultReadFile,
   realpath as defaultRealpath,
   rm as defaultRm,
   stat as defaultStat
@@ -21,7 +22,12 @@ import {
 } from "./atomicFiles";
 import { resolveEvidenceAssetPath, validateEvidenceAssets } from "./evidence";
 import { extractSourceClip as defaultExtractSourceClip } from "./media";
-import { buildPreparationFingerprint } from "./preparation";
+import {
+  buildPreparationFingerprint,
+  derivePreparedArtifactDescriptors,
+  hashPreparedArtifactDescriptors,
+  type ReadPreparedArtifactBytes
+} from "./preparation";
 import {
   assertNarrationSlateContract,
   inspectMediaFile as defaultInspectMediaFile
@@ -79,6 +85,7 @@ export interface PrepareGptLiveProductionDependencies {
   readonly inspectMediaFile?: typeof defaultInspectMediaFile;
   readonly lstat?: typeof defaultLstat;
   readonly realpath?: typeof defaultRealpath;
+  readonly readFileBytes?: ReadPreparedArtifactBytes;
   readonly removeFile?: (path: string) => Promise<void>;
   readonly renderPlates?: RenderPlates;
   readonly stat?: (path: string) => Promise<FileStat>;
@@ -327,6 +334,8 @@ export async function prepareGptLiveProduction(
   const inspectMediaFile = dependencies.inspectMediaFile ?? defaultInspectMediaFile;
   const lstat = dependencies.lstat ?? defaultLstat;
   const realpath = dependencies.realpath ?? defaultRealpath;
+  const readFileBytes = dependencies.readFileBytes ??
+    ((path: string) => defaultReadFile(path) as Promise<Uint8Array>);
   const removeFile =
     dependencies.removeFile ?? ((path: string) => defaultRm(path, { force: true }));
   const renderPlates = dependencies.renderPlates ?? ((renderOptions) =>
@@ -452,17 +461,33 @@ export async function prepareGptLiveProduction(
     }
   };
   const sourceMatrix = renderSourceMatrix();
+  const artifactDescriptors = derivePreparedArtifactDescriptors({
+    episodeDir: options.episodeDir,
+    production,
+    voice,
+    plan
+  });
+  await validateContainedEpisodePaths(
+    options.episodeDir,
+    artifactDescriptors
+      .filter((artifact) => !isAbsolute(artifact.path))
+      .map((artifact) => artifact.absolutePath),
+    { lstat, realpath, context: "GPT-Live prepared artifacts" }
+  );
+  const artifacts = await hashPreparedArtifactDescriptors(artifactDescriptors, readFileBytes);
   const manifestFingerprint = buildPreparationFingerprint({
     production,
     voice,
     plan,
     sourceMatrix,
-    sourceManifest
+    sourceManifest,
+    artifacts
   });
   const prepared = {
     schemaVersion: "0.1.0",
     status: "prepared",
     productionId: GPT_LIVE_CONTENT.id,
+    artifacts,
     manifestFingerprint
   } as const;
 

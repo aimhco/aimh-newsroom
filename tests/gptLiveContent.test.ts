@@ -1027,6 +1027,10 @@ describe("GPT-Live production preparation", () => {
       publications.push("plates-complete");
       return { jobs: [] };
     });
+    const readFileBytes = vi.fn(async (path: string) => {
+      publications.push(`hash:${path}`);
+      return new TextEncoder().encode(`prepared-bytes:${path}`);
+    });
     const writeJsonAtomic = vi.fn(async (path: string, value: unknown) => {
       publications.push(path);
       await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -1051,6 +1055,7 @@ describe("GPT-Live production preparation", () => {
           inspectMediaFile,
           renderPlates: plateRendering,
           access: async () => undefined,
+          readFileBytes,
           writeJsonAtomic,
           writeTextAtomic,
           stat: async () => ({ size: 100, isFile: () => true })
@@ -1097,6 +1102,7 @@ describe("GPT-Live production preparation", () => {
       const sourceManifestPath = join(episodeDir, "reports", "source-manifest.json");
       const sourceManifestText = await readFile(sourceManifestPath, "utf8");
       const preparedText = await readFile(result.preparedPath, "utf8");
+      const prepared = JSON.parse(preparedText);
       const persistedText = [
         productionText,
         voiceText,
@@ -1115,6 +1121,33 @@ describe("GPT-Live production preparation", () => {
       expect(JSON.parse(productionText)).not.toHaveProperty("musicPath");
       expect(JSON.parse(voiceText)).toEqual(successfulVoiceResult(join(episodeDir, "voice")));
       expect(JSON.parse(planText)).toEqual(result.plan);
+      const expectedArtifactIds = [
+        ...GPT_LIVE_CONTENT.evidence
+          .filter((evidence) => evidence.playbackDecision === "captured_source")
+          .map((evidence) => `evidence:${evidence.id}`),
+        ...GPT_LIVE_CONTENT.timeline
+          .filter((item) => item.kind === "source_clip")
+          .map((item) => `source:${item.id}`),
+        ...GPT_LIVE_CONTENT.narration.map((item) => `voice:${item.id}`),
+        ...GPT_LIVE_CONTENT.narration.map((item) => `master:${item.id}`),
+        ...GPT_LIVE_CONTENT.narration.flatMap((item) =>
+          GPT_LIVE_CONTENT.variants.map((variant) => `plate:${variant}:${item.id}`)
+        ),
+        "branding:logo",
+        "audio:outro"
+      ];
+      expect(prepared.artifacts.map(({ logicalId }: { logicalId: string }) => logicalId))
+        .toEqual(expectedArtifactIds);
+      expect(prepared.artifacts.every((artifact: Record<string, unknown>) =>
+        Object.keys(artifact).sort().join(",") === "byteSize,logicalId,path,sha256"
+      )).toBe(true);
+      expect(prepared.artifacts.every(({ sha256, byteSize }: any) =>
+        /^[a-f0-9]{64}$/.test(sha256) && byteSize > 0
+      )).toBe(true);
+      expect(readFileBytes).toHaveBeenCalledTimes(expectedArtifactIds.length);
+      expect(publications.indexOf("plates-complete")).toBeLessThan(
+        publications.findIndex((event) => event.startsWith("hash:"))
+      );
       expect(result.plan.clips.map(({ id }) => id)).toEqual(
         GPT_LIVE_CONTENT.timeline.map(({ id }) => id)
       );
@@ -1131,13 +1164,15 @@ describe("GPT-Live production preparation", () => {
         schemaVersion: "0.1.0",
         status: "prepared",
         productionId: GPT_LIVE_CONTENT.id,
+        artifacts: prepared.artifacts,
         manifestFingerprint: createHash("sha256")
           .update(JSON.stringify({
             production: JSON.parse(productionText),
             voice: JSON.parse(voiceText),
             plan: JSON.parse(planText),
             sourceMatrix: matrixText,
-            sourceManifest: EXPECTED_SOURCE_MANIFEST
+            sourceManifest: EXPECTED_SOURCE_MANIFEST,
+            artifacts: prepared.artifacts
           }))
           .digest("hex")
       });
@@ -1152,6 +1187,7 @@ describe("GPT-Live production preparation", () => {
             generationId: "00000000-0000-4000-8000-000000000000",
             preparationFingerprint: "b".repeat(64),
             reportSha256: "a".repeat(64),
+            preparedArtifacts: [],
             variants: [],
             programAudio: [],
             finalPaths: [
@@ -1162,7 +1198,7 @@ describe("GPT-Live production preparation", () => {
           }
         })
       ).not.toThrow();
-      expect(publications).toEqual([
+      expect(publications.filter((event) => !event.startsWith("hash:"))).toEqual([
         "plates-complete",
         result.productionPath,
         result.voicePath,

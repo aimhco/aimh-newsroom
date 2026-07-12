@@ -31,6 +31,13 @@ import {
   type FinalMediaInspection,
   type FinishPlan
 } from "../src/production/gptLive/finish";
+import {
+  buildPreparationFingerprint,
+  derivePreparedArtifactDescriptors,
+  hashPreparedArtifactDescriptors,
+  parsePreparedGenerationRecord,
+  validatePreparedGeneration
+} from "../src/production/gptLive/preparation";
 import { buildTellaPlan } from "../src/production/gptLive/tellaPlan";
 import { buildTellaTimelineAudit } from "../src/production/gptLive/tellaState";
 import { runCommand } from "../src/render/process";
@@ -95,6 +102,75 @@ const fakeProgramAudioBindings = () => canonicalProgramAudio().inputs.map((input
   byteSize: index + 1,
   durationSeconds: input.durationSeconds
 }));
+
+const preparedArtifact = (logicalId = "source:clip_translation") => ({
+  logicalId,
+  path: `${logicalId.replaceAll(":", "/")}.bin`,
+  sha256: "a".repeat(64),
+  byteSize: 17
+});
+
+describe("GPT-Live prepared artifact bindings", () => {
+  const fingerprintInput = () => ({
+    production: { id: GPT_LIVE_CONTENT.id },
+    voice: { provider: "elevenlabs" },
+    plan: { productionId: GPT_LIVE_CONTENT.id },
+    sourceMatrix: "matrix",
+    sourceManifest: { productionId: GPT_LIVE_CONTENT.id },
+    artifacts: [preparedArtifact(), preparedArtifact("voice:narration_hook")]
+  });
+
+  const preparedRecord = () => {
+    const input = fingerprintInput();
+    return {
+      schemaVersion: "0.1.0",
+      status: "prepared",
+      productionId: GPT_LIVE_CONTENT.id,
+      artifacts: input.artifacts,
+      manifestFingerprint: buildPreparationFingerprint(input as any)
+    };
+  };
+
+  it("accepts an exact prepared artifact binding schema", () => {
+    const record = preparedRecord();
+    expect(parsePreparedGenerationRecord(record, GPT_LIVE_CONTENT.id)).toEqual(record);
+    expect(validatePreparedGeneration(
+      record,
+      GPT_LIVE_CONTENT.id,
+      fingerprintInput() as any
+    )).toEqual(record);
+  });
+
+  it.each([
+    ["missing binding field", (record: any) => { delete record.artifacts[0].byteSize; }],
+    ["extra binding field", (record: any) => { record.artifacts[0].durationSeconds = 1; }],
+    ["invalid logical ID", (record: any) => { record.artifacts[0].logicalId = "../clip"; }],
+    ["invalid path", (record: any) => { record.artifacts[0].path = ""; }],
+    ["invalid hash", (record: any) => { record.artifacts[0].sha256 = "bad"; }],
+    ["invalid byte size", (record: any) => { record.artifacts[0].byteSize = 0; }],
+    ["extra top-level key", (record: any) => { record.untrustedPath = "/tmp/media"; }]
+  ])("rejects a prepared record with $name", (_name, mutate) => {
+    const record: any = preparedRecord();
+    mutate(record);
+    expect(() => parsePreparedGenerationRecord(record, GPT_LIVE_CONTENT.id))
+      .toThrow(/prepared generation record/i);
+  });
+
+  it.each([
+    ["missing", (artifacts: any[]) => artifacts.slice(1)],
+    ["extra", (artifacts: any[]) => [...artifacts, preparedArtifact("branding:logo")]]
+  ])("rejects $name prepared artifact coverage even with a matching forged fingerprint", (_name, mutate) => {
+    const input = fingerprintInput();
+    const artifacts = mutate(input.artifacts);
+    const record = {
+      ...preparedRecord(),
+      artifacts,
+      manifestFingerprint: buildPreparationFingerprint({ ...input, artifacts } as any)
+    };
+    expect(() => validatePreparedGeneration(record, GPT_LIVE_CONTENT.id, input as any))
+      .toThrow(/prepared artifact|fingerprint/i);
+  });
+});
 
 describe("GPT-Live finishing filters", () => {
   it("reconstructs real output audio from plan media and excludes continuous Tella audio", async () => {
@@ -538,7 +614,19 @@ describe("GPT-Live post-production publication", () => {
   const createContainedEpisode = async () => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-finish-contained-"));
     await Promise.all(
-      ["assets", "voice", "tella", "exports", "final", "reports", "source", "master"].map((directory) =>
+      [
+        "assets",
+        "evidence",
+        "voice",
+        "tella",
+        "exports",
+        "final",
+        "reports",
+        "source",
+        "master",
+        "plates/dynamic_editorial",
+        "plates/aimh_visual_host"
+      ].map((directory) =>
         mkdir(join(episodeDir, directory), { recursive: true })
       )
     );
@@ -551,7 +639,7 @@ describe("GPT-Live post-production publication", () => {
       audio: {
         introMusic: false,
         bodyMusic: false,
-        outroMusicPath: "/assets/outro.mp3",
+        outroMusicPath: join(episodeDir, "assets", "outro.mp3"),
         outroDurationSeconds: 7
       }
     };
@@ -574,16 +662,20 @@ describe("GPT-Live post-production publication", () => {
             : clip.durationSeconds
       }))
     };
-    const voice = { provider: "elevenlabs", chunks: [], warnings: [] };
+    const voice = {
+      provider: "elevenlabs",
+      chunks: GPT_LIVE_CONTENT.narration.map(({ id }, index) => ({
+        id,
+        text: `narration-${id}`,
+        file: join(episodeDir, "voice", `${id}.mp3`),
+        durationSeconds: index === 0 ? 5.5 : 1 / 6,
+        provider: "elevenlabs",
+        cached: true
+      })),
+      warnings: []
+    };
     const sourceMatrix = "test source matrix";
     const sourceManifest = { schemaVersion: "0.1.0", productionId: GPT_LIVE_CONTENT.id, sources: [] };
-    const preparationFingerprint = sha256(JSON.stringify({
-      production,
-      voice,
-      plan: episodePlan,
-      sourceMatrix,
-      sourceManifest
-    }));
     const variantVideoIds = {
       dynamic_editorial: "video-a",
       aimh_visual_host: "video-b"
@@ -648,6 +740,7 @@ describe("GPT-Live post-production publication", () => {
     await Promise.all([
       writeFile(join(episodeDir, "production.json"), JSON.stringify(production), "utf8"),
       writeFile(join(episodeDir, "assets", "logo.png"), "logo-bytes", "utf8"),
+      writeFile(join(episodeDir, "assets", "outro.mp3"), "outro-bytes", "utf8"),
       writeFile(join(episodeDir, "voice", "narration.json"), JSON.stringify(voice), "utf8"),
       writeFile(join(episodeDir, "tella", "plan.json"), JSON.stringify(episodePlan), "utf8"),
       writeFile(join(episodeDir, "tella", "state.json"), JSON.stringify({ ...state, timelineAudit }), "utf8"),
@@ -658,26 +751,59 @@ describe("GPT-Live post-production publication", () => {
         `program-audio-${clip.id}`,
         "utf8"
       )),
+      ...voice.chunks.map((chunk) => writeFile(chunk.file, `voice-audio-${chunk.id}`, "utf8")),
+      ...episodePlan.clips.flatMap((clip) => clip.kind === "narration"
+        ? Object.values(clip.variants).map((variant) => writeFile(
+            variant.platePath,
+            `plate-video-${clip.id}-${variant.platePath.includes("dynamic_editorial") ? "a" : "b"}`,
+            "utf8"
+          ))
+        : []),
+      ...GPT_LIVE_CONTENT.evidence
+        .filter((evidence) => evidence.playbackDecision === "captured_source")
+        .map((evidence) => writeFile(
+          join(episodeDir, evidence.assetPath),
+          `evidence-capture-${evidence.id}`,
+          "utf8"
+        )),
       writeFile(join(episodeDir, "final", "version-a.mp4"), "approved-a", "utf8"),
       writeFile(join(episodeDir, "final", "version-b.mp4"), "approved-b", "utf8"),
       writeFile(join(episodeDir, "reports", "post-production.json"), "{}\n", "utf8"),
       writeFile(join(episodeDir, "reports", "source-matrix.md"), sourceMatrix, "utf8"),
-      writeFile(join(episodeDir, "reports", "source-manifest.json"), JSON.stringify(sourceManifest), "utf8"),
-      writeFile(join(episodeDir, "reports", "prepared.json"), JSON.stringify({
-        schemaVersion: "0.1.0",
-        status: "prepared",
-        productionId: GPT_LIVE_CONTENT.id,
-        manifestFingerprint: preparationFingerprint
-      }), "utf8")
+      writeFile(join(episodeDir, "reports", "source-manifest.json"), JSON.stringify(sourceManifest), "utf8")
     ]);
+    const artifacts = await hashPreparedArtifactDescriptors(
+      derivePreparedArtifactDescriptors({
+        episodeDir,
+        production,
+        voice,
+        plan: episodePlan
+      }),
+      async (path) => readFile(path)
+    );
+    const preparationFingerprint = buildPreparationFingerprint({
+      production,
+      voice,
+      plan: episodePlan,
+      sourceMatrix,
+      sourceManifest,
+      artifacts
+    });
+    await writeFile(join(episodeDir, "reports", "prepared.json"), JSON.stringify({
+      schemaVersion: "0.1.0",
+      status: "prepared",
+      productionId: GPT_LIVE_CONTENT.id,
+      artifacts,
+      manifestFingerprint: preparationFingerprint
+    }), "utf8");
     return episodeDir;
   };
 
   const finishOptions = (episodeDir: string) => ({
     episodeDir,
     env: {
-      AIMH_LOGO_PATH: "/assets/logo.png",
-      AIMH_OUTRO_MUSIC_PATH: "/assets/outro.mp3"
+      AIMH_LOGO_PATH: join(episodeDir, "assets", "logo.png"),
+      AIMH_OUTRO_MUSIC_PATH: join(episodeDir, "assets", "outro.mp3")
     },
     ffmpegPath: "ffmpeg",
     ffprobePath: "ffprobe"
@@ -1362,7 +1488,9 @@ describe("GPT-Live post-production publication", () => {
       });
       await writeFile(sourcePath, "mutated-program-audio", "utf8");
 
-      await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(/program audio|clip_translation/i);
+      await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(
+        /prepared artifact|program audio|clip_translation/i
+      );
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
     }
@@ -1454,7 +1582,7 @@ describe("GPT-Live post-production publication", () => {
     try {
       await expect(finishGptLiveProduction(finishOptions(episodeDir), {
         access: async () => undefined,
-        readFileBytes: async () => new Uint8Array([1, 2, 3]),
+        readFileBytes: async (path) => readFile(path),
         inspectFinalMediaFile: async (_ffprobePath, path) =>
           validInspection(path.includes("tella-b") ? 11.752 : 11.75),
         measureIntervalLoudness,
@@ -1488,6 +1616,91 @@ describe("GPT-Live post-production publication", () => {
 
       expect(inspectFinalMediaFile).not.toHaveBeenCalled();
       expect(measureIntervalLoudness).not.toHaveBeenCalled();
+      expect(runCommand).not.toHaveBeenCalled();
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: "source clip",
+      path: (episodeDir: string) => join(episodeDir, "source", "clip_translation.mp4")
+    },
+    {
+      name: "ElevenLabs narration chunk",
+      path: (episodeDir: string) => join(episodeDir, "voice", "narration_hook.mp3")
+    },
+    {
+      name: "rendered narration plate",
+      path: (episodeDir: string) =>
+        join(episodeDir, "plates", "dynamic_editorial", "narration_hook.mp4")
+    },
+    {
+      name: "captured evidence PNG",
+      path: (episodeDir: string) => join(
+        episodeDir,
+        GPT_LIVE_CONTENT.evidence.find((item) => item.playbackDecision === "captured_source")!
+          .assetPath
+      )
+    },
+    {
+      name: "AIMH logo",
+      path: (episodeDir: string) => join(episodeDir, "assets", "logo.png")
+    },
+    {
+      name: "outro audio",
+      path: (episodeDir: string) => join(episodeDir, "assets", "outro.mp3")
+    }
+  ])("rejects a same-size mutated prepared $name before FFmpeg", async ({ path }) => {
+    const episodeDir = await createContainedEpisode();
+    const targetPath = path(episodeDir);
+    const original = await readFile(targetPath);
+    const replacement = Buffer.from(original);
+    replacement[0] = replacement[0]! ^ 0xff;
+    await writeFile(targetPath, replacement);
+    const inspectFinalMediaFile = vi.fn(async () => validInspection(11.75));
+    const measureIntervalLoudness = vi.fn(async () => -23);
+    const runCommand = vi.fn(async () => {
+      throw new Error("FFmpeg must not run for stale prepared media");
+    });
+
+    try {
+      await expect(finishGptLiveProduction(finishOptions(episodeDir), {
+        access: async () => undefined,
+        inspectFinalMediaFile,
+        measureIntervalLoudness,
+        runCommand
+      })).rejects.toThrow(/prepared artifact.*(mismatch|changed)|prepared.*fingerprint/i);
+
+      expect(inspectFinalMediaFile).not.toHaveBeenCalled();
+      expect(measureIntervalLoudness).not.toHaveBeenCalled();
+      expect(runCommand).not.toHaveBeenCalled();
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["logo", "AIMH_LOGO_PATH"],
+    ["outro", "AIMH_OUTRO_MUSIC_PATH"]
+  ] as const)("rejects a substituted runtime %s path before FFmpeg", async (_name, envKey) => {
+    const episodeDir = await createContainedEpisode();
+    const replacementPath = join(episodeDir, "assets", `replacement-${envKey}.bin`);
+    await writeFile(replacementPath, "replacement-asset", "utf8");
+    const options = finishOptions(episodeDir);
+    options.env[envKey] = replacementPath;
+    const runCommand = vi.fn(async () => {
+      throw new Error("FFmpeg must not run with substituted prepared assets");
+    });
+
+    try {
+      await expect(finishGptLiveProduction(options, {
+        access: async () => undefined,
+        inspectFinalMediaFile: async () => validInspection(11.75),
+        measureIntervalLoudness: async () => -23,
+        runCommand
+      })).rejects.toThrow(/prepared production|asset path|logo path|outro path/i);
       expect(runCommand).not.toHaveBeenCalled();
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
@@ -1532,6 +1745,7 @@ describe("GPT-Live post-production publication", () => {
         generationId: transactionId,
         preparationFingerprint: "c".repeat(64),
         reportSha256: "c".repeat(64),
+        preparedArtifacts: [],
         variants: publishedVariants,
         programAudio: fakeProgramAudioBindings(),
         finalPaths: [
@@ -1592,13 +1806,13 @@ describe("GPT-Live post-production publication", () => {
         expect(args).not.toContain("-stream_loop");
         expect(args.flatMap((arg, index) => arg === "-i" ? [args[index + 1]!] : [])).toEqual([
           expect.stringMatching(/exports\/tella-[ab]\.mp4$/),
-          "/assets/logo.png",
+          join(episodeDir, "assets", "logo.png"),
           ...GPT_LIVE_CONTENT.timeline.map((clip) => join(
             episodeDir,
             clip.kind === "source_clip" ? "source" : "master",
             `${clip.id}.mp4`
           )),
-          "/assets/outro.mp3"
+          join(episodeDir, "assets", "outro.mp3")
         ]);
         const graph = args[args.indexOf("-filter_complex") + 1]!;
         expect(graph).not.toContain("[0:a]");
@@ -1648,6 +1862,7 @@ describe("GPT-Live post-production publication", () => {
           generationId: transactionId,
           preparationFingerprint: "c".repeat(64),
           reportSha256: "c".repeat(64),
+          preparedArtifacts: [],
           variants: publishedVariants,
           programAudio: fakeProgramAudioBindings(),
           finalPaths: [
@@ -1750,6 +1965,7 @@ describe("GPT-Live post-production publication", () => {
           generationId: transactionId,
           preparationFingerprint: "c".repeat(64),
           reportSha256: "c".repeat(64),
+          preparedArtifacts: [],
           variants: publishedVariants,
           programAudio: fakeProgramAudioBindings(),
           finalPaths: [
@@ -1779,15 +1995,7 @@ describe("GPT-Live post-production publication", () => {
     try {
       await expect(
         finishGptLiveProduction(
-          {
-            episodeDir,
-            env: {
-              AIMH_LOGO_PATH: "/assets/logo.png",
-              AIMH_OUTRO_MUSIC_PATH: "/assets/outro.mp3"
-            },
-            ffmpegPath: "ffmpeg",
-            ffprobePath: "ffprobe"
-          },
+          finishOptions(episodeDir),
           {
             access: async () => undefined,
             readFileBytes: async (path) =>
@@ -1831,7 +2039,7 @@ describe("GPT-Live post-production publication", () => {
           {
             access: async () => undefined,
             randomUUID: () => transactionId,
-            readFileBytes: async () => new Uint8Array([1, 2, 3]),
+            readFileBytes: async (path) => readFile(path),
             inspectFinalMediaFile: async () => validInspection(11.75),
             measureIntervalLoudness: async () => -23,
             sampleLogoCornerFrameHash: async (_ffmpeg, path) =>
@@ -1892,7 +2100,7 @@ describe("GPT-Live post-production publication", () => {
         await finishGptLiveProduction(finishOptions(episodeDir), {
           access: async () => undefined,
           randomUUID: () => transactionId,
-          readFileBytes: async () => new Uint8Array([1, 2, 3]),
+          readFileBytes: async (path) => readFile(path),
           inspectFinalMediaFile: async () => validInspection(11.75),
           measureIntervalLoudness: async () => -23,
           sampleLogoCornerFrameHash: async (_ffmpeg, path) =>

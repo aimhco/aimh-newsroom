@@ -608,6 +608,14 @@ const assertUnchangedPublishedGeneration = (
     initial.generationId === current.generationId &&
     initial.preparationFingerprint === current.preparationFingerprint &&
     initial.reportSha256 === current.reportSha256 &&
+    initial.preparedArtifacts.length === current.preparedArtifacts.length &&
+    initial.preparedArtifacts.every((artifact, index) => {
+      const currentArtifact = current.preparedArtifacts[index];
+      return currentArtifact?.logicalId === artifact.logicalId &&
+        currentArtifact.path === artifact.path &&
+        currentArtifact.sha256 === artifact.sha256 &&
+        currentArtifact.byteSize === artifact.byteSize;
+    }) &&
     initial.programAudio.length === current.programAudio.length &&
     initial.programAudio.every((input, index) => {
       const currentInput = current.programAudio[index];
