@@ -206,7 +206,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
       version: "version-a" as const,
       sourceVariant: "dynamic_editorial" as const,
       remoteVideoId: "video-a",
-      workflowId: "export-video-a-job-a",
+      workflowId: "Export-Story-video-a/Story",
       exportPath: "exports/tella-a.mp4" as const,
       sha256: sha("6"),
       byteSize: 900
@@ -215,7 +215,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
       version: "version-b" as const,
       sourceVariant: "aimh_visual_host" as const,
       remoteVideoId: "video-b",
-      workflowId: "export-video-b-job-b",
+      workflowId: "Export-Story-video-b/Story",
       exportPath: "exports/tella-b.mp4" as const,
       sha256: sha("7"),
       byteSize: 901

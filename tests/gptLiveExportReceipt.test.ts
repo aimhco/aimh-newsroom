@@ -29,7 +29,7 @@ const receipt = (): TellaExportReceipt => ({
       version: "version-a",
       sourceVariant: "dynamic_editorial",
       remoteVideoId: "vid_dynamic",
-      workflowId: "export-vid_dynamic-job-a",
+      workflowId: "Export-Story-vid_dynamic/Story",
       exportPath: "exports/tella-a.mp4",
       sha256: sha256("export-a"),
       byteSize: 8
@@ -38,7 +38,7 @@ const receipt = (): TellaExportReceipt => ({
       version: "version-b",
       sourceVariant: "aimh_visual_host",
       remoteVideoId: "vid_host",
-      workflowId: "export-vid_host-job-b",
+      workflowId: "Export-Story-vid_host/Story",
       exportPath: "exports/tella-b.mp4",
       sha256: sha256("export-b"),
       byteSize: 8
@@ -55,7 +55,7 @@ describe("GPT-Live Tella export receipt", () => {
       ...duplicate.exports[1],
       sourceVariant: "dynamic_editorial",
       remoteVideoId: "vid_dynamic",
-      workflowId: "export-vid_dynamic-job-b",
+      workflowId: "Export-Story-vid_dynamic/Story",
       sha256: duplicate.exports[0].sha256,
       byteSize: duplicate.exports[0].byteSize
     };
@@ -92,6 +92,15 @@ describe("GPT-Live Tella export receipt", () => {
     ["wrong video ID", (value: any) => { value.exports[0].remoteVideoId = "vid_host"; }],
     ["workflow URL", (value: any) => { value.exports[0].workflowId = "https://tella.example/export"; }],
     ["workflow scheme", (value: any) => { value.exports[0].workflowId = "file://vid_dynamic/export"; }],
+    ["workflow single-slash URI scheme", (value: any) => {
+      value.exports[0].workflowId = "file:/Export-Story-vid_dynamic/Story";
+    }],
+    ["workflow scheme without slashes", (value: any) => {
+      value.exports[0].workflowId = "https:Export-Story-vid_dynamic/Story";
+    }],
+    ["workflow extended video ID prefix", (value: any) => {
+      value.exports[0].workflowId = "Export-Story-vid_dynamic_extra/Story";
+    }],
     ["workflow whitespace", (value: any) => { value.exports[0].workflowId = "Export vid_dynamic/Story"; }],
     ["workflow query", (value: any) => { value.exports[0].workflowId = "Export-vid_dynamic/Story?download=1"; }],
     ["workflow hash", (value: any) => { value.exports[0].workflowId = "Export-vid_dynamic/Story#frame"; }],
@@ -136,13 +145,13 @@ describe("GPT-Live Tella export receipt", () => {
             version: "version-a",
             sourceVariant: "dynamic_editorial",
             remoteVideoId: "vid_dynamic",
-            workflowId: "export-vid_dynamic-job-a"
+            workflowId: "Export-Story-vid_dynamic/Story"
           },
           {
             version: "version-b",
             sourceVariant: "aimh_visual_host",
             remoteVideoId: "vid_host",
-            workflowId: "export-vid_host-job-b"
+            workflowId: "Export-Story-vid_host/Story"
           }
         ]
       });

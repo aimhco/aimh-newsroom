@@ -113,7 +113,7 @@ const fakeTellaExports = () => [
     version: "version-a" as const,
     sourceVariant: "dynamic_editorial" as const,
     remoteVideoId: "video-a",
-    workflowId: "export-video-a-job-a",
+    workflowId: "Export-Story-video-a/Story",
     exportPath: "exports/tella-a.mp4" as const,
     sha256: "1".repeat(64),
     byteSize: 90
@@ -122,7 +122,7 @@ const fakeTellaExports = () => [
     version: "version-b" as const,
     sourceVariant: "aimh_visual_host" as const,
     remoteVideoId: "video-b",
-    workflowId: "export-video-b-job-b",
+    workflowId: "Export-Story-video-b/Story",
     exportPath: "exports/tella-b.mp4" as const,
     sha256: "1".repeat(64),
     byteSize: 90
@@ -839,13 +839,13 @@ describe("GPT-Live post-production publication", () => {
           version: "version-a",
           sourceVariant: "dynamic_editorial",
           remoteVideoId: "video-a",
-          workflowId: "export-video-a-job-a"
+          workflowId: "Export-Story-video-a/Story"
         },
         {
           version: "version-b",
           sourceVariant: "aimh_visual_host",
           remoteVideoId: "video-b",
-          workflowId: "export-video-b-job-b"
+          workflowId: "Export-Story-video-b/Story"
         }
       ]
     });
@@ -896,7 +896,7 @@ describe("GPT-Live post-production publication", () => {
         version: "version-a" as const,
         sourceVariant: "dynamic_editorial" as const,
         remoteVideoId: "vid_dynamic",
-        workflowId: "export-vid_dynamic-job-a",
+        workflowId: "Export-Story-vid_dynamic/Story",
         exportPath: "exports/tella-a.mp4" as const,
         sha256: sha256("export-a"),
         byteSize: 8
@@ -905,7 +905,7 @@ describe("GPT-Live post-production publication", () => {
         version: "version-b" as const,
         sourceVariant: "aimh_visual_host" as const,
         remoteVideoId: "vid_host",
-        workflowId: "export-vid_host-job-b",
+        workflowId: "Export-Story-vid_host/Story",
         exportPath: "exports/tella-b.mp4" as const,
         sha256: sha256("export-b"),
         byteSize: 8

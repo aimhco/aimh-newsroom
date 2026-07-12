@@ -71,6 +71,7 @@ const VARIANTS = ["dynamic_editorial", "aimh_visual_host"] as const;
 const HASH = /^[a-f0-9]{64}$/;
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,199}$/i;
 const SAFE_WORKFLOW_ID = /^[a-z0-9][-a-z0-9._/:]{0,255}$/i;
+const LEADING_URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const SECRET_LIKE = /(?:api[_-]?key|bearer|credential|password|secret|signature|signed|token|x-amz)/i;
 
 const invalid = (detail: string): never => {
@@ -114,14 +115,14 @@ const requireWorkflowId = (value: unknown, remoteVideoId: string): string => {
   if (
     typeof value !== "string" ||
     !SAFE_WORKFLOW_ID.test(value) ||
-    value.includes("://")
+    LEADING_URI_SCHEME.test(value)
   ) {
     invalid("workflowId must use the bounded non-URL workflow grammar");
   }
   const workflowId = value as string;
   if (SECRET_LIKE.test(workflowId)) invalid("workflowId contains secret-like data");
-  if (!workflowId.includes(remoteVideoId)) {
-    invalid("workflowId must identify the exact remote videoId");
+  if (!workflowId.startsWith(`Export-Story-${remoteVideoId}/`)) {
+    invalid("workflowId must start with the exact Tella remote videoId prefix");
   }
   return workflowId;
 };

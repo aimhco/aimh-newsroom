@@ -33,16 +33,17 @@ pnpm gpt-live:seal-exports -- \
   --episode-dir episodes/2026-07-10-gpt-live-tella-ab \
   --version-a-source-variant dynamic_editorial \
   --version-a-video-id vid_example_a \
-  --version-a-workflow-id export-vid_example_a-job-a \
+  --version-a-workflow-id Export-Story-vid_example_a/Story \
   --version-b-source-variant aimh_visual_host \
   --version-b-video-id vid_example_b \
-  --version-b-workflow-id export-vid_example_b-job-b
+  --version-b-workflow-id Export-Story-vid_example_b/Story
 
 pnpm gpt-live:finish -- --episode-dir episodes/2026-07-10-gpt-live-tella-ab
 pnpm gpt-live:qa -- --episode-dir episodes/2026-07-10-gpt-live-tella-ab
 ```
 
-Each workflow ID must be a non-URL identifier containing its exact video ID. For the
+Each workflow ID must be a non-URL identifier starting with
+`Export-Story-${remoteVideoId}/`. For the
 approved compatibility copy, set both source variants and video IDs to the
 `dynamic_editorial` values. Both records may use the same workflow ID when both local files are
 copies of that one export. Every flag also has a

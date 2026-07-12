@@ -640,10 +640,10 @@ describe("GPT-Live production environment", () => {
     const sealEnv = {
       GPT_LIVE_TELLA_VERSION_A_SOURCE_VARIANT: "dynamic_editorial",
       GPT_LIVE_TELLA_VERSION_A_VIDEO_ID: "vid_dynamic",
-      GPT_LIVE_TELLA_VERSION_A_WORKFLOW_ID: "export-vid_dynamic-job-a",
+      GPT_LIVE_TELLA_VERSION_A_WORKFLOW_ID: "Export-Story-vid_dynamic/Story",
       GPT_LIVE_TELLA_VERSION_B_SOURCE_VARIANT: "aimh_visual_host",
       GPT_LIVE_TELLA_VERSION_B_VIDEO_ID: "vid_host",
-      GPT_LIVE_TELLA_VERSION_B_WORKFLOW_ID: "export-vid_host-job-b"
+      GPT_LIVE_TELLA_VERSION_B_WORKFLOW_ID: "Export-Story-vid_host/Story"
     };
     const snapshot = loadEnvSnapshot({ shellEnv: sealEnv });
     expect(snapshot.values).toMatchObject(sealEnv);
@@ -1713,10 +1713,10 @@ describe("GPT-Live preparation CLI", () => {
       "--episode-dir", "episodes/custom",
       "--version-a-source-variant", "dynamic_editorial",
       "--version-a-video-id", "vid_dynamic",
-      "--version-a-workflow-id", "export-vid_dynamic-job-a",
+      "--version-a-workflow-id", "Export-Story-vid_dynamic/Story",
       "--version-b-source-variant", "dynamic_editorial",
       "--version-b-video-id", "vid_dynamic",
-      "--version-b-workflow-id", "export-vid_dynamic-job-b"
+      "--version-b-workflow-id", "Export-Story-vid_dynamic/Story"
     ], {
       cwd: () => "/project",
       loadEnvSnapshotFromFiles: async () => ({ values: {}, status: {} }),
@@ -1731,13 +1731,13 @@ describe("GPT-Live preparation CLI", () => {
           version: "version-a",
           sourceVariant: "dynamic_editorial",
           remoteVideoId: "vid_dynamic",
-          workflowId: "export-vid_dynamic-job-a"
+          workflowId: "Export-Story-vid_dynamic/Story"
         },
         {
           version: "version-b",
           sourceVariant: "dynamic_editorial",
           remoteVideoId: "vid_dynamic",
-          workflowId: "export-vid_dynamic-job-b"
+          workflowId: "Export-Story-vid_dynamic/Story"
         }
       ]
     });
@@ -1751,10 +1751,10 @@ describe("GPT-Live preparation CLI", () => {
         values: {
           GPT_LIVE_TELLA_VERSION_A_SOURCE_VARIANT: "dynamic_editorial",
           GPT_LIVE_TELLA_VERSION_A_VIDEO_ID: "vid_dynamic",
-          GPT_LIVE_TELLA_VERSION_A_WORKFLOW_ID: "export-vid_dynamic-job-a",
+          GPT_LIVE_TELLA_VERSION_A_WORKFLOW_ID: "Export-Story-vid_dynamic/Story",
           GPT_LIVE_TELLA_VERSION_B_SOURCE_VARIANT: "aimh_visual_host",
           GPT_LIVE_TELLA_VERSION_B_VIDEO_ID: "vid_host",
-          GPT_LIVE_TELLA_VERSION_B_WORKFLOW_ID: "export-vid_host-job-b"
+          GPT_LIVE_TELLA_VERSION_B_WORKFLOW_ID: "Export-Story-vid_host/Story"
         },
         status: {}
       }),
@@ -1783,7 +1783,7 @@ describe("GPT-Live preparation CLI", () => {
 
   it("preserves the complete inline seal value for downstream secret validation", async () => {
     const sealTellaExports = vi.fn(async (options: any) => {
-      expect(options.exports[0].workflowId).toBe("export-vid_dynamic-job-a=token");
+      expect(options.exports[0].workflowId).toBe("Export-Story-vid_dynamic/Story=token");
       throw new Error("captured complete workflow value");
     });
     await expect(runGptLiveCli([
@@ -1791,10 +1791,10 @@ describe("GPT-Live preparation CLI", () => {
       "--episode-dir=episodes/custom",
       "--version-a-source-variant=dynamic_editorial",
       "--version-a-video-id=vid_dynamic",
-      "--version-a-workflow-id=export-vid_dynamic-job-a=token",
+      "--version-a-workflow-id=Export-Story-vid_dynamic/Story=token",
       "--version-b-source-variant=aimh_visual_host",
       "--version-b-video-id=vid_host",
-      "--version-b-workflow-id=export-vid_host-job-b"
+      "--version-b-workflow-id=Export-Story-vid_host/Story"
     ], {
       cwd: () => "/project",
       loadEnvSnapshotFromFiles: async () => ({ values: {}, status: {} }),
