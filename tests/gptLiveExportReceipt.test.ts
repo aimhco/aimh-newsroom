@@ -11,6 +11,8 @@ import {
 } from "../src/production/gptLive/tellaExportReceipt";
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
+const REAL_TELLA_WORKFLOW_ID =
+  "Export-Story-vid_cmrfrx6lc006c04l4fjh0alem/2026-07-12T17:23:26.147Z/Story/1920x1080/30FPS";
 
 const state = {
   variantVideoIds: {
@@ -60,9 +62,42 @@ describe("GPT-Live Tella export receipt", () => {
     expect(parseTellaExportReceipt(duplicate, state)).toEqual(duplicate);
   });
 
+  it("accepts the real Tella workflow grammar and one shared compatibility export workflow", () => {
+    const realState = {
+      variantVideoIds: {
+        dynamic_editorial: "vid_cmrfrx6lc006c04l4fjh0alem",
+        aimh_visual_host: "vid_unused_host"
+      }
+    };
+    const compatible = receipt();
+    (compatible.exports as any)[0] = {
+      ...compatible.exports[0],
+      sourceVariant: "dynamic_editorial",
+      remoteVideoId: "vid_cmrfrx6lc006c04l4fjh0alem",
+      workflowId: REAL_TELLA_WORKFLOW_ID
+    };
+    (compatible.exports as any)[1] = {
+      ...compatible.exports[1],
+      sourceVariant: "dynamic_editorial",
+      remoteVideoId: "vid_cmrfrx6lc006c04l4fjh0alem",
+      workflowId: REAL_TELLA_WORKFLOW_ID,
+      sha256: compatible.exports[0].sha256,
+      byteSize: compatible.exports[0].byteSize
+    };
+
+    expect(parseTellaExportReceipt(compatible, realState)).toEqual(compatible);
+  });
+
   it.each([
     ["wrong video ID", (value: any) => { value.exports[0].remoteVideoId = "vid_host"; }],
     ["workflow URL", (value: any) => { value.exports[0].workflowId = "https://tella.example/export"; }],
+    ["workflow scheme", (value: any) => { value.exports[0].workflowId = "file://vid_dynamic/export"; }],
+    ["workflow whitespace", (value: any) => { value.exports[0].workflowId = "Export vid_dynamic/Story"; }],
+    ["workflow query", (value: any) => { value.exports[0].workflowId = "Export-vid_dynamic/Story?download=1"; }],
+    ["workflow hash", (value: any) => { value.exports[0].workflowId = "Export-vid_dynamic/Story#frame"; }],
+    ["workflow backslash", (value: any) => { value.exports[0].workflowId = "Export-vid_dynamic\\Story"; }],
+    ["workflow unsupported character", (value: any) => { value.exports[0].workflowId = "Export-vid_dynamic@Story"; }],
+    ["workflow too long", (value: any) => { value.exports[0].workflowId = `Export-vid_dynamic/${"a".repeat(300)}`; }],
     ["workflow secret", (value: any) => { value.exports[0].workflowId = "token-vid_dynamic-secret"; }],
     ["workflow without video", (value: any) => { value.exports[0].workflowId = "export-job-a"; }],
     ["wrong source variant", (value: any) => { value.exports[0].sourceVariant = "aimh_visual_host"; }],

@@ -44,7 +44,8 @@ pnpm gpt-live:qa -- --episode-dir episodes/2026-07-10-gpt-live-tella-ab
 
 Each workflow ID must be a non-URL identifier containing its exact video ID. For the
 approved compatibility copy, set both source variants and video IDs to the
-`dynamic_editorial` values while keeping distinct workflow IDs. Every flag also has a
+`dynamic_editorial` values. Both records may use the same workflow ID when both local files are
+copies of that one export. Every flag also has a
 `GPT_LIVE_TELLA_VERSION_A_*` or `GPT_LIVE_TELLA_VERSION_B_*` environment equivalent:
 `SOURCE_VARIANT`, `VIDEO_ID`, and `WORKFLOW_ID`.
 
