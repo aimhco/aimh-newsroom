@@ -265,6 +265,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
     env,
     generation: {
       generationId: postProduction.generationId,
+      reportSha256: sha("f"),
       finalPaths: [
         join(EPISODE_DIR, "final", "version-a.mp4"),
         join(EPISODE_DIR, "final", "version-b.mp4")
@@ -977,6 +978,34 @@ describe("GPT-Live full production QA", () => {
       await expect(readFile(harness.paths.comparisonPath, "utf8")).resolves.toBe("old-comparison");
       await expect(readFile(join(harness.paths.visualDirectory, "old-frame.png"), "utf8"))
         .resolves.toBe("old-visual");
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("aborts when only the post-production report hash changes before QA publication", async () => {
+    const harness = await createQaRunHarness();
+    let currentGeneration = harness.generation;
+
+    try {
+      await expect(runGptLiveQa(
+        {
+          episodeDir: harness.episodeDir,
+          env: harness.snapshot.env,
+          ffmpegPath: "ffmpeg",
+          ffprobePath: "ffprobe"
+        },
+        {
+          ...harness.dependencies,
+          validatePublishedGeneration: async () => currentGeneration,
+          writeJsonAtomic: async (path, value) => {
+            currentGeneration = { ...harness.generation, reportSha256: sha("9") };
+            await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+          }
+        }
+      )).rejects.toThrow(/generation.*changed|changed.*generation/i);
+
+      await expect(readFile(harness.paths.reportPath, "utf8")).resolves.toBe("old-qa");
     } finally {
       await rm(harness.episodeDir, { recursive: true, force: true });
     }

@@ -149,7 +149,7 @@ describe("GPT-Live finishing filters", () => {
     expect(graph).toContain("afade=t=in:st=0:d=0.250");
     expect(graph).toContain("afade=t=out:st=6.250:d=0.750");
     expect(graph).toContain("volume=0.160");
-    expect(graph).toContain("adelay=143000|143000");
+    expect(graph).toContain("adelay=143000:all=1");
     expect(graph).toContain("amix=inputs=2:duration=longest:dropout_transition=0:normalize=0");
     expect(graph).toContain("alimiter=limit=0.95:attack=5:release=50:level=false:latency=true");
     expect(graph).not.toContain("0.070");
@@ -205,8 +205,8 @@ describe("GPT-Live finishing filters", () => {
     const graph = args[args.indexOf("-filter_complex") + 1]!;
 
     expect(graph).toContain("[2:a]atrim=duration=0.500");
-    expect(graph).toContain("afade=t=out:st=0.000:d=0.750");
-    expect(graph).toContain("adelay=0|0");
+    expect(graph).toContain("afade=t=out:st=0.000:d=0.500");
+    expect(graph).toContain("adelay=0:all=1");
     expect(graph).not.toContain("st=-");
     expect(graph).not.toContain("adelay=-");
     expect(args).not.toContain("-stream_loop");
@@ -301,7 +301,7 @@ describe("GPT-Live post-production publication", () => {
   const createContainedEpisode = async () => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-finish-contained-"));
     await Promise.all(
-      ["tella", "exports", "final", "reports"].map((directory) =>
+      ["assets", "tella", "exports", "final", "reports"].map((directory) =>
         mkdir(join(episodeDir, directory), { recursive: true })
       )
     );
@@ -310,6 +310,10 @@ describe("GPT-Live post-production publication", () => {
         join(episodeDir, "production.json"),
         JSON.stringify({
           id: GPT_LIVE_CONTENT.id,
+          branding: {
+            ...GPT_LIVE_CONTENT.branding,
+            logoPath: join(episodeDir, "assets", "logo.png")
+          },
           audio: {
             introMusic: false,
             bodyMusic: false,
@@ -319,6 +323,7 @@ describe("GPT-Live post-production publication", () => {
         }),
         "utf8"
       ),
+      writeFile(join(episodeDir, "assets", "logo.png"), "logo-bytes", "utf8"),
       writeFile(join(episodeDir, "tella", "plan.json"), JSON.stringify(plan()), "utf8"),
       writeFile(join(episodeDir, "exports", "tella-a.mp4"), "export-a", "utf8"),
       writeFile(join(episodeDir, "exports", "tella-b.mp4"), "export-b", "utf8"),
@@ -354,12 +359,23 @@ describe("GPT-Live post-production publication", () => {
     const report = buildPostProductionManifest({
       productionId: GPT_LIVE_CONTENT.id,
       generationId,
-      logoPath: "/assets/logo.png",
+      logoPath: join(episodeDir, "assets", "logo.png"),
       outroMusicPath: "/assets/outro.mp3",
       outroDurationSeconds: 7,
-      logoSha256: "a".repeat(64),
-      sourceGains: [],
-      logoEvidence: [],
+      logoSha256: sha256("logo-bytes"),
+      sourceGains: sourceGains.map((gain) => ({
+        ...gain,
+        outputLufsA: -23,
+        outputLufsB: -23
+      })),
+      logoEvidence: (["version-a", "version-b"] as const).map((name, index) => ({
+        name,
+        samples: [0.5, 5.375, 10.25].map((timeSeconds) => ({
+          timeSeconds,
+          inputSha256: (index === 0 ? "b" : "d").repeat(64),
+          outputSha256: (index === 0 ? "c" : "e").repeat(64)
+        }))
+      })),
       variants: [
         {
           name: "version-a",
@@ -565,6 +581,34 @@ describe("GPT-Live post-production publication", () => {
     expect(serialized).not.toMatch(/\/Users|\/private|secret|token|api.?key/i);
   });
 
+  it("reports the actual fade-out duration for a short program", () => {
+    const manifest = buildPostProductionManifest({
+      productionId: "test-production",
+      generationId: "00000000-0000-4000-8000-000000000000",
+      logoPath: "/assets/logo.png",
+      outroMusicPath: "/assets/outro.mp3",
+      outroDurationSeconds: 7,
+      logoSha256: "a".repeat(64),
+      sourceGains: [],
+      logoEvidence: [],
+      variants: (["version-a", "version-b"] as const).map((name) => ({
+        name,
+        inputPath: `/episode/exports/${name}.mp4`,
+        outputPath: `/episode/final/${name}.mp4`,
+        inputDurationSeconds: 0.5,
+        outputDurationSeconds: 0.5,
+        sha256: "b".repeat(64),
+        byteSize: 100
+      }))
+    });
+
+    expect(manifest.audioPolicy.outro).toMatchObject({
+      startSeconds: 0,
+      durationSeconds: 0.5,
+      fadeOutSeconds: 0.5
+    });
+  });
+
   it("rejects a published generation marker without the outro audio policy", async () => {
     const episodeDir = await createContainedEpisode();
     await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
@@ -647,6 +691,77 @@ describe("GPT-Live post-production publication", () => {
     }
   });
 
+  it.each([
+    {
+      name: "mutated video codec",
+      mutate: (report: Record<string, any>) => {
+        report.settings.videoCodec = "hevc";
+      }
+    },
+    {
+      name: "mutated exact-duration setting",
+      mutate: (report: Record<string, any>) => {
+        report.settings.exactAudioDuration = false;
+      }
+    },
+    {
+      name: "wrong logo asset",
+      mutate: (report: Record<string, any>) => {
+        report.assets.logo = "other-logo.png";
+      }
+    },
+    {
+      name: "wrong logo asset hash",
+      mutate: (report: Record<string, any>) => {
+        report.assets.logoSha256 = "9".repeat(64);
+      }
+    },
+    {
+      name: "mutated source-dialogue policy",
+      mutate: (report: Record<string, any>) => {
+        report.sourceDialogue.targetLufs = -14;
+      }
+    },
+    {
+      name: "malformed source-dialogue interval",
+      mutate: (report: Record<string, any>) => {
+        delete report.sourceDialogue.intervals[0].outputLufsA;
+      }
+    },
+    {
+      name: "source-dialogue interval moved off the plan",
+      mutate: (report: Record<string, any>) => {
+        report.sourceDialogue.intervals[0].startSeconds = 0.2;
+      }
+    },
+    {
+      name: "missing logo evidence",
+      mutate: (report: Record<string, any>) => {
+        delete report.logoEvidence;
+      }
+    },
+    {
+      name: "empty logo evidence",
+      mutate: (report: Record<string, any>) => {
+        report.logoEvidence = [];
+      }
+    }
+  ])("rejects a published generation with $name", async ({ mutate }) => {
+    const episodeDir = await createContainedEpisode();
+    await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
+    await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
+    await writeGenerationMarker(episodeDir, "current-a", "current-b");
+    await mutateGenerationMarker(episodeDir, mutate);
+
+    try {
+      await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(
+        /asset|evidence|logo|manifest|setting|source/i
+      );
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects serialized outro timing that drifts from the expected policy", async () => {
     const episodeDir = await createContainedEpisode();
     await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
@@ -709,10 +824,12 @@ describe("GPT-Live post-production publication", () => {
     await writeFile(versionAPath, "current-a", "utf8");
     await writeFile(versionBPath, "current-b", "utf8");
     await writeGenerationMarker(episodeDir, "current-a", "current-b");
+    const reportSha256 = sha256(await readFile(reportPath, "utf8"));
 
     try {
       await expect(validatePublishedGeneration(episodeDir)).resolves.toMatchObject({
-        generationId: "00000000-0000-4000-8000-000000000000"
+        generationId: "00000000-0000-4000-8000-000000000000",
+        reportSha256
       });
       await expect(
         validatePublishedGeneration({
@@ -787,6 +904,28 @@ describe("GPT-Live post-production publication", () => {
     }
   });
 
+  it("rejects incompatible A/B input timing before loudness measurement or rendering", async () => {
+    const episodeDir = await createContainedEpisode();
+    const measureIntervalLoudness = vi.fn(async () => -23);
+    const runCommand = vi.fn(async () => ({ stdout: "", stderr: "" }));
+
+    try {
+      await expect(finishGptLiveProduction(finishOptions(episodeDir), {
+        access: async () => undefined,
+        readFileBytes: async () => new Uint8Array([1, 2, 3]),
+        inspectFinalMediaFile: async (_ffprobePath, path) =>
+          validInspection(path.includes("tella-b") ? 10.752 : 10.75),
+        measureIntervalLoudness,
+        runCommand
+      })).rejects.toThrow(/input.*(?:duration|outro)|(?:duration|outro).*input/i);
+
+      expect(measureIntervalLoudness).not.toHaveBeenCalled();
+      expect(runCommand).not.toHaveBeenCalled();
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
   it("promotes A and B before hashing and atomically publishing the manifest last", async () => {
     const transactionId = "00000000-0000-4000-8000-000000000000";
     const episodeDir = await createContainedEpisode();
@@ -796,6 +935,7 @@ describe("GPT-Live post-production publication", () => {
       events.push("validate");
       return {
         generationId: transactionId,
+        reportSha256: "c".repeat(64),
         variants: publishedVariants,
         finalPaths: [
           join(episodeDir, "final", "version-a.mp4"),
@@ -857,7 +997,7 @@ describe("GPT-Live post-production publication", () => {
         ]);
         const graph = args[args.indexOf("-filter_complex") + 1]!;
         expect(graph).toContain("[2:a]atrim=duration=7.000");
-        expect(graph).toContain("adelay=3750|3750");
+        expect(graph).toContain("adelay=3750:all=1");
       }
       expect(validateGeneration).toHaveBeenCalledWith(episodeDir);
     } finally {
@@ -898,6 +1038,7 @@ describe("GPT-Live post-production publication", () => {
         },
         validatePublishedGeneration: async () => ({
           generationId: transactionId,
+          reportSha256: "c".repeat(64),
           variants: publishedVariants,
           finalPaths: [
             join(episodeDir, "final", "version-a.mp4"),
@@ -997,6 +1138,7 @@ describe("GPT-Live post-production publication", () => {
         },
         validatePublishedGeneration: async () => ({
           generationId: transactionId,
+          reportSha256: "c".repeat(64),
           variants: publishedVariants,
           finalPaths: [
             join(episodeDir, "final", "version-a.mp4"),

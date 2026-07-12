@@ -584,6 +584,7 @@ const assertUnchangedPublishedGeneration = (
 ): void => {
   const sameIdentity =
     initial.generationId === current.generationId &&
+    initial.reportSha256 === current.reportSha256 &&
     initial.variants.length === current.variants.length &&
     initial.variants.every((variant, index) => {
       const currentVariant = current.variants[index];

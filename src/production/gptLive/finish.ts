@@ -149,6 +149,7 @@ export interface PublishedGenerationPaths {
 
 export interface PublishedGenerationValidation {
   readonly generationId: string;
+  readonly reportSha256: string;
   readonly variants: readonly {
     readonly name: "version-a" | "version-b";
     readonly sha256: string;
@@ -233,6 +234,57 @@ const requirePositiveDuration = (durationSeconds: number, label: string): void =
 const requireConfiguredValue = (value: string | undefined, label: string): string => {
   if (!value?.trim()) throw new Error(`Missing ${label}`);
   return value;
+};
+
+interface OutroTiming {
+  readonly startSeconds: number;
+  readonly durationSeconds: number;
+  readonly fadeOutStartSeconds: number;
+  readonly fadeOutSeconds: number;
+  readonly delayMilliseconds: number;
+}
+
+const deriveOutroTiming = (
+  programDurationSeconds: number,
+  configuredOutroDurationSeconds: number
+): OutroTiming => {
+  requirePositiveDuration(programDurationSeconds, "program");
+  requirePositiveDuration(configuredOutroDurationSeconds, "outro music");
+  const durationSeconds = roundedSeconds(
+    Math.min(configuredOutroDurationSeconds, programDurationSeconds)
+  );
+  const startSeconds = roundedSeconds(Math.max(0, programDurationSeconds - durationSeconds));
+  const fadeOutSeconds = roundedSeconds(Math.min(OUTRO_FADE_OUT_SECONDS, durationSeconds));
+  return {
+    startSeconds,
+    durationSeconds,
+    fadeOutStartSeconds: roundedSeconds(Math.max(0, durationSeconds - fadeOutSeconds)),
+    fadeOutSeconds,
+    delayMilliseconds: Math.round(startSeconds * 1000)
+  };
+};
+
+const timingDiffers = (left: number, right: number): boolean =>
+  roundedSeconds(Math.abs(left - right)) > OUTRO_TIMING_SERIALIZATION_EPSILON_SECONDS;
+
+const assertSharedOutroTiming = (
+  programDurations: readonly number[],
+  configuredOutroDurationSeconds: number,
+  context: string
+): void => {
+  const [firstDuration, ...remainingDurations] = programDurations;
+  if (firstDuration === undefined) throw new Error(`${context}: missing input duration`);
+  const expected = deriveOutroTiming(firstDuration, configuredOutroDurationSeconds);
+  for (const duration of remainingDurations) {
+    const actual = deriveOutroTiming(duration, configuredOutroDurationSeconds);
+    if (
+      timingDiffers(actual.startSeconds, expected.startSeconds) ||
+      timingDiffers(actual.durationSeconds, expected.durationSeconds) ||
+      timingDiffers(actual.fadeOutSeconds, expected.fadeOutSeconds)
+    ) {
+      throw new Error(`${context}: A/B input durations cannot share one outro policy`);
+    }
+  }
 };
 
 const validateContainedPaths = async (
@@ -328,23 +380,19 @@ export function buildFinishFilterGraph(
   outroDurationSeconds: number,
   sourceGains: readonly SourceIntervalGain[]
 ): string {
-  requirePositiveDuration(durationSeconds, "input video");
-  requirePositiveDuration(outroDurationSeconds, "outro music");
-  const outroDuration = Math.min(outroDurationSeconds, durationSeconds);
-  const outroStart = Math.max(0, durationSeconds - outroDuration);
-  const outroDelayMilliseconds = Math.round(outroStart * 1000);
-  const outroFadeOutStart = Math.max(0, outroDuration - OUTRO_FADE_OUT_SECONDS);
+  const outroTiming = deriveOutroTiming(durationSeconds, outroDurationSeconds);
   const dialogueGainExpression = buildSourceDialogueGainExpression(sourceGains);
   const duration = fixedSeconds(durationSeconds);
   return [
     `${buildLogoFilter()}[vout]`,
     `[0:a]apad=whole_dur=${duration},atrim=duration=${duration},asetpts=PTS-STARTPTS,` +
       `volume='${dialogueGainExpression}':eval=frame[dialogue]`,
-    `[2:a]atrim=duration=${fixedSeconds(outroDuration)},asetpts=PTS-STARTPTS,` +
+    `[2:a]atrim=duration=${fixedSeconds(outroTiming.durationSeconds)},asetpts=PTS-STARTPTS,` +
       `afade=t=in:st=0:d=${fixedSeconds(OUTRO_FADE_IN_SECONDS)},` +
-      `afade=t=out:st=${fixedSeconds(outroFadeOutStart)}:d=${fixedSeconds(OUTRO_FADE_OUT_SECONDS)},` +
+      `afade=t=out:st=${fixedSeconds(outroTiming.fadeOutStartSeconds)}:` +
+      `d=${fixedSeconds(outroTiming.fadeOutSeconds)},` +
       `volume=${OUTRO_MUSIC_VOLUME.toFixed(3)},` +
-      `adelay=${outroDelayMilliseconds}|${outroDelayMilliseconds}[outro]`,
+      `adelay=${outroTiming.delayMilliseconds}:all=1[outro]`,
     `[dialogue][outro]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,` +
       `alimiter=limit=0.95:attack=5:release=50:level=false:latency=true,` +
       `atrim=duration=${duration},asetpts=PTS-STARTPTS[aout]`
@@ -639,14 +687,7 @@ const safeVariantPath = (directory: "exports" | "final", file: string): string =
 
 export function buildPostProductionManifest(options: BuildPostProductionManifestOptions) {
   const programDurationSeconds = options.variants[0]?.inputDurationSeconds ?? 0;
-  requirePositiveDuration(programDurationSeconds, "post-production program");
-  requirePositiveDuration(options.outroDurationSeconds, "outro music");
-  const outroDurationSeconds = roundedSeconds(
-    Math.min(options.outroDurationSeconds, programDurationSeconds)
-  );
-  const outroStartSeconds = roundedSeconds(
-    Math.max(0, programDurationSeconds - outroDurationSeconds)
-  );
+  const outroTiming = deriveOutroTiming(programDurationSeconds, options.outroDurationSeconds);
   return {
     schemaVersion: "0.2.0" as const,
     status: "finished" as const,
@@ -661,10 +702,10 @@ export function buildPostProductionManifest(options: BuildPostProductionManifest
       bodyMusic: false as const,
       outro: {
         file: basename(options.outroMusicPath),
-        startSeconds: outroStartSeconds,
-        durationSeconds: outroDurationSeconds,
+        startSeconds: outroTiming.startSeconds,
+        durationSeconds: outroTiming.durationSeconds,
         fadeInSeconds: OUTRO_FADE_IN_SECONDS,
-        fadeOutSeconds: OUTRO_FADE_OUT_SECONDS
+        fadeOutSeconds: outroTiming.fadeOutSeconds
       }
     },
     settings: {
@@ -729,7 +770,7 @@ interface PublishedGenerationManifest {
       readonly startSeconds: number;
       readonly durationSeconds: number;
       readonly fadeInSeconds: 0.25;
-      readonly fadeOutSeconds: 0.75;
+      readonly fadeOutSeconds: number;
     };
   };
   readonly variants: readonly PublishedVariantRecord[];
@@ -737,6 +778,9 @@ interface PublishedGenerationManifest {
 
 interface PublishedAudioContract {
   readonly productionId: string;
+  readonly logoPath: string;
+  readonly logoFile: string;
+  readonly logoSha256?: string;
   readonly outroFile: string;
   readonly outroDurationSeconds: number;
 }
@@ -796,7 +840,14 @@ const parsePublishedAudioContract = (text: string): PublishedAudioContract => {
   } catch {
     throw new Error("Invalid canonical production manifest JSON");
   }
-  if (!isRecord(value) || value.id !== GPT_LIVE_CONTENT.id || !isRecord(value.audio)) {
+  if (
+    !isRecord(value) ||
+    value.id !== GPT_LIVE_CONTENT.id ||
+    !isRecord(value.audio) ||
+    !isRecord(value.branding) ||
+    typeof value.branding.logoPath !== "string" ||
+    !value.branding.logoPath.trim()
+  ) {
     throw new Error("Invalid canonical production audio contract");
   }
   const audio = value.audio;
@@ -817,6 +868,8 @@ const parsePublishedAudioContract = (text: string): PublishedAudioContract => {
   }
   return {
     productionId: value.id,
+    logoPath: value.branding.logoPath,
+    logoFile: portableBasename(value.branding.logoPath),
     outroFile: portableBasename(audio.outroMusicPath),
     outroDurationSeconds: audio.outroDurationSeconds
   };
@@ -824,7 +877,8 @@ const parsePublishedAudioContract = (text: string): PublishedAudioContract => {
 
 const parsePublishedGenerationManifest = (
   text: string,
-  expectedAudio: PublishedAudioContract
+  expectedAudio: PublishedAudioContract,
+  expectedSourceIntervals: readonly DuckInterval[]
 ): PublishedGenerationManifest => {
   let value: unknown;
   try {
@@ -839,6 +893,23 @@ const parsePublishedGenerationManifest = (
   const audioPolicy = candidate.audioPolicy;
   const assets = candidate.assets;
   const settings = candidate.settings;
+  const expectedSettings = {
+    logoFilter: buildLogoFilter(),
+    exactAudioDuration: true,
+    limiter: "limit=0.95:attack=5:release=50:level=false:latency=true",
+    videoCodec: "libx264",
+    crf: 18,
+    preset: "medium",
+    pixelFormat: "yuv420p",
+    framesPerSecond: 30,
+    audioCodec: "aac",
+    audioBitrate: "192k",
+    audioSampleRate: 48_000,
+    audioChannels: 2,
+    faststart: true,
+    durationToleranceSeconds: DURATION_TOLERANCE_SECONDS,
+    variantDurationToleranceSeconds: VARIANT_DURATION_TOLERANCE_SECONDS
+  } as const;
   if (
     candidate.schemaVersion !== "0.2.0" ||
     candidate.status !== "finished" ||
@@ -847,12 +918,13 @@ const parsePublishedGenerationManifest = (
     !candidate.generationId ||
     !isRecord(assets) ||
     !hasExactKeys(assets, ["logo", "logoSha256"]) ||
-    typeof assets.logo !== "string" ||
-    !isSafeBasename(assets.logo) ||
+    assets.logo !== expectedAudio.logoFile ||
     typeof assets.logoSha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(assets.logoSha256) ||
+    assets.logoSha256 !== expectedAudio.logoSha256 ||
     !isRecord(settings) ||
     !hasExactKeys(settings, PUBLISHED_SETTINGS_KEYS) ||
+    !Object.entries(expectedSettings).every(([key, expected]) => settings[key] === expected) ||
     !isRecord(candidate.sourceDialogue) ||
     !Array.isArray(candidate.logoEvidence) ||
     !Array.isArray(candidate.variants) ||
@@ -886,7 +958,8 @@ const parsePublishedGenerationManifest = (
     !Number.isFinite(outro.durationSeconds) ||
     (outro.durationSeconds as number) <= 0 ||
     outro.fadeInSeconds !== OUTRO_FADE_IN_SECONDS ||
-    outro.fadeOutSeconds !== OUTRO_FADE_OUT_SECONDS
+    !Number.isFinite(outro.fadeOutSeconds) ||
+    (outro.fadeOutSeconds as number) <= 0
   ) {
     throw new Error("Invalid published generation manifest audio policy");
   }
@@ -940,22 +1013,143 @@ const parsePublishedGenerationManifest = (
     variants[0]!.outputDurationSeconds,
     variants[1]!.outputDurationSeconds
   );
-  for (const variant of variants) {
-    const expectedDurationSeconds = Math.min(
-      expectedAudio.outroDurationSeconds,
-      variant.inputDurationSeconds
+  const sourceDialogue = candidate.sourceDialogue;
+  if (
+    !hasExactKeys(sourceDialogue, [
+      "targetLufs",
+      "gainClampDb",
+      "rampSeconds",
+      "toleranceLu",
+      "intervals"
+    ]) ||
+    sourceDialogue.targetLufs !== SOURCE_TARGET_LUFS ||
+    sourceDialogue.gainClampDb !== SOURCE_GAIN_CLAMP_DB ||
+    sourceDialogue.rampSeconds !== GAIN_RAMP_SECONDS ||
+    sourceDialogue.toleranceLu !== SOURCE_LOUDNESS_TOLERANCE_LU ||
+    !Array.isArray(sourceDialogue.intervals) ||
+    sourceDialogue.intervals.length === 0
+  ) {
+    throw new Error("Invalid published generation manifest source dialogue");
+  }
+  const sourceResults: SourceIntervalResult[] = [];
+  for (const interval of sourceDialogue.intervals) {
+    if (
+      !isRecord(interval) ||
+      !hasExactKeys(interval, [
+        "startSeconds",
+        "endSeconds",
+        "measuredLufsA",
+        "measuredLufsB",
+        "averageMeasuredLufs",
+        "targetLufs",
+        "gainDb",
+        "outputLufsA",
+        "outputLufsB"
+      ]) ||
+      ![
+        interval.startSeconds,
+        interval.endSeconds,
+        interval.measuredLufsA,
+        interval.measuredLufsB,
+        interval.averageMeasuredLufs,
+        interval.gainDb,
+        interval.outputLufsA,
+        interval.outputLufsB
+      ].every(Number.isFinite) ||
+      (interval.startSeconds as number) < 0 ||
+      (interval.endSeconds as number) <= (interval.startSeconds as number) ||
+      interval.targetLufs !== SOURCE_TARGET_LUFS
+    ) {
+      throw new Error("Invalid published generation manifest source dialogue interval");
+    }
+    sourceResults.push(interval as unknown as SourceIntervalResult);
+  }
+  const expectedSourceGains = deriveSharedSourceGains(
+    sourceResults.map(({ startSeconds, endSeconds }) => ({ startSeconds, endSeconds })),
+    sourceResults.map(({ measuredLufsA }) => measuredLufsA),
+    sourceResults.map(({ measuredLufsB }) => measuredLufsB)
+  );
+  if (sourceResults.length !== expectedSourceIntervals.length) {
+    throw new Error("Invalid published generation manifest source dialogue interval count");
+  }
+  for (const [index, expectedGain] of expectedSourceGains.entries()) {
+    const actual = sourceResults[index]!;
+    const expectedInterval = expectedSourceIntervals[index]!;
+    if (
+      timingDiffers(actual.startSeconds, expectedInterval.startSeconds) ||
+      timingDiffers(actual.endSeconds, expectedInterval.endSeconds)
+    ) {
+      throw new Error("Invalid published generation manifest source dialogue interval timing");
+    }
+    for (const key of [
+      "startSeconds",
+      "endSeconds",
+      "measuredLufsA",
+      "measuredLufsB",
+      "averageMeasuredLufs",
+      "targetLufs",
+      "gainDb"
+    ] as const) {
+      if (actual[key] !== expectedGain[key]) {
+        throw new Error("Invalid published generation manifest source dialogue gain");
+      }
+    }
+  }
+  try {
+    assertSourceOutputLoudness(
+      expectedSourceGains,
+      sourceResults.map(({ outputLufsA }) => outputLufsA),
+      sourceResults.map(({ outputLufsB }) => outputLufsB)
     );
-    const expectedStartSeconds = Math.max(
-      0,
-      variant.inputDurationSeconds - expectedDurationSeconds
+  } catch {
+    throw new Error("Invalid published generation manifest source dialogue output");
+  }
+
+  if (candidate.logoEvidence.length !== 2) {
+    throw new Error("Invalid published generation manifest logo evidence");
+  }
+  for (const variant of variants) {
+    const evidence = candidate.logoEvidence.find(
+      (record) => isRecord(record) && record.name === variant.name
+    );
+    const expectedTimes = [
+      Math.min(0.5, variant.outputDurationSeconds / 4),
+      variant.outputDurationSeconds / 2,
+      Math.max(0, variant.outputDurationSeconds - 0.5)
+    ].map(roundedSeconds);
+    if (
+      !isRecord(evidence) ||
+      !hasExactKeys(evidence, ["name", "samples"]) ||
+      !Array.isArray(evidence.samples) ||
+      evidence.samples.length !== expectedTimes.length
+    ) {
+      throw new Error("Invalid published generation manifest logo evidence");
+    }
+    for (const [index, sample] of evidence.samples.entries()) {
+      if (
+        !isRecord(sample) ||
+        !hasExactKeys(sample, ["timeSeconds", "inputSha256", "outputSha256"]) ||
+        !Number.isFinite(sample.timeSeconds) ||
+        timingDiffers(sample.timeSeconds as number, expectedTimes[index]!) ||
+        typeof sample.inputSha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(sample.inputSha256) ||
+        typeof sample.outputSha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(sample.outputSha256) ||
+        sample.inputSha256 === sample.outputSha256
+      ) {
+        throw new Error("Invalid published generation manifest logo evidence sample");
+      }
+    }
+  }
+  for (const variant of variants) {
+    const expectedTiming = deriveOutroTiming(
+      variant.inputDurationSeconds,
+      expectedAudio.outroDurationSeconds
     );
     if (
-      roundedSeconds(
-        Math.abs((outro.durationSeconds as number) - expectedDurationSeconds)
-      ) >
-        OUTRO_TIMING_SERIALIZATION_EPSILON_SECONDS ||
-      roundedSeconds(Math.abs((outro.startSeconds as number) - expectedStartSeconds)) >
-        OUTRO_TIMING_SERIALIZATION_EPSILON_SECONDS
+      timingDiffers(outro.durationSeconds as number, expectedTiming.durationSeconds) ||
+      timingDiffers(outro.startSeconds as number, expectedTiming.startSeconds) ||
+      timingDiffers(outro.fadeOutSeconds as number, expectedTiming.fadeOutSeconds)
     ) {
       throw new Error("Invalid published generation manifest outro timing");
     }
@@ -977,6 +1171,7 @@ export async function validatePublishedGeneration(
     join(episodeDir, "final", "version-b.mp4")
   ];
   const productionPath = join(episodeDir, "production.json");
+  const planPath = join(episodeDir, "tella", "plan.json");
   const reportPath = options.reportPath ?? join(episodeDir, "reports", "post-production.json");
   const lstat = dependencies.lstat ?? defaultLstat;
   const realpath = dependencies.realpath ?? defaultRealpath;
@@ -986,15 +1181,17 @@ export async function validatePublishedGeneration(
 
   await validateContainedPaths(
     episodeDir,
-    [productionPath, finalPaths[0], finalPaths[1], reportPath],
+    [productionPath, planPath, finalPaths[0], finalPaths[1], reportPath],
     lstat,
     realpath
   );
   let productionText: string;
+  let planText: string;
   let manifestText: string;
   try {
-    [productionText, manifestText] = await Promise.all([
+    [productionText, planText, manifestText] = await Promise.all([
       readFile(productionPath, "utf8"),
+      readFile(planPath, "utf8"),
       readFile(reportPath, "utf8")
     ]);
   } catch (error) {
@@ -1002,8 +1199,25 @@ export async function validatePublishedGeneration(
       `Published generation manifest is missing or unreadable: ${error instanceof Error ? error.message : String(error)}`
     );
   }
-  const expectedAudio = parsePublishedAudioContract(productionText);
-  const manifest = parsePublishedGenerationManifest(manifestText, expectedAudio);
+  const productionContract = parsePublishedAudioContract(productionText);
+  let logoBytes: Uint8Array;
+  try {
+    logoBytes = await readFileBytes(productionContract.logoPath);
+  } catch (error) {
+    throw new Error(
+      `Published generation logo is missing or unreadable: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const expectedAudio: PublishedAudioContract = {
+    ...productionContract,
+    logoSha256: createHash("sha256").update(logoBytes).digest("hex")
+  };
+  const expectedSourceIntervals = deriveSourceDuckIntervals(parseFinishPlan(planText));
+  const manifest = parsePublishedGenerationManifest(
+    manifestText,
+    expectedAudio,
+    expectedSourceIntervals
+  );
 
   await validateContainedPaths(episodeDir, [finalPaths[0], finalPaths[1]], lstat, realpath);
   for (const [index, name] of (["version-a", "version-b"] as const).entries()) {
@@ -1027,6 +1241,7 @@ export async function validatePublishedGeneration(
 
   return {
     generationId: manifest.generationId,
+    reportSha256: createHash("sha256").update(manifestText).digest("hex"),
     variants: (["version-a", "version-b"] as const).map((name) => {
       const variant = manifest.variants.find((record) => record.name === name)!;
       return { name, sha256: variant.sha256, byteSize: variant.byteSize };
@@ -1284,6 +1499,11 @@ async function finishGptLiveProductionUnlocked(
     for (const inspection of inputInspections) {
       requirePositiveDuration(inspection.durationSeconds, "Tella export");
     }
+    assertSharedOutroTiming(
+      inputInspections.map(({ durationSeconds }) => durationSeconds),
+      GPT_LIVE_CONTENT.audio.outroDurationSeconds,
+      "GPT-Live finish preflight failed"
+    );
     const inputLoudness = await Promise.all(
       definitions.map((definition) =>
         Promise.all(duckIntervals.map((interval) => measure(ffmpegPath, definition.inputPath, interval)))
