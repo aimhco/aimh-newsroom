@@ -563,13 +563,13 @@ describe("GPT-Live full production QA", () => {
 
   it("accepts a prepared production using the resolved non-default outro path", () => {
     const snapshot = validSnapshot();
-    const resolvedOutroPath =
-      "/opt/alternate-video-engine/assets/music/Outro_Much_Higher_Causmic.mp3";
+    const resolvedOutroPath = "/assets/Outro_Alternate.mp3";
     snapshot.env.AIMH_OUTRO_MUSIC_PATH = resolvedOutroPath;
     snapshot.production.audio = {
       ...snapshot.production.audio,
       outroMusicPath: resolvedOutroPath
     };
+    (snapshot.postProduction.assets as Record<string, unknown>).music = "Outro_Alternate.mp3";
     refreshPreparedFingerprint(snapshot);
 
     expect(() => validateGptLiveQaSnapshot(snapshot)).not.toThrow();

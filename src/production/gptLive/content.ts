@@ -48,8 +48,8 @@ const narrationExactlyMatches = (timelineItem: NarrationSpec, canonical: Narrati
   timelineItem.claimIds.length === canonical.claimIds.length &&
   timelineItem.claimIds.every((claimId, index) => claimId === canonical.claimIds[index]);
 
-const isSameOrSubdomain = (mediaHost: string, canonicalHost: string): boolean =>
-  mediaHost === canonicalHost || mediaHost.endsWith(`.${canonicalHost}`);
+const normalizeHostname = (hostname: string): string =>
+  hostname.toLowerCase().replace(/\.+$/, "");
 
 const isRelativeAssetBelow = (assetPath: string, directory: string): boolean => {
   if (
@@ -106,7 +106,7 @@ const assertEvidenceIsValid = (
     if (mediaUrl.protocol !== "https:") {
       invalidProduction(`evidence "${evidence.id}" media URL must be a valid HTTPS URL`);
     }
-    if (!isSameOrSubdomain(mediaUrl.hostname, canonicalUrl.hostname)) {
+    if (normalizeHostname(mediaUrl.hostname) !== normalizeHostname(canonicalUrl.hostname)) {
       invalidProduction(`evidence "${evidence.id}" media URL must use the source publisher domain`);
     }
   }

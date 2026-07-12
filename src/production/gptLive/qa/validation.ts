@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { GPT_LIVE_CONTENT, validateProductionManifest } from "../content";
 import {
   assertFinalMediaContract,
@@ -406,7 +406,7 @@ const validateBrandingAndAudio = (snapshot: GptLiveQaSnapshot): void => {
   exact(post.assets, {
     logo: "logo.png",
     logoSha256: snapshot.logo.sha256,
-    music: "Outro_Much_Higher_Causmic.mp3"
+    music: basename(snapshot.production.audio.outroMusicPath)
   }, "post-production assets");
 
   if (!isRecord(post.settings)) fail("post-production settings are invalid");

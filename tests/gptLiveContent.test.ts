@@ -639,8 +639,7 @@ describe("GPT-Live production preparation", () => {
 
   it("prepares media, QA-validates a non-default outro, and persists deterministic records", async () => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-prepare-"));
-    const resolvedOutroPath =
-      "/opt/alternate-video-engine/assets/music/Outro_Much_Higher_Causmic.mp3";
+    const resolvedOutroPath = "/assets/Outro_Alternate.mp3";
     const prepareEnv = {
       ELEVENLABS_API_KEY: "eleven-secret-do-not-write",
       ELEVENLABS_VOICE_ID: "voice-secret-do-not-write",
@@ -1538,6 +1537,38 @@ describe("GPT-Live controlled production content", () => {
         })
     },
     {
+      name: "evidence with a media URL on a canonical subdomain",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_translation_video" media URL must use the source publisher domain',
+      build: () =>
+        replaceEvidence(cloneProduction(), 0, {
+          mediaUrl: "https://media.openai.com/video"
+        })
+    },
+    {
+      name: "evidence with an attacker subdomain of a short canonical host",
+      expectedError:
+        'Invalid GPT-Live production: evidence "evidence_openai_availability" media URL must use the source publisher domain',
+      build: () => {
+        const production = cloneProduction();
+        return replaceEvidence(
+          {
+            ...production,
+            sources: production.sources.map((source) =>
+              source.id === "src_openai_help"
+                ? { ...source, url: "https://co.uk/article" }
+                : source
+            )
+          },
+          4,
+          {
+            canonicalUrl: "https://co.uk/article",
+            mediaUrl: "https://attacker.co.uk/video"
+          }
+        );
+      }
+    },
+    {
       name: "evidence with a top-level media domain suffix",
       expectedError:
         'Invalid GPT-Live production: evidence "evidence_translation_video" media URL must use the source publisher domain',
@@ -1673,9 +1704,9 @@ describe("GPT-Live controlled production content", () => {
     expect(() => validateProductionManifest(build())).toThrow(expectedError);
   });
 
-  it("accepts a media URL on a canonical publisher subdomain", () => {
+  it("accepts a media URL with the exact canonical hostname", () => {
     const production = replaceEvidence(cloneProduction(), 0, {
-      mediaUrl: "https://media.openai.com/video"
+      mediaUrl: "https://openai.com/video"
     });
 
     expect(() => validateProductionManifest(production)).not.toThrow();
