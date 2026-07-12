@@ -319,6 +319,17 @@ describe("GPT-Live plate render planning", () => {
       expect(matching[0]!.inputProps).toHaveProperty("sceneContent.scene", narration.scene);
       expect(matching[0]!.inputProps).toHaveProperty("sceneContent.narrationText", narration.text);
       expect(matching[0]!.inputProps).toHaveProperty("sceneContent.claimIds", narration.claimIds);
+      const capturedEvidence = GPT_LIVE_CONTENT.evidence.find(
+        (item) => item.scene === narration.scene && item.playbackDecision === "captured_source"
+      );
+      if (capturedEvidence) {
+        expect(matching[0]!.inputProps.evidence).toEqual({
+          ...capturedEvidence,
+          assetUrl: `/${capturedEvidence.assetPath}`
+        });
+      } else {
+        expect(matching[0]!.inputProps).not.toHaveProperty("evidence");
+      }
     }
   });
 
@@ -384,6 +395,10 @@ describe("GPT-Live plate render planning", () => {
     );
 
     expect(bundle).toHaveBeenCalledTimes(1);
+    expect(bundle).toHaveBeenCalledWith({
+      entryPoint: expect.stringContaining("motion/Root.tsx"),
+      publicDir: episodeDir
+    });
     expect(renderMedia).toHaveBeenCalledTimes(14);
     expect(
       renderMedia.mock.calls.every(([options]) =>

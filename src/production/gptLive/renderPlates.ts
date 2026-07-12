@@ -15,6 +15,7 @@ import {
 import { ensureDir as defaultEnsureDir } from "../../utils/fs";
 import { writeJsonAtomic as defaultWriteJsonAtomic } from "./atomicFiles";
 import { GPT_LIVE_CONTENT, GPT_LIVE_VISUAL_CONTENT } from "./content";
+import { evidenceForScene } from "./evidence";
 import {
   assertNarrationSlateContract,
   inspectMediaFile as defaultInspectMediaFile,
@@ -69,7 +70,10 @@ interface RenderMediaOptions {
 
 export interface RenderGptLivePlatesDependencies {
   readonly access?: (path: string) => Promise<void>;
-  readonly bundle?: (options: { readonly entryPoint: string }) => Promise<string>;
+  readonly bundle?: (options: {
+    readonly entryPoint: string;
+    readonly publicDir: string;
+  }) => Promise<string>;
   readonly ensureDir?: (path: string) => Promise<void>;
   readonly inspectMediaFile?: typeof defaultInspectMediaFile;
   readonly makeTempDirectory?: (prefix: string) => Promise<string>;
@@ -161,6 +165,7 @@ export function buildPlateRenderJobs(options: BuildPlateRenderJobsOptions): read
   const records = narrationMap(options.narrationRecords);
   return GPT_LIVE_CONTENT.narration.flatMap((narration) => {
     const record = records.get(narration.id)!;
+    const evidence = evidenceForScene(narration.scene);
     return GPT_LIVE_CONTENT.variants.map((variant) => ({
       narrationId: narration.id,
       variant,
@@ -170,7 +175,10 @@ export function buildPlateRenderJobs(options: BuildPlateRenderJobsOptions): read
       inputProps: {
         variant,
         durationSeconds: record.durationSeconds,
-        sceneContent: GPT_LIVE_VISUAL_CONTENT[narration.scene]
+        sceneContent: GPT_LIVE_VISUAL_CONTENT[narration.scene],
+        ...(evidence
+          ? { evidence: { ...evidence, assetUrl: `/${evidence.assetPath}` } }
+          : {})
       }
     }));
   });
@@ -263,7 +271,7 @@ export async function renderGptLivePlates(
   };
 
   try {
-    const serveUrl = await bundle({ entryPoint });
+    const serveUrl = await bundle({ entryPoint, publicDir: options.episodeDir });
 
     for (const job of jobs) {
       const stagedOutputPath = join(stagingPath, relative(platesPath, job.outputPath));

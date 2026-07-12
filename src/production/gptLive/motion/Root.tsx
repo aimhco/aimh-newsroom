@@ -1,13 +1,14 @@
 import { Composition, registerRoot, type CalculateMetadataFunction } from "remotion";
 import "./fonts";
 import { GPT_LIVE_VISUAL_CONTENT } from "../content";
-import type { GptLiveVariant, SceneContent } from "../types";
+import type { EvidenceSpec, GptLiveVariant, SceneContent } from "../types";
 import { GptLivePlate } from "./GptLivePlate";
 
 export interface GptLivePlateProps extends Record<string, unknown> {
   readonly variant: GptLiveVariant;
   readonly durationSeconds: number;
   readonly sceneContent: SceneContent;
+  readonly evidence?: EvidenceSpec & { readonly assetUrl: string };
 }
 
 const DEFAULT_PROPS: GptLivePlateProps = {

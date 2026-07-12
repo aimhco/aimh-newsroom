@@ -20,6 +20,7 @@ import {
   writeJsonAtomic as defaultWriteJsonAtomic,
   writeTextAtomic as defaultWriteTextAtomic
 } from "./atomicFiles";
+import { resolveEvidenceAssetPath, validateEvidenceAssets } from "./evidence";
 import { extractSourceClip as defaultExtractSourceClip } from "./media";
 import {
   assertNarrationSlateContract,
@@ -304,6 +305,9 @@ export async function prepareGptLiveProduction(
   const fixedDescendantPaths = [
     ...EPISODE_SUBDIRECTORIES.map((directory) => join(options.episodeDir, directory)),
     join(options.episodeDir, "production.json"),
+    ...GPT_LIVE_CONTENT.evidence
+      .filter((evidence) => evidence.playbackDecision === "captured_source")
+      .map((evidence) => resolveEvidenceAssetPath(options.episodeDir, evidence)),
     ...GPT_LIVE_CONTENT.timeline.flatMap((item) => item.kind === "source_clip"
       ? [join(options.episodeDir, "source", `${item.id}.mp4`)]
       : [
@@ -325,6 +329,11 @@ export async function prepareGptLiveProduction(
     allowMissingEpisodeDir: true
   });
   await runPreflight(options, access);
+  await validateEvidenceAssets(options.episodeDir, GPT_LIVE_CONTENT.evidence, {
+    access,
+    lstat,
+    realpath
+  });
 
   await Promise.all(
     EPISODE_SUBDIRECTORIES.map((directory) => ensureDir(join(options.episodeDir, directory)))

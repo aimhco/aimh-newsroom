@@ -14,6 +14,11 @@ import { DEFAULT_ENV_KEYS, loadEnvSnapshot } from "../src/config/env";
 import * as contentModule from "../src/production/gptLive/content";
 import { formatGptLiveCliResult, runGptLiveCli } from "../src/production/gptLive/cli";
 import {
+  evidenceForScene,
+  resolveEvidenceAssetPath,
+  validateEvidenceAssets
+} from "../src/production/gptLive/evidence";
+import {
   assertNarrationSlateContract,
   buildFfprobeMediaArgs,
   parseFfprobeMediaJson,
@@ -26,9 +31,26 @@ import {
 import { validateSerializedQaPaths } from "../src/production/gptLive/qa/paths";
 import type { QaProduction, QaVoice } from "../src/production/gptLive/qa/types";
 import { buildTellaPlan } from "../src/production/gptLive/tellaPlan";
-import type { GptLiveProduction, SourceClipSpec } from "../src/production/gptLive/types";
+import type {
+  EvidenceSpec,
+  GptLiveProduction,
+  SourceClipSpec
+} from "../src/production/gptLive/types";
 
 const { GPT_LIVE_CONTENT, GPT_LIVE_TIMELINE, validateProductionManifest } = contentModule;
+
+const CAPTURED_EVIDENCE = GPT_LIVE_CONTENT.evidence.filter(
+  (item) => item.playbackDecision === "captured_source"
+);
+
+const materializeEvidenceFixtures = async (episodeDir: string): Promise<void> => {
+  await mkdir(join(episodeDir, "evidence"), { recursive: true });
+  await Promise.all(
+    CAPTURED_EVIDENCE.map((evidence) =>
+      writeFile(resolveEvidenceAssetPath(episodeDir, evidence), "non-empty PNG fixture")
+    )
+  );
+};
 
 const EXPECTED_SOURCES = [
   {
@@ -549,6 +571,135 @@ describe("GPT-Live production preparation", () => {
     audio: { codecName: "aac" }
   });
 
+  it("resolves evidence beneath the episode and rejects traversal", () => {
+    const evidence = {
+      ...CAPTURED_EVIDENCE[0]!,
+      assetPath: "evidence/openai.png"
+    } satisfies EvidenceSpec;
+
+    expect(resolveEvidenceAssetPath("/episode", evidence)).toBe("/episode/evidence/openai.png");
+    expect(() =>
+      resolveEvidenceAssetPath("/episode", { ...evidence, assetPath: "../outside.png" })
+    ).toThrow("Evidence asset must remain inside the episode directory");
+    expect(() =>
+      resolveEvidenceAssetPath("/episode", { ...evidence, assetPath: "/outside.png" })
+    ).toThrow("Evidence asset must remain inside the episode directory");
+  });
+
+  it("finds only captured evidence for a narration scene", () => {
+    expect(evidenceForScene("full_duplex")).toMatchObject({
+      id: "evidence_openai_full_duplex",
+      playbackDecision: "captured_source"
+    });
+    expect(evidenceForScene("hook")).toBeUndefined();
+    expect(evidenceForScene("cta")).toBeUndefined();
+  });
+
+  it("rejects a missing captured evidence file", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-evidence-missing-"));
+    try {
+      await expect(
+        validateEvidenceAssets(episodeDir, [CAPTURED_EVIDENCE[0]!])
+      ).rejects.toThrow(/missing/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects symlinked and non-file captured evidence", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-evidence-kind-"));
+    const outsideDir = await mkdtemp(join(tmpdir(), "gpt-live-evidence-outside-"));
+    const evidenceDir = join(episodeDir, "evidence");
+    const evidence = CAPTURED_EVIDENCE[0]!;
+    try {
+      await mkdir(evidenceDir);
+      const outsidePath = join(outsideDir, "outside.png");
+      await writeFile(outsidePath, "outside");
+      await symlink(outsidePath, resolveEvidenceAssetPath(episodeDir, evidence));
+      await expect(validateEvidenceAssets(episodeDir, [evidence])).rejects.toThrow(/symlink/i);
+
+      await rm(resolveEvidenceAssetPath(episodeDir, evidence));
+      await mkdir(resolveEvidenceAssetPath(episodeDir, evidence));
+      await expect(validateEvidenceAssets(episodeDir, [evidence])).rejects.toThrow(/regular file/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects empty and unreadable captured evidence", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-evidence-file-"));
+    const evidence = CAPTURED_EVIDENCE[0]!;
+    const evidencePath = resolveEvidenceAssetPath(episodeDir, evidence);
+    try {
+      await mkdir(join(episodeDir, "evidence"));
+      await writeFile(evidencePath, "");
+      await expect(validateEvidenceAssets(episodeDir, [evidence])).rejects.toThrow(/empty/i);
+
+      await writeFile(evidencePath, "non-empty");
+      await expect(
+        validateEvidenceAssets(episodeDir, [evidence], {
+          access: async (path) => {
+            if (path === evidencePath) throw new Error("EACCES");
+          }
+        })
+      ).rejects.toThrow(/not readable/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires PNG captures while leaving full-screen source videos to media validation", async () => {
+    const episodeDir = join(tmpdir(), `gpt-live-evidence-media-${crypto.randomUUID()}`);
+    const sourceVideo = GPT_LIVE_CONTENT.evidence.find(
+      (item) => item.playbackDecision === "full_screen_original_audio"
+    )!;
+    const jpegCapture = {
+      ...CAPTURED_EVIDENCE[0]!,
+      assetPath: "evidence/capture.jpg"
+    } satisfies EvidenceSpec;
+    await expect(validateEvidenceAssets(episodeDir, [sourceVideo])).resolves.toBeUndefined();
+    await expect(validateEvidenceAssets(episodeDir, [jpegCapture])).rejects.toThrow(/PNG/i);
+  });
+
+  it("validates evidence before creating directories, extracting media, or synthesizing narration", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-evidence-preflight-"));
+    const ensureDir = vi.fn(async () => undefined);
+    const extractSourceClip = vi.fn(async () => undefined);
+    const synthesizeNarration = vi.fn(async () => successfulVoiceResult(join(episodeDir, "voice")));
+    const renderPlates = vi.fn(async () => ({ jobs: [] }));
+    try {
+      await expect(
+        prepareGptLiveProduction(
+          {
+            episodeDir,
+            env: {
+              ELEVENLABS_API_KEY: "test-key",
+              ELEVENLABS_VOICE_ID: "test-voice",
+              AIMH_LOGO_PATH: "/assets/logo.png",
+              AIMH_OUTRO_MUSIC_PATH: "/assets/outro.mp3"
+            },
+            ffmpegPath: "ffmpeg",
+            ffprobePath: "ffprobe"
+          },
+          {
+            access: async () => undefined,
+            ensureDir,
+            extractSourceClip,
+            synthesizeNarration,
+            renderPlates
+          }
+        )
+      ).rejects.toThrow(/Evidence asset.*missing/i);
+      expect(ensureDir).not.toHaveBeenCalled();
+      expect(extractSourceClip).not.toHaveBeenCalled();
+      expect(synthesizeNarration).not.toHaveBeenCalled();
+      expect(renderPlates).not.toHaveBeenCalled();
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
   it("parses ffprobe JSON and keeps the inspected path as one command argument", () => {
     const inspectedPath = "/tmp/slate;not-a-command.mp4";
     expect(buildFfprobeMediaArgs(inspectedPath)).toEqual([
@@ -639,6 +790,7 @@ describe("GPT-Live production preparation", () => {
 
   it("prepares media, QA-validates a non-default outro, and persists deterministic records", async () => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-prepare-"));
+    await materializeEvidenceFixtures(episodeDir);
     const resolvedOutroPath = "/assets/Outro_Alternate.mp3";
     const prepareEnv = {
       ELEVENLABS_API_KEY: "eleven-secret-do-not-write",
@@ -817,6 +969,7 @@ describe("GPT-Live production preparation", () => {
     }
   ])("rejects $name instead of silently falling back", async ({ mutate, expected }) => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-reject-"));
+    await materializeEvidenceFixtures(episodeDir);
 
     try {
       const preparation = prepareGptLiveProduction(
@@ -853,6 +1006,7 @@ describe("GPT-Live production preparation", () => {
     const markerPath = join(episodeDir, "reports", "prepared.json");
     await mkdir(join(episodeDir, "reports"), { recursive: true });
     await writeFile(markerPath, '{"status":"prepared","stale":true}\n');
+    await materializeEvidenceFixtures(episodeDir);
 
     try {
       await expect(
@@ -882,7 +1036,7 @@ describe("GPT-Live production preparation", () => {
     }
   });
 
-  it.each(["reports", "source", "voice", "plates"])(
+  it.each(["reports", "source", "voice", "plates", "evidence"])(
     "rejects a symlinked %s descendant before preparation side effects",
     async (directory) => {
       const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-prepare-contained-"));
@@ -1020,6 +1174,7 @@ describe("GPT-Live production preparation", () => {
 
   it("rejects a slate with the wrong stream contract and leaves no completion marker", async () => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-stream-contract-"));
+    await materializeEvidenceFixtures(episodeDir);
 
     try {
       await expect(
