@@ -453,7 +453,7 @@ const EXPECTED_SOURCE_MANIFEST = {
       publisher: source.publisher,
       title: source.title,
       canonicalUrl: source.url,
-      ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
+      mediaUrls,
       scenes: unique(evidence.map((item) => item.scene)),
       claims: EXPECTED_CLAIMS.filter((claim) =>
         claim.sourceIds.some((sourceId) => sourceId === source.id)
@@ -516,6 +516,10 @@ describe("GPT-Live source manifest", () => {
       onScreenAttribution: ["OPENAI.COM / GPT-LIVE"],
       playbackDecisions: ["full_screen_original_audio", "captured_source"],
       youtubeDescription: true
+    });
+    expect(EXPECTED_SOURCE_MANIFEST.sources[1]).toMatchObject({
+      sourceId: "src_openai_help",
+      mediaUrls: []
     });
     expect(new Set(EXPECTED_SOURCE_MANIFEST.sources.map(({ sourceId }) => sourceId)).size).toBe(
       GPT_LIVE_CONTENT.sources.length

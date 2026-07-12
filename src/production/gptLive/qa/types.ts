@@ -30,12 +30,12 @@ export interface QaProduction {
   };
 }
 
-export interface GptLiveSourceManifestEntry {
+export interface GptLiveSourceManifestSource {
   sourceId: string;
   publisher: string;
   title: string;
   canonicalUrl: string;
-  mediaUrls?: string[];
+  mediaUrls: string[];
   scenes: EvidenceSpec["scene"][];
   claims: string[];
   onScreenAttribution: string[];
@@ -43,10 +43,12 @@ export interface GptLiveSourceManifestEntry {
   youtubeDescription: boolean;
 }
 
+export type GptLiveSourceManifestEntry = GptLiveSourceManifestSource;
+
 export interface GptLiveSourceManifest {
   schemaVersion: string;
   productionId: string;
-  sources: GptLiveSourceManifestEntry[];
+  sources: GptLiveSourceManifestSource[];
 }
 
 export interface QaVoiceChunk {

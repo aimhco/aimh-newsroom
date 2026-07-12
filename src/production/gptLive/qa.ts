@@ -45,6 +45,7 @@ export type {
   GptLiveQaSnapshot,
   GptLiveSourceManifest,
   GptLiveSourceManifestEntry,
+  GptLiveSourceManifestSource,
   QaProduction,
   QaPreparedMediaInspection,
   QaSafeArea,

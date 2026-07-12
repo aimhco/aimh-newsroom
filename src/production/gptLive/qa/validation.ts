@@ -105,12 +105,12 @@ const validateSourceManifest = (snapshot: GptLiveQaSnapshot): void => {
       "publisher",
       "title",
       "canonicalUrl",
+      "mediaUrls",
       "scenes",
       "claims",
       "onScreenAttribution",
       "playbackDecisions",
-      "youtubeDescription",
-      ...(Object.hasOwn(entry, "mediaUrls") ? ["mediaUrls"] : [])
+      "youtubeDescription"
     ];
     exact(Object.keys(entry).sort(), expectedKeys.sort(), `source manifest entry ${index + 1}`);
     if (
@@ -132,13 +132,11 @@ const validateSourceManifest = (snapshot: GptLiveQaSnapshot): void => {
       entry.playbackDecisions,
       `source manifest playback decisions for ${entry.sourceId}`
     );
-    if (Object.hasOwn(entry, "mediaUrls")) {
-      for (const mediaUrl of uniqueStringArray(
-        entry.mediaUrls,
-        `source manifest media URLs for ${entry.sourceId}`
-      )) {
-        safeHttpsUrl(mediaUrl, `source manifest media URL for ${entry.sourceId}`);
-      }
+    for (const mediaUrl of uniqueStringArray(
+      entry.mediaUrls,
+      `source manifest media URLs for ${entry.sourceId}`
+    )) {
+      safeHttpsUrl(mediaUrl, `source manifest media URL for ${entry.sourceId}`);
     }
     return entry;
   });
@@ -173,7 +171,7 @@ const validateSourceManifest = (snapshot: GptLiveQaSnapshot): void => {
       `source manifest canonical URL for ${expectedEntry.sourceId}`
     );
     exact(
-      Object.hasOwn(entry, "mediaUrls") ? entry.mediaUrls : undefined,
+      entry.mediaUrls,
       expectedEntry.mediaUrls,
       `source manifest media URLs for ${expectedEntry.sourceId}`
     );
@@ -191,7 +189,7 @@ const validateSourceManifest = (snapshot: GptLiveQaSnapshot): void => {
       }
       if (
         evidence.mediaUrl &&
-        !(entry.mediaUrls as string[] | undefined)?.includes(evidence.mediaUrl)
+        !(entry.mediaUrls as string[]).includes(evidence.mediaUrl)
       ) {
         fail(`source manifest is missing media URL for ${evidence.id}`);
       }

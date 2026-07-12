@@ -62,7 +62,7 @@ const canonicalSourceManifest = () => ({
       publisher: source.publisher,
       title: source.title,
       canonicalUrl: source.url,
-      ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
+      mediaUrls,
       scenes: [...new Set(evidence.map((item) => item.scene))],
       claims: GPT_LIVE_CONTENT.claims.filter((claim) =>
         claim.sourceIds.some((sourceId) => sourceId === source.id)
@@ -624,6 +624,13 @@ describe("GPT-Live full production QA", () => {
   ])("rejects a malformed source manifest entry with a %s", (_name, mutate) => {
     const snapshot = validSnapshot();
     mutate(snapshot.sourceManifest.sources[0]);
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/source manifest/i);
+  });
+
+  it("rejects a missing mediaUrls field when the source has no declared media", () => {
+    const snapshot = validSnapshot();
+    delete (snapshot.sourceManifest.sources[1] as { mediaUrls?: string[] }).mediaUrls;
+
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/source manifest/i);
   });
 

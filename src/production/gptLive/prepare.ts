@@ -302,7 +302,7 @@ export function buildSourceManifest(): GptLiveSourceManifest {
         publisher: source.publisher,
         title: source.title,
         canonicalUrl: source.url,
-        ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
+        mediaUrls,
         scenes: unique(evidence.map((item) => item.scene)),
         claims: claims
           .filter((claim) => claim.sourceIds.some((sourceId) => sourceId === source.id))
