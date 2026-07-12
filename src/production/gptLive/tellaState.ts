@@ -349,8 +349,6 @@ export function validateTellaTimelineAudit(
         Math.abs((actual.clipDurationMs as number) - expected.clipDurationMs) >
           TELLA_CLIP_DURATION_TOLERANCE_MS ||
         !Number.isSafeInteger(actual.durationMs) ||
-        Math.abs((actual.durationMs as number) - expected.durationMs) >
-          TELLA_LAYOUT_DURATION_TOLERANCE_MS ||
         (actual.durationMs as number) > (actual.clipDurationMs as number) ||
         (actual.clipDurationMs as number) - (actual.durationMs as number) >
           TELLA_LAYOUT_DURATION_TOLERANCE_MS

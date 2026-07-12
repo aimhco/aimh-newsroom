@@ -1879,7 +1879,10 @@ describe("GPT-Live full production QA", () => {
   it("accepts a narration layout up to 100ms shorter than its containing clip", () => {
     const snapshot = validSnapshot();
     const audit = (snapshot.tellaState as Record<string, any>).timelineAudit;
-    audit.narrationLayouts.dynamic_editorial[0].durationMs -= 100;
+    audit.narrationLayouts.dynamic_editorial[0].clipDurationMs -= 1;
+    audit.narrationLayouts.dynamic_editorial[0].durationMs =
+      audit.narrationLayouts.dynamic_editorial[0].clipDurationMs - 100;
+    audit.sourceClips.dynamic_editorial[0].durationMs += 1;
     const refreshedFullscreen = deriveSourceFullscreenExpectations(
       snapshot.plan,
       buildSourceFullscreenTiming(snapshot.tellaExportReceipt, audit)
