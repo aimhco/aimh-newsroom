@@ -1,8 +1,18 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat as fsStat,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { GPT_LIVE_CONTENT, GPT_LIVE_VISUAL_CONTENT } from "../src/production/gptLive/content";
+import { stageEvidencePublicAssets } from "../src/production/gptLive/evidence";
 import {
   SCENE_STATE_COUNTS,
   normalizedBeatIndex,
@@ -11,6 +21,7 @@ import {
 } from "../src/production/gptLive/motion/beatState";
 import {
   calculateGptLivePlateMetadata,
+  resolveEvidenceAssetUrl,
   type GptLivePlateProps
 } from "../src/production/gptLive/motion/Root";
 import {
@@ -35,6 +46,10 @@ import type { GptLiveVariant } from "../src/production/gptLive/types";
 
 const VARIANTS = ["dynamic_editorial", "aimh_visual_host"] as const satisfies readonly GptLiveVariant[];
 const SAFE_AREA: SceneRect = { x: 1722, y: 0, width: 198, height: 198 };
+const VALID_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64"
+);
 
 const overlaps = (left: SceneRect, right: SceneRect): boolean =>
   left.x < right.x + right.width &&
@@ -70,6 +85,8 @@ const isMasterPath = (path: string): boolean => path.includes(`${sep}master${sep
 const virtualAtomicFs = (episodeDir: string, finalExists = false) => {
   const stagingPath = join(episodeDir, ".plates-staging-test");
   const platesPath = join(episodeDir, "plates");
+  const evidencePublicDir = join(episodeDir, ".evidence-public-test");
+  const cleanupEvidence = vi.fn(async () => undefined);
   return {
     access: async (path: string) => {
       if (finalExists && path === platesPath) return;
@@ -77,9 +94,20 @@ const virtualAtomicFs = (episodeDir: string, finalExists = false) => {
     },
     makeTempDirectory: async () => stagingPath,
     removeDirectory: vi.fn(async (_path: string) => undefined),
-    renameDirectory: vi.fn(async (_from: string, _to: string) => undefined)
+    renameDirectory: vi.fn(async (_from: string, _to: string) => undefined),
+    evidencePublicDir,
+    cleanupEvidence,
+    stageEvidencePublicAssets: vi.fn(async () => ({
+      publicDir: evidencePublicDir,
+      cleanup: cleanupEvidence
+    }))
   };
 };
+
+const virtualEvidenceStage = (episodeDir: string) => ({
+  publicDir: join(episodeDir, ".evidence-public-test"),
+  cleanup: async () => undefined
+});
 
 describe("GPT-Live scene styles", () => {
   it("pins the approved OpenAI-reported GPQA comparison for the evidence scene", () => {
@@ -186,6 +214,15 @@ describe("GPT-Live Remotion composition metadata", () => {
       ).rejects.toThrow("durationSeconds must be finite and positive");
     }
   );
+
+  it("resolves relative evidence paths through Remotion staticFile", () => {
+    expect(resolveEvidenceAssetUrl("evidence/capture name.png")).toBe(
+      "/evidence/capture%20name.png"
+    );
+    expect(() => resolveEvidenceAssetUrl("/evidence/raw.png")).toThrow(
+      "Evidence asset path must be relative"
+    );
+  });
 });
 
 describe("GPT-Live normalized beat scheduling", () => {
@@ -323,10 +360,8 @@ describe("GPT-Live plate render planning", () => {
         (item) => item.scene === narration.scene && item.playbackDecision === "captured_source"
       );
       if (capturedEvidence) {
-        expect(matching[0]!.inputProps.evidence).toEqual({
-          ...capturedEvidence,
-          assetUrl: `/${capturedEvidence.assetPath}`
-        });
+        expect(matching[0]!.inputProps.evidence).toEqual(capturedEvidence);
+        expect(matching[0]!.inputProps.evidence).not.toHaveProperty("assetUrl");
       } else {
         expect(matching[0]!.inputProps).not.toHaveProperty("evidence");
       }
@@ -397,8 +432,11 @@ describe("GPT-Live plate render planning", () => {
     expect(bundle).toHaveBeenCalledTimes(1);
     expect(bundle).toHaveBeenCalledWith({
       entryPoint: expect.stringContaining("motion/Root.tsx"),
-      publicDir: episodeDir
+      publicDir: atomicFs.evidencePublicDir
     });
+    expect(atomicFs.stageEvidencePublicAssets).toHaveBeenCalledWith(episodeDir);
+    expect(atomicFs.cleanupEvidence).toHaveBeenCalledOnce();
+    expect(atomicFs.removeDirectory).not.toHaveBeenCalledWith("serve-url");
     expect(renderMedia).toHaveBeenCalledTimes(14);
     expect(
       renderMedia.mock.calls.every(([options]) =>
@@ -460,6 +498,83 @@ describe("GPT-Live plate render planning", () => {
     );
     expect(result.jobs).toHaveLength(14);
   });
+
+  it("cleans evidence and plate staging when bundling fails", async () => {
+    const episodeDir = "/tmp/gpt-live-bundle-failure";
+    const atomicFs = virtualAtomicFs(episodeDir);
+
+    await expect(
+      renderGptLivePlates(
+        { episodeDir, ffprobePath: "ffprobe", narrationRecords },
+        {
+          bundle: async () => {
+            throw new Error("injected bundle failure");
+          },
+          ensureDir: async () => undefined,
+          ...atomicFs
+        }
+      )
+    ).rejects.toThrow("injected bundle failure");
+
+    expect(atomicFs.cleanupEvidence).toHaveBeenCalledOnce();
+    expect(atomicFs.removeDirectory).toHaveBeenCalledWith(
+      join(episodeDir, ".plates-staging-test")
+    );
+  });
+
+  it("bundles, selects, and loads staged evidence through the Remotion staticFile path", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-remotion-evidence-"));
+    let stagedPublicDir: string | undefined;
+    let bundleOutput: string | undefined;
+    let evidenceLoads = 0;
+    try {
+      await mkdir(join(episodeDir, "evidence"));
+      await Promise.all(
+        GPT_LIVE_CONTENT.evidence
+          .filter((item) => item.playbackDecision === "captured_source")
+          .map((evidence) => writeFile(join(episodeDir, evidence.assetPath), VALID_PNG))
+      );
+
+      const result = await renderGptLivePlates(
+        { episodeDir, ffprobePath: "ffprobe", narrationRecords, publishPlan: false },
+        {
+          inspectMediaFile: async (_ffprobe, outputPath) => {
+            const narration = narrationRecords.find(({ id }) => outputPath.includes(id))!;
+            return isMasterPath(outputPath)
+              ? validSlateInspection(narration.durationSeconds)
+              : validInspection(narration.durationSeconds);
+          },
+          renderMedia: async ({ composition, serveUrl, inputProps }) => {
+            expect(composition).toMatchObject({ id: "GptLivePlate" });
+            bundleOutput = serveUrl;
+            if (!inputProps.evidence) return;
+            const assetUrl = resolveEvidenceAssetUrl(inputProps.evidence.assetPath);
+            const bundledAssetPath = join(
+              serveUrl,
+              "public",
+              decodeURIComponent(assetUrl.slice(1))
+            );
+            await expect(readFile(bundledAssetPath)).resolves.toEqual(VALID_PNG);
+            evidenceLoads += 1;
+          },
+          stageEvidencePublicAssets: async (dir) => {
+            const staged = await stageEvidencePublicAssets(dir);
+            stagedPublicDir = staged.publicDir;
+            return staged;
+          }
+        }
+      );
+
+      expect(result.jobs).toHaveLength(14);
+      expect(evidenceLoads).toBe(8);
+      expect(stagedPublicDir).toBeDefined();
+      expect(bundleOutput).toBeDefined();
+      await expect(fsStat(stagedPublicDir!)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fsStat(bundleOutput!)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it("rejects plate-versus-slate drift above 0.1s even when both match voice within 0.1s", async () => {
     const episodeDir = "/tmp/gpt-live-motion";
@@ -540,6 +655,7 @@ describe("GPT-Live plate render planning", () => {
             if (failurePoint === "render") throw new Error("injected render failure");
           },
           selectComposition: async () => ({ id: "GptLivePlate" }),
+          stageEvidencePublicAssets: async () => virtualEvidenceStage(episodeDir),
           writeJsonAtomic: async () => undefined
         }
       );
@@ -556,6 +672,32 @@ describe("GPT-Live plate render planning", () => {
     }
     }
   );
+
+  it("rejects symlinked captured evidence before standalone rendering bundles", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-render-evidence-link-"));
+    const outsideDir = await mkdtemp(join(tmpdir(), "gpt-live-render-evidence-outside-"));
+    const evidence = GPT_LIVE_CONTENT.evidence.find(
+      (item) => item.playbackDecision === "captured_source"
+    )!;
+    const bundle = vi.fn(async () => "serve-url");
+    try {
+      await mkdir(join(episodeDir, "evidence"));
+      const outsidePath = join(outsideDir, "outside.png");
+      await writeFile(outsidePath, "not relevant");
+      await symlink(outsidePath, join(episodeDir, evidence.assetPath));
+
+      await expect(
+        renderGptLivePlates(
+          { episodeDir, ffprobePath: "ffprobe", narrationRecords },
+          { bundle }
+        )
+      ).rejects.toThrow(/symlink/i);
+      expect(bundle).not.toHaveBeenCalled();
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
 
   it("rolls the previous plate set back when atomic promotion fails", async () => {
     const episodeDir = "/tmp/gpt-live-promotion-failure";

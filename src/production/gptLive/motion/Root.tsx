@@ -4,11 +4,13 @@ import { GPT_LIVE_VISUAL_CONTENT } from "../content";
 import type { EvidenceSpec, GptLiveVariant, SceneContent } from "../types";
 import { GptLivePlate } from "./GptLivePlate";
 
+export { resolveEvidenceAssetUrl } from "./evidenceAsset";
+
 export interface GptLivePlateProps extends Record<string, unknown> {
   readonly variant: GptLiveVariant;
   readonly durationSeconds: number;
   readonly sceneContent: SceneContent;
-  readonly evidence?: EvidenceSpec & { readonly assetUrl: string };
+  readonly evidence?: EvidenceSpec;
 }
 
 const DEFAULT_PROPS: GptLivePlateProps = {

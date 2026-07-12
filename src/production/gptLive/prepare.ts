@@ -330,7 +330,6 @@ export async function prepareGptLiveProduction(
   });
   await runPreflight(options, access);
   await validateEvidenceAssets(options.episodeDir, GPT_LIVE_CONTENT.evidence, {
-    access,
     lstat,
     realpath
   });

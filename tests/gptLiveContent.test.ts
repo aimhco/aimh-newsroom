@@ -2,6 +2,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   stat as fsStat,
   symlink,
@@ -16,6 +17,7 @@ import { formatGptLiveCliResult, runGptLiveCli } from "../src/production/gptLive
 import {
   evidenceForScene,
   resolveEvidenceAssetPath,
+  stageEvidencePublicAssets,
   validateEvidenceAssets
 } from "../src/production/gptLive/evidence";
 import {
@@ -42,12 +44,16 @@ const { GPT_LIVE_CONTENT, GPT_LIVE_TIMELINE, validateProductionManifest } = cont
 const CAPTURED_EVIDENCE = GPT_LIVE_CONTENT.evidence.filter(
   (item) => item.playbackDecision === "captured_source"
 );
+const VALID_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64"
+);
 
 const materializeEvidenceFixtures = async (episodeDir: string): Promise<void> => {
   await mkdir(join(episodeDir, "evidence"), { recursive: true });
   await Promise.all(
     CAPTURED_EVIDENCE.map((evidence) =>
-      writeFile(resolveEvidenceAssetPath(episodeDir, evidence), "non-empty PNG fixture")
+      writeFile(resolveEvidenceAssetPath(episodeDir, evidence), VALID_PNG)
     )
   );
 };
@@ -639,11 +645,25 @@ describe("GPT-Live production preparation", () => {
       await writeFile(evidencePath, "non-empty");
       await expect(
         validateEvidenceAssets(episodeDir, [evidence], {
-          access: async (path) => {
-            if (path === evidencePath) throw new Error("EACCES");
+          open: async () => {
+            throw Object.assign(new Error("EACCES"), { code: "EACCES" });
           }
         })
       ).rejects.toThrow(/not readable/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a corrupt nonempty PNG capture", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-evidence-corrupt-"));
+    const evidence = CAPTURED_EVIDENCE[0]!;
+    try {
+      await mkdir(join(episodeDir, "evidence"));
+      await writeFile(resolveEvidenceAssetPath(episodeDir, evidence), "not a PNG");
+      await expect(validateEvidenceAssets(episodeDir, [evidence])).rejects.toThrow(
+        /PNG signature|IHDR/i
+      );
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
     }
@@ -660,6 +680,46 @@ describe("GPT-Live production preparation", () => {
     } satisfies EvidenceSpec;
     await expect(validateEvidenceAssets(episodeDir, [sourceVideo])).resolves.toBeUndefined();
     await expect(validateEvidenceAssets(episodeDir, [jpegCapture])).rejects.toThrow(/PNG/i);
+  });
+
+  it("stages only allowlisted evidence PNGs and removes the temporary public root", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-evidence-stage-"));
+    await materializeEvidenceFixtures(episodeDir);
+    await writeFile(join(episodeDir, "production.json"), "do not expose");
+    await mkdir(join(episodeDir, "source"));
+    await writeFile(join(episodeDir, "source", "clip.mp4"), "do not expose");
+
+    const staged = await stageEvidencePublicAssets(episodeDir);
+    try {
+      expect((await readdir(staged.publicDir, { recursive: true })).sort()).toEqual([
+        "evidence",
+        ...CAPTURED_EVIDENCE.map((evidence) => evidence.assetPath).sort()
+      ]);
+      for (const evidence of CAPTURED_EVIDENCE) {
+        await expect(readFile(join(staged.publicDir, evidence.assetPath))).resolves.toEqual(
+          VALID_PNG
+        );
+      }
+    } finally {
+      await staged.cleanup();
+    }
+    await expect(fsStat(staged.publicDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects symlinked evidence while staging for standalone rendering", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-evidence-stage-link-"));
+    const outsideDir = await mkdtemp(join(tmpdir(), "gpt-live-evidence-stage-outside-"));
+    const evidence = CAPTURED_EVIDENCE[0]!;
+    try {
+      await mkdir(join(episodeDir, "evidence"));
+      const outsidePath = join(outsideDir, "outside.png");
+      await writeFile(outsidePath, VALID_PNG);
+      await symlink(outsidePath, resolveEvidenceAssetPath(episodeDir, evidence));
+      await expect(stageEvidencePublicAssets(episodeDir, [evidence])).rejects.toThrow(/symlink/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    }
   });
 
   it("validates evidence before creating directories, extracting media, or synthesizing narration", async () => {

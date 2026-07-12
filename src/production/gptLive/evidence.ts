@@ -1,26 +1,177 @@
 import { constants } from "node:fs";
 import {
-  access as defaultAccess,
   lstat as defaultLstat,
-  realpath as defaultRealpath
+  mkdir as defaultMkdir,
+  mkdtemp as defaultMakeTempDirectory,
+  open as defaultOpen,
+  realpath as defaultRealpath,
+  rm as defaultRemoveDirectory,
+  type FileHandle
 } from "node:fs/promises";
-import { extname, isAbsolute, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { GPT_LIVE_CONTENT } from "./content";
 import { validateContainedEpisodePaths } from "./qa/paths";
 import type { EvidenceSpec, GptLiveScene } from "./types";
 
 interface EvidenceAssetStat {
+  readonly dev: number;
+  readonly ino: number;
   readonly size: number;
   isDirectory(): boolean;
   isFile(): boolean;
   isSymbolicLink(): boolean;
 }
 
+type OpenFile = (path: string, flags: number, mode?: number) => Promise<FileHandle>;
+
 export interface EvidenceAssetDependencies {
-  readonly access?: (path: string, mode?: number) => Promise<void>;
   readonly lstat?: (path: string) => Promise<EvidenceAssetStat>;
+  readonly open?: OpenFile;
   readonly realpath?: (path: string) => Promise<string>;
 }
+
+export interface StageEvidencePublicAssetsDependencies extends EvidenceAssetDependencies {
+  readonly makeTempDirectory?: (prefix: string) => Promise<string>;
+  readonly mkdir?: (path: string, options: { recursive: true }) => Promise<unknown>;
+  readonly removeDirectory?: (path: string) => Promise<void>;
+}
+
+export interface StagedEvidencePublicAssets {
+  readonly publicDir: string;
+  cleanup(): Promise<void>;
+}
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const READ_ONLY_NOFOLLOW =
+  constants.O_RDONLY |
+  (typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0);
+
+const capturedEvidence = (evidenceItems: readonly EvidenceSpec[]): readonly EvidenceSpec[] => {
+  const captures = evidenceItems.filter(
+    (item) => item.playbackDecision === "captured_source"
+  );
+  for (const evidence of captures) {
+    if (extname(evidence.assetPath).toLowerCase() !== ".png") {
+      throw new Error(`Evidence capture must be a PNG: ${evidence.id}`);
+    }
+  }
+  return captures;
+};
+
+const assertPngHeader = (contents: Buffer, evidence: EvidenceSpec): void => {
+  if (!contents.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+    throw new Error(`Evidence capture has an invalid PNG signature: ${evidence.id}`);
+  }
+  if (
+    contents.length < 24 ||
+    contents.readUInt32BE(8) !== 13 ||
+    contents.toString("ascii", 12, 16) !== "IHDR" ||
+    contents.readUInt32BE(16) === 0 ||
+    contents.readUInt32BE(20) === 0
+  ) {
+    throw new Error(`Evidence capture has an invalid PNG IHDR: ${evidence.id}`);
+  }
+};
+
+const inspectOpenedEvidence = async (
+  evidencePath: string,
+  evidence: EvidenceSpec,
+  lstat: (path: string) => Promise<EvidenceAssetStat>,
+  open: OpenFile,
+  action?: (handle: FileHandle) => Promise<void>
+): Promise<void> => {
+  let pathStat: EvidenceAssetStat;
+  try {
+    pathStat = await lstat(evidencePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`Evidence asset is missing: ${evidence.id}`);
+    }
+    throw new Error(`Evidence asset could not be inspected: ${evidence.id}`, { cause: error });
+  }
+  if (pathStat.isSymbolicLink()) {
+    throw new Error(`Evidence asset must not be a symlink: ${evidence.id}`);
+  }
+
+  let handle: FileHandle;
+  try {
+    handle = await open(evidencePath, READ_ONLY_NOFOLLOW);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ELOOP") {
+      throw new Error(`Evidence asset must not be a symlink: ${evidence.id}`);
+    }
+    if (code === "ENOENT") {
+      throw new Error(`Evidence asset is missing: ${evidence.id}`);
+    }
+    throw new Error(`Evidence asset is not readable: ${evidence.id}`, { cause: error });
+  }
+
+  try {
+    const openedStat = await handle.stat();
+    if (!openedStat.isFile()) {
+      throw new Error(`Evidence asset must be a regular file: ${evidence.id}`);
+    }
+    if (openedStat.dev !== pathStat.dev || openedStat.ino !== pathStat.ino) {
+      throw new Error(`Evidence asset changed during validation: ${evidence.id}`);
+    }
+    if (openedStat.size <= 0) {
+      throw new Error(`Evidence asset must not be empty: ${evidence.id}`);
+    }
+    const header = Buffer.alloc(24);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    assertPngHeader(header.subarray(0, bytesRead), evidence);
+    await action?.(handle);
+  } finally {
+    await handle.close();
+  }
+};
+
+const validateCapturePaths = async (
+  episodeDir: string,
+  captures: readonly EvidenceSpec[],
+  dependencies: EvidenceAssetDependencies
+): Promise<readonly string[]> => {
+  const capturePaths = captures.map((evidence) =>
+    resolveEvidenceAssetPath(episodeDir, evidence)
+  );
+  await validateContainedEpisodePaths(episodeDir, capturePaths, {
+    lstat: dependencies.lstat ?? defaultLstat,
+    realpath: dependencies.realpath ?? defaultRealpath,
+    context: "GPT-Live evidence"
+  });
+  return capturePaths;
+};
+
+const copyOpenedFile = async (
+  source: FileHandle,
+  destinationPath: string,
+  open: OpenFile
+): Promise<void> => {
+  const destination = await open(
+    destinationPath,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+    0o600
+  );
+  try {
+    const buffer = Buffer.alloc(64 * 1024);
+    let position = 0;
+    while (true) {
+      const { bytesRead } = await source.read(buffer, 0, buffer.length, position);
+      if (bytesRead === 0) break;
+      let written = 0;
+      while (written < bytesRead) {
+        const result = await destination.write(buffer, written, bytesRead - written, position + written);
+        written += result.bytesWritten;
+      }
+      position += bytesRead;
+    }
+    await destination.sync();
+  } finally {
+    await destination.close();
+  }
+};
 
 export function resolveEvidenceAssetPath(episodeDir: string, evidence: EvidenceSpec): string {
   const resolvedEpisode = resolve(episodeDir);
@@ -37,6 +188,10 @@ export function resolveEvidenceAssetPath(episodeDir: string, evidence: EvidenceS
   return resolvedAsset;
 }
 
+export function evidencePublicAssetPath(evidence: EvidenceSpec): string {
+  return `evidence/${basename(evidence.assetPath)}`;
+}
+
 export function evidenceForScene(scene: GptLiveScene): EvidenceSpec | undefined {
   return GPT_LIVE_CONTENT.evidence.find(
     (item) => item.scene === scene && item.playbackDecision === "captured_source"
@@ -48,53 +203,58 @@ export async function validateEvidenceAssets(
   evidenceItems: readonly EvidenceSpec[] = GPT_LIVE_CONTENT.evidence,
   dependencies: EvidenceAssetDependencies = {}
 ): Promise<void> {
-  const access = dependencies.access ?? defaultAccess;
-  const lstat = dependencies.lstat ?? defaultLstat;
-  const realpath = dependencies.realpath ?? defaultRealpath;
-  const captures = evidenceItems.filter(
-    (item) => item.playbackDecision === "captured_source"
-  );
-
-  for (const evidence of captures) {
-    if (extname(evidence.assetPath).toLowerCase() !== ".png") {
-      throw new Error(`Evidence capture must be a PNG: ${evidence.id}`);
-    }
-  }
+  const captures = capturedEvidence(evidenceItems);
   if (captures.length === 0) return;
-
-  const capturePaths = captures.map((evidence) =>
-    resolveEvidenceAssetPath(episodeDir, evidence)
-  );
-  await validateContainedEpisodePaths(episodeDir, capturePaths, {
-    lstat,
-    realpath,
-    context: "GPT-Live evidence"
-  });
-
+  const capturePaths = await validateCapturePaths(episodeDir, captures, dependencies);
+  const lstat = dependencies.lstat ?? defaultLstat;
+  const open = dependencies.open ?? defaultOpen;
   for (const [index, evidence] of captures.entries()) {
-    const evidencePath = capturePaths[index]!;
-    let stat: EvidenceAssetStat;
-    try {
-      stat = await lstat(evidencePath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        throw new Error(`Evidence asset is missing: ${evidence.id}`);
+    await inspectOpenedEvidence(capturePaths[index]!, evidence, lstat, open);
+  }
+}
+
+export async function stageEvidencePublicAssets(
+  episodeDir: string,
+  evidenceItems: readonly EvidenceSpec[] = GPT_LIVE_CONTENT.evidence,
+  dependencies: StageEvidencePublicAssetsDependencies = {}
+): Promise<StagedEvidencePublicAssets> {
+  const captures = capturedEvidence(evidenceItems);
+  const publicPaths = captures.map(evidencePublicAssetPath);
+  if (new Set(publicPaths).size !== publicPaths.length) {
+    throw new Error("Evidence captures must have unique public basenames");
+  }
+
+  const makeTempDirectory = dependencies.makeTempDirectory ?? defaultMakeTempDirectory;
+  const mkdir = dependencies.mkdir ?? defaultMkdir;
+  const removeDirectory = dependencies.removeDirectory ??
+    ((path: string) => defaultRemoveDirectory(path, { recursive: true, force: true }));
+  const lstat = dependencies.lstat ?? defaultLstat;
+  const open = dependencies.open ?? defaultOpen;
+  const publicDir = await makeTempDirectory(join(tmpdir(), "gpt-live-evidence-public-"));
+  let cleaned = false;
+  const cleanup = async (): Promise<void> => {
+    if (cleaned) return;
+    await removeDirectory(publicDir);
+    cleaned = true;
+  };
+
+  try {
+    await mkdir(join(publicDir, "evidence"), { recursive: true });
+    if (captures.length > 0) {
+      const capturePaths = await validateCapturePaths(episodeDir, captures, dependencies);
+      for (const [index, evidence] of captures.entries()) {
+        await inspectOpenedEvidence(
+          capturePaths[index]!,
+          evidence,
+          lstat,
+          open,
+          (handle) => copyOpenedFile(handle, join(publicDir, publicPaths[index]!), open)
+        );
       }
-      throw new Error(`Evidence asset could not be inspected: ${evidence.id}`, { cause: error });
     }
-    if (stat.isSymbolicLink()) {
-      throw new Error(`Evidence asset must not be a symlink: ${evidence.id}`);
-    }
-    if (!stat.isFile()) {
-      throw new Error(`Evidence asset must be a regular file: ${evidence.id}`);
-    }
-    if (stat.size <= 0) {
-      throw new Error(`Evidence asset must not be empty: ${evidence.id}`);
-    }
-    try {
-      await access(evidencePath, constants.R_OK);
-    } catch (error) {
-      throw new Error(`Evidence asset is not readable: ${evidence.id}`, { cause: error });
-    }
+    return { publicDir, cleanup };
+  } catch (error) {
+    await cleanup();
+    throw error;
   }
 }
