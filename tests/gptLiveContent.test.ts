@@ -1,8 +1,10 @@
 import {
+  lstat as fsLstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat as fsStat,
   symlink,
@@ -716,6 +718,40 @@ describe("GPT-Live production preparation", () => {
       await writeFile(outsidePath, VALID_PNG);
       await symlink(outsidePath, resolveEvidenceAssetPath(episodeDir, evidence));
       await expect(stageEvidencePublicAssets(episodeDir, [evidence])).rejects.toThrow(/symlink/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an evidence parent swapped to an external symlink before open", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-evidence-parent-race-"));
+    const outsideDir = await mkdtemp(join(tmpdir(), "gpt-live-evidence-race-outside-"));
+    const evidence = CAPTURED_EVIDENCE[0]!;
+    const evidenceDir = join(episodeDir, "evidence");
+    const displacedEvidenceDir = join(episodeDir, "evidence-original");
+    const evidencePath = resolveEvidenceAssetPath(episodeDir, evidence);
+    let evidenceFileLstatCalls = 0;
+    try {
+      await mkdir(evidenceDir);
+      await writeFile(evidencePath, VALID_PNG);
+      await writeFile(join(outsideDir, basename(evidence.assetPath)), VALID_PNG);
+
+      await expect(
+        stageEvidencePublicAssets(episodeDir, [evidence], {
+          lstat: async (path) => {
+            if (path === evidencePath) {
+              evidenceFileLstatCalls += 1;
+              if (evidenceFileLstatCalls === 2) {
+                await rename(evidenceDir, displacedEvidenceDir);
+                await symlink(outsideDir, evidenceDir, "dir");
+              }
+            }
+            return fsLstat(path);
+          }
+        })
+      ).rejects.toThrow(/outside captured evidence root|changed during validation/i);
+      expect(evidenceFileLstatCalls).toBe(2);
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
       await rm(outsideDir, { recursive: true, force: true });

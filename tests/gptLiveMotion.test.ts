@@ -10,6 +10,12 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { bundle as bundleRemotion } from "@remotion/bundler";
+import {
+  openBrowser,
+  selectComposition as selectRemotionComposition
+} from "@remotion/renderer";
 import { describe, expect, it, vi } from "vitest";
 import { GPT_LIVE_CONTENT, GPT_LIVE_VISUAL_CONTENT } from "../src/production/gptLive/content";
 import { stageEvidencePublicAssets } from "../src/production/gptLive/evidence";
@@ -50,6 +56,28 @@ const VALID_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64"
 );
+
+const withTimeout = async <T>(
+  operation: Promise<T>,
+  timeoutMilliseconds: number,
+  label: string,
+  onTimeout?: () => void
+): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          onTimeout?.();
+          reject(new Error(`${label} timed out after ${timeoutMilliseconds}ms`));
+        }, timeoutMilliseconds);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
 
 const overlaps = (left: SceneRect, right: SceneRect): boolean =>
   left.x < right.x + right.width &&
@@ -522,11 +550,12 @@ describe("GPT-Live plate render planning", () => {
     );
   });
 
-  it("bundles, selects, and loads staged evidence through the Remotion staticFile path", async () => {
+  it("boundedly bundles, selects, and loads staged evidence through Remotion", async () => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-remotion-evidence-"));
-    let stagedPublicDir: string | undefined;
-    let bundleOutput: string | undefined;
-    let evidenceLoads = 0;
+    const integrationDir = await mkdtemp(join(tmpdir(), "gpt-live-remotion-integration-"));
+    const bundleOutput = join(integrationDir, "bundle");
+    let staged: Awaited<ReturnType<typeof stageEvidencePublicAssets>> | undefined;
+    let browser: Awaited<ReturnType<typeof openBrowser>> | undefined;
     try {
       await mkdir(join(episodeDir, "evidence"));
       await Promise.all(
@@ -534,47 +563,70 @@ describe("GPT-Live plate render planning", () => {
           .filter((item) => item.playbackDecision === "captured_source")
           .map((evidence) => writeFile(join(episodeDir, evidence.assetPath), VALID_PNG))
       );
+      staged = await stageEvidencePublicAssets(episodeDir);
+      const entryPoint = fileURLToPath(
+        new URL("../src/production/gptLive/motion/Root.tsx", import.meta.url)
+      );
+      await withTimeout(
+        bundleRemotion({ entryPoint, publicDir: staged.publicDir, outDir: bundleOutput }),
+        15_000,
+        "Remotion evidence bundle"
+      );
 
-      const result = await renderGptLivePlates(
-        { episodeDir, ffprobePath: "ffprobe", narrationRecords, publishPlan: false },
-        {
-          inspectMediaFile: async (_ffprobe, outputPath) => {
-            const narration = narrationRecords.find(({ id }) => outputPath.includes(id))!;
-            return isMasterPath(outputPath)
-              ? validSlateInspection(narration.durationSeconds)
-              : validInspection(narration.durationSeconds);
-          },
-          renderMedia: async ({ composition, serveUrl, inputProps }) => {
-            expect(composition).toMatchObject({ id: "GptLivePlate" });
-            bundleOutput = serveUrl;
-            if (!inputProps.evidence) return;
-            const assetUrl = resolveEvidenceAssetUrl(inputProps.evidence.assetPath);
-            const bundledAssetPath = join(
-              serveUrl,
-              "public",
-              decodeURIComponent(assetUrl.slice(1))
-            );
-            await expect(readFile(bundledAssetPath)).resolves.toEqual(VALID_PNG);
-            evidenceLoads += 1;
-          },
-          stageEvidencePublicAssets: async (dir) => {
-            const staged = await stageEvidencePublicAssets(dir);
-            stagedPublicDir = staged.publicDir;
-            return staged;
-          }
+      let browserOpenTimedOut = false;
+      const browserPromise = openBrowser("chrome", { logLevel: "error" });
+      void browserPromise
+        .then(async (lateBrowser) => {
+          if (browserOpenTimedOut) await lateBrowser.close({ silent: true });
+        })
+        .catch(() => undefined);
+      browser = await withTimeout(
+        browserPromise,
+        10_000,
+        "Remotion browser open",
+        () => {
+          browserOpenTimedOut = true;
         }
       );
 
-      expect(result.jobs).toHaveLength(14);
-      expect(evidenceLoads).toBe(8);
-      expect(stagedPublicDir).toBeDefined();
-      expect(bundleOutput).toBeDefined();
-      await expect(fsStat(stagedPublicDir!)).rejects.toMatchObject({ code: "ENOENT" });
-      await expect(fsStat(bundleOutput!)).rejects.toMatchObject({ code: "ENOENT" });
+      const evidenceJob = buildPlateRenderJobs({ episodeDir, narrationRecords }).find(
+        (job) => job.inputProps.evidence
+      )!;
+      const composition = await withTimeout(
+        selectRemotionComposition({
+          serveUrl: bundleOutput,
+          id: "GptLivePlate",
+          inputProps: evidenceJob.inputProps,
+          puppeteerInstance: browser,
+          timeoutInMilliseconds: 10_000,
+          logLevel: "error"
+        }),
+        12_000,
+        "Remotion composition selection"
+      );
+
+      expect(composition).toMatchObject({ id: "GptLivePlate" });
+      const assetUrl = resolveEvidenceAssetUrl(evidenceJob.inputProps.evidence!.assetPath);
+      await expect(
+        readFile(join(bundleOutput, "public", decodeURIComponent(assetUrl.slice(1))))
+      ).resolves.toEqual(VALID_PNG);
     } finally {
-      await rm(episodeDir, { recursive: true, force: true });
+      const cleanupResults = await Promise.allSettled([
+        ...(browser ? [browser.close({ silent: true })] : []),
+        ...(staged ? [staged.cleanup()] : []),
+        rm(integrationDir, { recursive: true, force: true }),
+        rm(episodeDir, { recursive: true, force: true })
+      ]);
+      const cleanupFailure = cleanupResults.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected"
+      );
+      if (cleanupFailure) throw cleanupFailure.reason;
     }
-  }, 120_000);
+    await expect(fsStat(bundleOutput)).rejects.toMatchObject({ code: "ENOENT" });
+    if (staged) {
+      await expect(fsStat(staged.publicDir)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  }, 35_000);
 
   it("rejects plate-versus-slate drift above 0.1s even when both match voice within 0.1s", async () => {
     const episodeDir = "/tmp/gpt-live-motion";

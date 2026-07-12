@@ -6,6 +6,7 @@ import {
   open as defaultOpen,
   realpath as defaultRealpath,
   rm as defaultRemoveDirectory,
+  stat as defaultStat,
   type FileHandle
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -29,6 +30,7 @@ export interface EvidenceAssetDependencies {
   readonly lstat?: (path: string) => Promise<EvidenceAssetStat>;
   readonly open?: OpenFile;
   readonly realpath?: (path: string) => Promise<string>;
+  readonly stat?: (path: string) => Promise<EvidenceAssetStat>;
 }
 
 export interface StageEvidencePublicAssetsDependencies extends EvidenceAssetDependencies {
@@ -46,6 +48,28 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 const READ_ONLY_NOFOLLOW =
   constants.O_RDONLY |
   (typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0);
+
+interface CapturedEvidenceRoots {
+  readonly episodeRoot: string;
+  readonly evidenceRoot: string;
+  readonly evidenceDirectory: string;
+  readonly evidenceDirectoryStat: EvidenceAssetStat;
+}
+
+interface ValidatedCapturePaths {
+  readonly capturePaths: readonly string[];
+  readonly roots: CapturedEvidenceRoots;
+}
+
+const isWithinRoot = (root: string, candidate: string, allowRoot = false): boolean => {
+  const descendant = relative(root, candidate);
+  if (!descendant) return allowRoot;
+  return (
+    descendant !== ".." &&
+    !descendant.startsWith(`..${sep}`) &&
+    !isAbsolute(descendant)
+  );
+};
 
 const capturedEvidence = (evidenceItems: readonly EvidenceSpec[]): readonly EvidenceSpec[] => {
   const captures = evidenceItems.filter(
@@ -79,6 +103,9 @@ const inspectOpenedEvidence = async (
   evidence: EvidenceSpec,
   lstat: (path: string) => Promise<EvidenceAssetStat>,
   open: OpenFile,
+  realpath: (path: string) => Promise<string>,
+  stat: (path: string) => Promise<EvidenceAssetStat>,
+  roots: CapturedEvidenceRoots,
   action?: (handle: FileHandle) => Promise<void>
 ): Promise<void> => {
   let pathStat: EvidenceAssetStat;
@@ -116,6 +143,35 @@ const inspectOpenedEvidence = async (
     if (openedStat.dev !== pathStat.dev || openedStat.ino !== pathStat.ino) {
       throw new Error(`Evidence asset changed during validation: ${evidence.id}`);
     }
+    let currentEvidenceRoot: string;
+    let resolvedEvidencePath: string;
+    try {
+      [currentEvidenceRoot, resolvedEvidencePath] = await Promise.all([
+        realpath(roots.evidenceDirectory),
+        realpath(evidencePath)
+      ]);
+    } catch (error) {
+      throw new Error(`Evidence asset changed during validation: ${evidence.id}`, { cause: error });
+    }
+    if (
+      currentEvidenceRoot !== roots.evidenceRoot ||
+      !isWithinRoot(roots.episodeRoot, resolvedEvidencePath) ||
+      !isWithinRoot(roots.evidenceRoot, resolvedEvidencePath)
+    ) {
+      throw new Error(`Evidence asset is outside captured evidence root: ${evidence.id}`);
+    }
+    const [currentDirectoryStat, resolvedPathStat] = await Promise.all([
+      stat(currentEvidenceRoot),
+      stat(resolvedEvidencePath)
+    ]);
+    if (
+      currentDirectoryStat.dev !== roots.evidenceDirectoryStat.dev ||
+      currentDirectoryStat.ino !== roots.evidenceDirectoryStat.ino ||
+      resolvedPathStat.dev !== openedStat.dev ||
+      resolvedPathStat.ino !== openedStat.ino
+    ) {
+      throw new Error(`Evidence asset changed during validation: ${evidence.id}`);
+    }
     if (openedStat.size <= 0) {
       throw new Error(`Evidence asset must not be empty: ${evidence.id}`);
     }
@@ -132,16 +188,39 @@ const validateCapturePaths = async (
   episodeDir: string,
   captures: readonly EvidenceSpec[],
   dependencies: EvidenceAssetDependencies
-): Promise<readonly string[]> => {
+): Promise<ValidatedCapturePaths> => {
+  const realpath = dependencies.realpath ?? defaultRealpath;
+  const stat = dependencies.stat ?? defaultStat;
+  const episodeRoot = await realpath(resolve(episodeDir));
+  const evidenceDirectory = resolve(episodeDir, "evidence");
+  let evidenceRoot: string;
+  try {
+    evidenceRoot = await realpath(evidenceDirectory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`Evidence asset is missing: ${captures[0]!.id}`);
+    }
+    throw error;
+  }
+  if (!isWithinRoot(episodeRoot, evidenceRoot)) {
+    throw new Error("Evidence directory is outside captured episode root");
+  }
+  const evidenceDirectoryStat = await stat(evidenceRoot);
+  if (!evidenceDirectoryStat.isDirectory()) {
+    throw new Error("Evidence path is not a directory");
+  }
   const capturePaths = captures.map((evidence) =>
     resolveEvidenceAssetPath(episodeDir, evidence)
   );
   await validateContainedEpisodePaths(episodeDir, capturePaths, {
     lstat: dependencies.lstat ?? defaultLstat,
-    realpath: dependencies.realpath ?? defaultRealpath,
+    realpath,
     context: "GPT-Live evidence"
   });
-  return capturePaths;
+  return {
+    capturePaths,
+    roots: { episodeRoot, evidenceRoot, evidenceDirectory, evidenceDirectoryStat }
+  };
 };
 
 const copyOpenedFile = async (
@@ -205,11 +284,21 @@ export async function validateEvidenceAssets(
 ): Promise<void> {
   const captures = capturedEvidence(evidenceItems);
   if (captures.length === 0) return;
-  const capturePaths = await validateCapturePaths(episodeDir, captures, dependencies);
+  const validatedPaths = await validateCapturePaths(episodeDir, captures, dependencies);
   const lstat = dependencies.lstat ?? defaultLstat;
   const open = dependencies.open ?? defaultOpen;
+  const realpath = dependencies.realpath ?? defaultRealpath;
+  const stat = dependencies.stat ?? defaultStat;
   for (const [index, evidence] of captures.entries()) {
-    await inspectOpenedEvidence(capturePaths[index]!, evidence, lstat, open);
+    await inspectOpenedEvidence(
+      validatedPaths.capturePaths[index]!,
+      evidence,
+      lstat,
+      open,
+      realpath,
+      stat,
+      validatedPaths.roots
+    );
   }
 }
 
@@ -230,6 +319,8 @@ export async function stageEvidencePublicAssets(
     ((path: string) => defaultRemoveDirectory(path, { recursive: true, force: true }));
   const lstat = dependencies.lstat ?? defaultLstat;
   const open = dependencies.open ?? defaultOpen;
+  const realpath = dependencies.realpath ?? defaultRealpath;
+  const stat = dependencies.stat ?? defaultStat;
   const publicDir = await makeTempDirectory(join(tmpdir(), "gpt-live-evidence-public-"));
   let cleaned = false;
   const cleanup = async (): Promise<void> => {
@@ -241,13 +332,16 @@ export async function stageEvidencePublicAssets(
   try {
     await mkdir(join(publicDir, "evidence"), { recursive: true });
     if (captures.length > 0) {
-      const capturePaths = await validateCapturePaths(episodeDir, captures, dependencies);
+      const validatedPaths = await validateCapturePaths(episodeDir, captures, dependencies);
       for (const [index, evidence] of captures.entries()) {
         await inspectOpenedEvidence(
-          capturePaths[index]!,
+          validatedPaths.capturePaths[index]!,
           evidence,
           lstat,
           open,
+          realpath,
+          stat,
+          validatedPaths.roots,
           (handle) => copyOpenedFile(handle, join(publicDir, publicPaths[index]!), open)
         );
       }
