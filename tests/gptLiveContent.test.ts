@@ -1685,9 +1685,53 @@ describe("GPT-Live preparation CLI", () => {
 
   it.each([
     { args: ["prepare", "--episode-dir"], error: "Missing value for --episode-dir" },
-    { args: ["unexpected"], error: "Unknown command: unexpected" }
+    { args: ["unexpected"], error: "Unknown command" }
   ])("rejects invalid command input: $args", async ({ args, error }) => {
     await expect(runGptLiveCli(args)).rejects.toThrow(error);
+  });
+
+  it("rejects a signed URL as an unknown command without exposing its raw value", async () => {
+    const signedUrl = "https://prod-compose.tella.tv/a?command-must-not-appear";
+    let message = "";
+    try {
+      await runGptLiveCli([signedUrl]);
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).toMatch(/Unknown command/);
+    expect(message).not.toContain(signedUrl);
+    expect(message).not.toContain("command-must-not-appear");
+  });
+
+  it.each(["prepare", "finish", "qa"] as const)(
+    "rejects a positional signed URL for %s without exposing its raw value",
+    async (command) => {
+      const signedUrl = `https://prod-compose.tella.tv/a?${command}-must-not-appear`;
+      const loadEnvSnapshotFromFiles = vi.fn();
+      let message = "";
+      try {
+        await runGptLiveCli([command, signedUrl], { loadEnvSnapshotFromFiles });
+      } catch (error) {
+        message = String(error);
+      }
+      expect(message).toMatch(/Unexpected positional argument/);
+      expect(message).not.toContain(signedUrl);
+      expect(message).not.toContain(`${command}-must-not-appear`);
+      expect(loadEnvSnapshotFromFiles).not.toHaveBeenCalled();
+    }
+  );
+
+  it("reports a safe unknown option name without exposing its inline value", async () => {
+    const signedUrl = "https://prod-compose.tella.tv/a?option-must-not-appear";
+    let message = "";
+    try {
+      await runGptLiveCli(["prepare", `--episode-dr=${signedUrl}`]);
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).toMatch(/Unknown option: --episode-dr/);
+    expect(message).not.toContain(signedUrl);
+    expect(message).not.toContain("option-must-not-appear");
   });
 
   it("dispatches finish with the same contained episode path and loaded environment", async () => {

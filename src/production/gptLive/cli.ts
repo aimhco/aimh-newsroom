@@ -61,6 +61,12 @@ export interface GptLiveCliDependencies<TResult = PrepareGptLiveProductionResult
   readonly sealTellaExports?: SealTellaExportsFunction<TResult>;
 }
 
+const formatUnknownOption = (argument: string): string => {
+  const equalsIndex = argument.indexOf("=");
+  const rawName = equalsIndex === -1 ? argument : argument.slice(0, equalsIndex);
+  return /^--[A-Za-z0-9-]+$/.test(rawName) ? `Unknown option: ${rawName}` : "Unknown option";
+};
+
 const parsePrepareArgs = (rawArgs: readonly string[]): { readonly episodeDir?: string } => {
   const args = [...rawArgs];
   if (args[0] === "--") args.shift();
@@ -85,8 +91,8 @@ const parsePrepareArgs = (rawArgs: readonly string[]): { readonly episodeDir?: s
       if (!episodeDir) throw new Error("Missing value for --episode-dir");
       continue;
     }
-    if (argument.startsWith("--")) throw new Error(`Unknown option: ${argument}`);
-    throw new Error(`Unexpected positional argument: ${argument}`);
+    if (argument.startsWith("--")) throw new Error(formatUnknownOption(argument));
+    throw new Error("Unexpected positional argument");
   }
 
   return episodeDir === undefined ? {} : { episodeDir };
@@ -101,9 +107,6 @@ const SEAL_OPTIONS = [
   "version-b-workflow-id"
 ] as const;
 type SealOption = (typeof SEAL_OPTIONS)[number];
-
-const formatUnknownSealOption = (rawName: string): string =>
-  /^--[A-Za-z0-9-]+$/.test(rawName) ? `Unknown option: ${rawName}` : "Unknown option";
 
 const parseSealArgs = (
   rawArgs: readonly string[]
@@ -122,7 +125,7 @@ const parseSealArgs = (
     if (!rawName.startsWith("--")) throw new Error("Unexpected positional argument");
     const name = rawName.slice(2);
     if (name !== "episode-dir" && !SEAL_OPTIONS.includes(name as SealOption)) {
-      throw new Error(formatUnknownSealOption(rawName));
+      throw new Error(formatUnknownOption(rawName));
     }
     const key = name === "episode-dir" ? name : name as SealOption;
     const existing = key === "episode-dir" ? episodeDir : values[key];
@@ -274,8 +277,9 @@ export async function runGptLiveCli<
 ): Promise<TResult> {
   const command = rawArgs[0];
 
+  if (command === undefined) throw new Error("Missing command");
   if (command !== "prepare" && command !== "finish" && command !== "qa" && command !== "seal-exports") {
-    throw new Error(`Unknown command: ${command ?? "<missing>"}`);
+    throw new Error("Unknown command");
   }
 
   const sealArgs = command === "seal-exports" ? parseSealArgs(rawArgs.slice(1)) : undefined;
