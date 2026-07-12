@@ -1246,10 +1246,12 @@ describe("GPT-Live full production QA", () => {
       sourceOutputLufs: []
     });
     expect(comparison).toContain("Machine review complete");
-    expect(comparison).toContain("one evidence-editorial output");
+    expect(comparison).toContain(
+      "Both compatibility outputs use the same evidence-editorial treatment"
+    );
     expect(comparison).toContain("boundary content checks passed");
     expect(comparison).toContain("outro-only tail signal does not prove CTA completion");
-    expect(comparison).not.toContain("Version B host usefulness");
+    expect(comparison).not.toMatch(/visual[- ]host|host usefulness/i);
     expect(comparison).not.toContain("Music is present");
     expect(comparison).toContain("Full real-time listening");
   });
