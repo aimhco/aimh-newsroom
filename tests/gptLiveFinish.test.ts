@@ -531,7 +531,7 @@ describe("GPT-Live post-production publication", () => {
         bodyMusic: false,
         outro: {
           file: "Outro_Much_Higher_Causmic.mp3",
-          startSeconds: 3.5,
+          startSeconds: 3.75,
           durationSeconds: 7,
           fadeInSeconds: 0.25,
           fadeOutSeconds: 0.75
@@ -647,19 +647,54 @@ describe("GPT-Live post-production publication", () => {
     }
   });
 
-  it("rejects one outro policy that is stale for the second variant", async () => {
+  it("rejects serialized outro timing that drifts from the expected policy", async () => {
     const episodeDir = await createContainedEpisode();
     await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
     await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
     await writeGenerationMarker(episodeDir, "current-a", "current-b");
     await mutateGenerationMarker(episodeDir, (report) => {
-      report.variants[1].inputDurationSeconds = 11.251;
-      report.variants[1].outputDurationSeconds = 11.251;
+      report.audioPolicy.outro.startSeconds = 3.5;
+      report.audioPolicy.outro.durationSeconds = 6.6;
+    });
+
+    try {
+      await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(/outro|timing/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts serialized outro timing at the 0.001-second epsilon boundary", async () => {
+    const episodeDir = await createContainedEpisode();
+    await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
+    await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
+    await writeGenerationMarker(episodeDir, "current-a", "current-b");
+    await mutateGenerationMarker(episodeDir, (report) => {
+      report.audioPolicy.outro.startSeconds = 3.751;
+      report.audioPolicy.outro.durationSeconds = 7.001;
+    });
+
+    try {
+      await expect(validatePublishedGeneration(episodeDir)).resolves.toMatchObject({
+        generationId: "00000000-0000-4000-8000-000000000000"
+      });
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects input program timings that cannot share one serialized outro policy", async () => {
+    const episodeDir = await createContainedEpisode();
+    await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
+    await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
+    await writeGenerationMarker(episodeDir, "current-a", "current-b");
+    await mutateGenerationMarker(episodeDir, (report) => {
+      report.variants[1].inputDurationSeconds = 10.752;
     });
 
     try {
       await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(
-        /duration|audio|outro|manifest/i
+        /audio|outro|timing|manifest/i
       );
     } finally {
       await rm(episodeDir, { recursive: true, force: true });

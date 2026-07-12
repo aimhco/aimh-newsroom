@@ -21,6 +21,7 @@ const DIALOGUE_VOLUME = 1;
 const OUTRO_MUSIC_VOLUME = 0.16;
 const OUTRO_FADE_IN_SECONDS = 0.25;
 const OUTRO_FADE_OUT_SECONDS = 0.75;
+const OUTRO_TIMING_SERIALIZATION_EPSILON_SECONDS = 0.001;
 const DURATION_TOLERANCE_SECONDS = 0.25;
 const VARIANT_DURATION_TOLERANCE_SECONDS = 0.5;
 const FRAME_RATE_TOLERANCE = 0.001;
@@ -637,7 +638,7 @@ const safeVariantPath = (directory: "exports" | "final", file: string): string =
   `${directory}/${basename(file)}`;
 
 export function buildPostProductionManifest(options: BuildPostProductionManifestOptions) {
-  const programDurationSeconds = options.variants[0]?.outputDurationSeconds ?? 0;
+  const programDurationSeconds = options.variants[0]?.inputDurationSeconds ?? 0;
   requirePositiveDuration(programDurationSeconds, "post-production program");
   requirePositiveDuration(options.outroDurationSeconds, "outro music");
   const outroDurationSeconds = roundedSeconds(
@@ -942,17 +943,19 @@ const parsePublishedGenerationManifest = (
   for (const variant of variants) {
     const expectedDurationSeconds = Math.min(
       expectedAudio.outroDurationSeconds,
-      variant.outputDurationSeconds
+      variant.inputDurationSeconds
     );
     const expectedStartSeconds = Math.max(
       0,
-      variant.outputDurationSeconds - expectedDurationSeconds
+      variant.inputDurationSeconds - expectedDurationSeconds
     );
     if (
-      Math.abs((outro.durationSeconds as number) - expectedDurationSeconds) >
-        VARIANT_DURATION_TOLERANCE_SECONDS ||
-      Math.abs((outro.startSeconds as number) - expectedStartSeconds) >
-        VARIANT_DURATION_TOLERANCE_SECONDS
+      roundedSeconds(
+        Math.abs((outro.durationSeconds as number) - expectedDurationSeconds)
+      ) >
+        OUTRO_TIMING_SERIALIZATION_EPSILON_SECONDS ||
+      roundedSeconds(Math.abs((outro.startSeconds as number) - expectedStartSeconds)) >
+        OUTRO_TIMING_SERIALIZATION_EPSILON_SECONDS
     ) {
       throw new Error("Invalid published generation manifest outro timing");
     }

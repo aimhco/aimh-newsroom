@@ -132,7 +132,7 @@ const finalInspection = (durationSeconds: number): FinalMediaInspection => ({
   }
 });
 
-const validSnapshot = (): GptLiveQaSnapshot => {
+const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
   const production = ({
     schemaVersion: "0.1.0" as const,
     ...structuredClone(GPT_LIVE_CONTENT),
@@ -165,6 +165,7 @@ const validSnapshot = (): GptLiveQaSnapshot => {
     }))
   });
   const durationSeconds = plan.clips.reduce((total, clip) => total + clip.durationSeconds, 0);
+  const outputDurationSeconds = durationSeconds + outputDurationDeltaSeconds;
   const duckIntervals = deriveSourceDuckIntervals(plan);
   const sourceGains = deriveSharedSourceGains(duckIntervals, [-20, -20], [-20, -20]).map(
     (gain) => ({ ...gain, outputLufsA: -23, outputLufsB: -23 })
@@ -191,7 +192,7 @@ const validSnapshot = (): GptLiveQaSnapshot => {
         inputPath: join(EPISODE_DIR, "exports", "tella-a.mp4"),
         outputPath: join(EPISODE_DIR, "final", "version-a.mp4"),
         inputDurationSeconds: durationSeconds,
-        outputDurationSeconds: durationSeconds,
+        outputDurationSeconds,
         sha256: sha("d"),
         byteSize: 1_000
       },
@@ -200,7 +201,7 @@ const validSnapshot = (): GptLiveQaSnapshot => {
         inputPath: join(EPISODE_DIR, "exports", "tella-b.mp4"),
         outputPath: join(EPISODE_DIR, "final", "version-b.mp4"),
         inputDurationSeconds: durationSeconds,
-        outputDurationSeconds: durationSeconds,
+        outputDurationSeconds,
         sha256: sha("e"),
         byteSize: 1_001
       }
@@ -316,8 +317,8 @@ const validSnapshot = (): GptLiveQaSnapshot => {
       masters,
       plates,
       finals: {
-        "version-a": finalInspection(durationSeconds),
-        "version-b": finalInspection(durationSeconds)
+        "version-a": finalInspection(outputDurationSeconds),
+        "version-b": finalInspection(outputDurationSeconds)
       }
     },
     safeAreas: GPT_LIVE_CONTENT.variants.flatMap((variant) =>
@@ -592,6 +593,10 @@ describe("GPT-Live full production QA", () => {
 
   it("accepts a complete editorial, media, Tella, and A/B snapshot", () => {
     expect(() => validateGptLiveQaSnapshot(validSnapshot())).not.toThrow();
+  });
+
+  it("accepts a generated report with an allowed final output duration drift", () => {
+    expect(() => validateGptLiveQaSnapshot(validSnapshot(-0.2))).not.toThrow();
   });
 
   it("accepts the approved video query parameter in canonical declared media URLs", () => {
