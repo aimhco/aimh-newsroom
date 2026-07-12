@@ -29,16 +29,23 @@ After both Tella exports have been downloaded to `exports/tella-a.mp4` and
 `exports/tella-b.mp4`, seal their bytes and remote provenance before finishing:
 
 ```bash
+read -r -s 'GPT_LIVE_TELLA_VERSION_A_DOWNLOAD_URL?Tella A signed URL: '
+printf '\n'
+read -r -s 'GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL?Tella B signed URL: '
+printf '\n'
+
+GPT_LIVE_TELLA_VERSION_A_DOWNLOAD_URL="$GPT_LIVE_TELLA_VERSION_A_DOWNLOAD_URL" \
+GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL="$GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL" \
 pnpm gpt-live:seal-exports -- \
   --episode-dir episodes/2026-07-10-gpt-live-tella-ab \
   --version-a-source-variant dynamic_editorial \
   --version-a-video-id vid_example_a \
   --version-a-workflow-id Export-Story-vid_example_a/2026-07-12T17:23:26.147Z/Story/1920x1080/30FPS \
-  --version-a-download-url "$TELLA_A_ONE_TIME_URL" \
   --version-b-source-variant aimh_visual_host \
   --version-b-video-id vid_example_b \
-  --version-b-workflow-id Export-Story-vid_example_b/2026-07-12T17:24:26.147Z/Story/1920x1080/30FPS \
-  --version-b-download-url "$TELLA_B_ONE_TIME_URL"
+  --version-b-workflow-id Export-Story-vid_example_b/2026-07-12T17:24:26.147Z/Story/1920x1080/30FPS
+
+unset GPT_LIVE_TELLA_VERSION_A_DOWNLOAD_URL GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL
 
 pnpm gpt-live:finish -- --episode-dir episodes/2026-07-10-gpt-live-tella-ab
 pnpm gpt-live:qa -- --episode-dir episodes/2026-07-10-gpt-live-tella-ab
@@ -48,18 +55,22 @@ Each workflow ID must exactly match
 `Export-Story-${remoteVideoId}/${timestamp}/Story/1920x1080/30FPS`. Its one-time
 download URL must use HTTPS on `prod-compose.tella.tv` with the exact pathname
 `/${remoteVideoId}/${timestamp}/video/1920x1080/30FPS/video.mp4`. The query is
-treated as opaque secret material: provide it only for the seal invocation, do
-not save it in `.env` or git, and unset the shell variable afterward. The seal
+required and treated as opaque secret material. Download URLs have no CLI
+flags and must come from the live shell environment; values loaded from `.env`,
+`.env.local`, or the video-engine fallback are rejected. Use silent shell input
+as above, never put a signed URL directly in command history, and unset the
+shell variables afterward. The seal
 streams at most 2 GiB per remote export, rejects non-2xx responses and unsafe
 redirects, and writes receipt schema `0.2.0` only when remote SHA-256 and byte
 size match the fixed local export.
 
 For the approved compatibility copy, set both source variants and video IDs to
 the `dynamic_editorial` values. Both records may use the same workflow ID and
-one-time URL when both local files are copies of that export; the remote bytes
-are fetched once and checked against both files. Every flag also has a
-`GPT_LIVE_TELLA_VERSION_A_*` or `GPT_LIVE_TELLA_VERSION_B_*` environment equivalent:
-`SOURCE_VARIANT`, `VIDEO_ID`, `WORKFLOW_ID`, and `DOWNLOAD_URL`.
+either the same or distinct valid one-time URLs when both local files are copies
+of that export; the remote bytes are fetched once by validated workflow identity
+and checked against both files. The nonsecret provenance flags also have
+`GPT_LIVE_TELLA_VERSION_A_*` or `GPT_LIVE_TELLA_VERSION_B_*` environment
+equivalents: `SOURCE_VARIANT`, `VIDEO_ID`, and `WORKFLOW_ID`.
 
 Finishing and QA independently remeasure source fullscreen evidence at 10%,
 50%, and 90% of each source clip for both versions. The current two-source plan

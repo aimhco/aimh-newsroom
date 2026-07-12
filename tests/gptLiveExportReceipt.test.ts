@@ -146,7 +146,8 @@ describe("GPT-Live Tella export receipt", () => {
     ["HTTP", DOWNLOAD_URL_A.replace("https:", "http:")],
     ["wrong video", DOWNLOAD_URL_A.replace("/vid_dynamic/", "/vid_host/")],
     ["wrong timestamp", DOWNLOAD_URL_A.replace("17:23:26.147Z", "17:23:27.147Z")],
-    ["wrong rendition path", DOWNLOAD_URL_A.replace("/1920x1080/30FPS/", "/1280x720/30FPS/")]
+    ["wrong rendition path", DOWNLOAD_URL_A.replace("/1920x1080/30FPS/", "/1280x720/30FPS/")],
+    ["queryless", DOWNLOAD_URL_A.replace(/\?.*$/, "")]
   ])("rejects a %s download URL without exposing it", async (_name, downloadUrl) => {
     const harness = await createSealHarness();
     const fetch = vi.fn(async () => new Response("export-a"));
@@ -253,7 +254,7 @@ describe("GPT-Live Tella export receipt", () => {
     }
   });
 
-  it("accepts one shared compatibility workflow and URL, fetching it once for both local copies", async () => {
+  it("fetches one shared compatibility workflow once when its signed URLs differ", async () => {
     const harness = await createSealHarness({ exportB: "export-a", sharedState: true });
     const fetch = vi.fn(async () => new Response("export-a"));
     const consoleSpies = (["log", "info", "warn", "error"] as const).map((method) =>
@@ -266,7 +267,7 @@ describe("GPT-Live Tella export receipt", () => {
           sourceVariant: "dynamic_editorial",
           remoteVideoId: "vid_dynamic",
           workflowId: WORKFLOW_A,
-          downloadUrl: DOWNLOAD_URL_A
+          downloadUrl: DOWNLOAD_URL_A.replace("SECRET_A", "SECRET_B")
         }])
       }, { fetch });
 

@@ -187,6 +187,7 @@ const requireDownloadUrl = (
     url.username !== "" ||
     url.password !== "" ||
     url.hash !== "" ||
+    url.search === "" ||
     url.pathname !== binding.pathname
   ) {
     throw new Error(`Invalid Tella download URL for ${version}`);
@@ -435,7 +436,11 @@ export async function sealTellaExports(
   });
   const downloads = new Map<string, Promise<ReturnType<typeof digest>>>();
   const remoteDigests = await Promise.all(downloadBindings.map((binding) => {
-    const key = `${binding.workflow.workflowId}\0${binding.url.href}`;
+    const key = [
+      binding.workflow.remoteVideoId,
+      binding.workflow.timestamp,
+      binding.workflow.workflowId
+    ].join("\0");
     const existing = downloads.get(key);
     if (existing) return existing;
     const pending = downloadDigest(

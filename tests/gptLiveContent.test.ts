@@ -1756,14 +1756,21 @@ describe("GPT-Live preparation CLI", () => {
       "--version-a-source-variant", "dynamic_editorial",
       "--version-a-video-id", "vid_dynamic",
       "--version-a-workflow-id", "Export-Story-vid_dynamic/2026-07-12T17:23:26.147Z/Story/1920x1080/30FPS",
-      "--version-a-download-url", "https://prod-compose.tella.tv/a?secret-a",
       "--version-b-source-variant", "dynamic_editorial",
       "--version-b-video-id", "vid_dynamic",
-      "--version-b-workflow-id", "Export-Story-vid_dynamic/2026-07-12T17:23:26.147Z/Story/1920x1080/30FPS",
-      "--version-b-download-url", "https://prod-compose.tella.tv/b?secret-b"
+      "--version-b-workflow-id", "Export-Story-vid_dynamic/2026-07-12T17:23:26.147Z/Story/1920x1080/30FPS"
     ], {
       cwd: () => "/project",
-      loadEnvSnapshotFromFiles: async () => ({ values: {}, status: {} }),
+      loadEnvSnapshotFromFiles: async () => ({
+        values: {
+          GPT_LIVE_TELLA_VERSION_A_DOWNLOAD_URL: "https://prod-compose.tella.tv/a?secret-a",
+          GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL: "https://prod-compose.tella.tv/b?secret-b"
+        },
+        status: {
+          GPT_LIVE_TELLA_VERSION_A_DOWNLOAD_URL: { present: true, source: "shell" },
+          GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL: { present: true, source: "shell" }
+        }
+      }),
       sealTellaExports,
       ...virtualCliFileSystem
     });
@@ -1804,7 +1811,10 @@ describe("GPT-Live preparation CLI", () => {
           GPT_LIVE_TELLA_VERSION_B_WORKFLOW_ID: "Export-Story-vid_host/2026-07-12T17:24:26.147Z/Story/1920x1080/30FPS",
           GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL: "https://prod-compose.tella.tv/b?secret-b"
         },
-        status: {}
+        status: {
+          GPT_LIVE_TELLA_VERSION_A_DOWNLOAD_URL: { present: true, source: "shell" },
+          GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL: { present: true, source: "shell" }
+        }
       }),
       sealTellaExports,
       ...virtualCliFileSystem
@@ -1826,6 +1836,66 @@ describe("GPT-Live preparation CLI", () => {
     }));
   });
 
+  it.each(["local", "video-engine"] as const)(
+    "rejects %s-file-sourced download URLs before sealing",
+    async (source) => {
+      const sealTellaExports = vi.fn();
+      const values = {
+        GPT_LIVE_TELLA_VERSION_A_SOURCE_VARIANT: "dynamic_editorial",
+        GPT_LIVE_TELLA_VERSION_A_VIDEO_ID: "vid_dynamic",
+        GPT_LIVE_TELLA_VERSION_A_WORKFLOW_ID: "Export-Story-vid_dynamic/2026-07-12T17:23:26.147Z/Story/1920x1080/30FPS",
+        GPT_LIVE_TELLA_VERSION_A_DOWNLOAD_URL: "https://prod-compose.tella.tv/a?secret-a",
+        GPT_LIVE_TELLA_VERSION_B_SOURCE_VARIANT: "aimh_visual_host",
+        GPT_LIVE_TELLA_VERSION_B_VIDEO_ID: "vid_host",
+        GPT_LIVE_TELLA_VERSION_B_WORKFLOW_ID: "Export-Story-vid_host/2026-07-12T17:24:26.147Z/Story/1920x1080/30FPS",
+        GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL: "https://prod-compose.tella.tv/b?secret-b"
+      };
+      await expect(runGptLiveCli(["seal-exports", "--episode-dir", "episodes/custom"], {
+        cwd: () => "/project",
+        loadEnvSnapshotFromFiles: async () => ({
+          values,
+          status: {
+            GPT_LIVE_TELLA_VERSION_A_DOWNLOAD_URL: { present: true, source },
+            GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL: { present: true, source: "shell" }
+          }
+        }),
+        sealTellaExports,
+        ...virtualCliFileSystem
+      })).rejects.toThrow(/DOWNLOAD_URL.*shell|shell.*DOWNLOAD_URL/i);
+      expect(sealTellaExports).not.toHaveBeenCalled();
+    }
+  );
+
+  it("rejects signed URL arguments before loading env without exposing their value", async () => {
+    const signedUrl = "https://prod-compose.tella.tv/a?must-not-appear";
+    const loadEnvSnapshotFromFiles = vi.fn();
+    const sealTellaExports = vi.fn();
+    let message = "";
+    try {
+      await runGptLiveCli([
+        "seal-exports",
+        "--episode-dir", "episodes/custom",
+        `--version-a-download-url=${signedUrl}`
+      ], { loadEnvSnapshotFromFiles, sealTellaExports });
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).toMatch(/Unknown option: --version-a-download-url/);
+    expect(message).not.toContain(signedUrl);
+    expect(loadEnvSnapshotFromFiles).not.toHaveBeenCalled();
+    expect(sealTellaExports).not.toHaveBeenCalled();
+  });
+
+  it("formats seal output without environment URL values", () => {
+    const signedUrl = "https://prod-compose.tella.tv/a?must-not-appear";
+    const lines = formatGptLiveCliResult({
+      episodeDir: "/project/episodes/custom",
+      receiptPath: "/project/episodes/custom/reports/tella-export-receipt.json",
+      downloadUrl: signedUrl
+    } as any);
+    expect(lines.join("\n")).not.toContain(signedUrl);
+  });
+
   it("rejects incomplete export sealing provenance before writing a receipt", async () => {
     const sealTellaExports = vi.fn();
     await expect(runGptLiveCli(["seal-exports", "--episode-dir", "episodes/custom"], {
@@ -1837,7 +1907,7 @@ describe("GPT-Live preparation CLI", () => {
     expect(sealTellaExports).not.toHaveBeenCalled();
   });
 
-  it("preserves the complete inline seal value for downstream secret validation", async () => {
+  it("preserves the complete inline workflow value for downstream secret validation", async () => {
     const sealTellaExports = vi.fn(async (options: any) => {
       expect(options.exports[0].workflowId).toBe("Export-Story-vid_dynamic/Story=token");
       throw new Error("captured complete workflow value");
@@ -1848,14 +1918,21 @@ describe("GPT-Live preparation CLI", () => {
       "--version-a-source-variant=dynamic_editorial",
       "--version-a-video-id=vid_dynamic",
       "--version-a-workflow-id=Export-Story-vid_dynamic/Story=token",
-      "--version-a-download-url=https://prod-compose.tella.tv/a?signature=secret=a",
       "--version-b-source-variant=aimh_visual_host",
       "--version-b-video-id=vid_host",
-      "--version-b-workflow-id=Export-Story-vid_host/Story",
-      "--version-b-download-url=https://prod-compose.tella.tv/b?signature=secret=b"
+      "--version-b-workflow-id=Export-Story-vid_host/Story"
     ], {
       cwd: () => "/project",
-      loadEnvSnapshotFromFiles: async () => ({ values: {}, status: {} }),
+      loadEnvSnapshotFromFiles: async () => ({
+        values: {
+          GPT_LIVE_TELLA_VERSION_A_DOWNLOAD_URL: "https://prod-compose.tella.tv/a?secret-a",
+          GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL: "https://prod-compose.tella.tv/b?secret-b"
+        },
+        status: {
+          GPT_LIVE_TELLA_VERSION_A_DOWNLOAD_URL: { present: true, source: "shell" },
+          GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL: { present: true, source: "shell" }
+        }
+      }),
       sealTellaExports,
       ...virtualCliFileSystem
     })).rejects.toThrow("captured complete workflow value");

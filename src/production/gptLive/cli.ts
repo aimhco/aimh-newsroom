@@ -96,11 +96,9 @@ const SEAL_OPTIONS = [
   "version-a-source-variant",
   "version-a-video-id",
   "version-a-workflow-id",
-  "version-a-download-url",
   "version-b-source-variant",
   "version-b-video-id",
-  "version-b-workflow-id",
-  "version-b-download-url"
+  "version-b-workflow-id"
 ] as const;
 type SealOption = (typeof SEAL_OPTIONS)[number];
 
@@ -137,11 +135,20 @@ const parseSealArgs = (
 
 const buildSealIdentities = (
   flags: Partial<Record<SealOption, string>>,
-  env: Readonly<Record<string, string | undefined>>
+  env: EnvSnapshot
 ): readonly [TellaExportSealIdentity, TellaExportSealIdentity] => {
   const required = (flag: SealOption, envName: string): string => {
-    const value = flags[flag] ?? env[envName];
+    const value = flags[flag] ?? env.values[envName];
     if (!value?.trim()) throw new Error(`Missing --${flag} or ${envName}`);
+    return value;
+  };
+  const requiredShellDownloadUrl = (prefix: "A" | "B"): string => {
+    const envName = `GPT_LIVE_TELLA_VERSION_${prefix}_DOWNLOAD_URL`;
+    const status = env.status[envName];
+    const value = env.values[envName];
+    if (status?.present !== true || status.source !== "shell" || !value?.trim()) {
+      throw new Error(`${envName} must be set in the live shell environment`);
+    }
     return value;
   };
   const identity = (version: "version-a" | "version-b", prefix: "A" | "B") => {
@@ -163,10 +170,7 @@ const buildSealIdentities = (
         `${version}-workflow-id` as SealOption,
         `GPT_LIVE_TELLA_VERSION_${prefix}_WORKFLOW_ID`
       ),
-      downloadUrl: required(
-        `${version}-download-url` as SealOption,
-        `GPT_LIVE_TELLA_VERSION_${prefix}_DOWNLOAD_URL`
-      )
+      downloadUrl: requiredShellDownloadUrl(prefix)
     } as const;
   };
   return [identity("version-a", "A"), identity("version-b", "B")];
@@ -289,7 +293,7 @@ export async function runGptLiveCli<
       (defaultSealTellaExports as SealTellaExportsFunction<TResult>);
     return sealTellaExports({
       episodeDir,
-      exports: buildSealIdentities(sealArgs!.values, env.values)
+      exports: buildSealIdentities(sealArgs!.values, env)
     });
   }
 
