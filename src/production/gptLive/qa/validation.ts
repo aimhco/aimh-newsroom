@@ -6,6 +6,7 @@ import {
   assertSourceOutputLoudness,
   assertVariantDurationParity,
   buildLogoFilter,
+  buildProgramAudioPlan,
   deriveSharedSourceGains,
   deriveSourceDuckIntervals,
   type SourceIntervalGain
@@ -641,6 +642,47 @@ const validateBrandingAndAudio = (snapshot: GptLiveQaSnapshot): void => {
   }, "post-production assets");
 
   const versionA = postVariants(post).find((variant) => variant.name === "version-a")!;
+  const expectedProgramAudio = buildProgramAudioPlan(snapshot.episodeDir, snapshot.plan);
+  const reportedProgramAudio = requireRecord(post.programAudio, "program audio report");
+  exact(
+    Object.keys(reportedProgramAudio).sort(),
+    ["source", "tellaInputAudioUsed", "clipOrder", "inputs"].sort(),
+    "program audio policy keys"
+  );
+  if (
+    reportedProgramAudio.source !== "audited_plan_media" ||
+    reportedProgramAudio.tellaInputAudioUsed !== false ||
+    !Array.isArray(reportedProgramAudio.clipOrder) ||
+    !Array.isArray(reportedProgramAudio.inputs)
+  ) {
+    fail("program audio policy must exclude Tella input audio");
+  }
+  exact(
+    reportedProgramAudio.clipOrder,
+    expectedProgramAudio.clipOrder,
+    "program audio clip order"
+  );
+  exact(
+    reportedProgramAudio.inputs,
+    snapshot.generation.programAudio,
+    "program audio generation bindings"
+  );
+  for (const [index, expected] of expectedProgramAudio.inputs.entries()) {
+    const binding = (reportedProgramAudio.inputs as Array<Record<string, unknown>>)[index];
+    if (
+      !isRecord(binding) ||
+      binding.clipId !== expected.clipId ||
+      binding.kind !== expected.kind ||
+      binding.path !== expected.relativePath ||
+      binding.durationSeconds !== expected.durationSeconds ||
+      typeof binding.sha256 !== "string" ||
+      !HASH.test(binding.sha256) ||
+      !Number.isSafeInteger(binding.byteSize) ||
+      (binding.byteSize as number) <= 0
+    ) {
+      fail(`program audio binding is invalid: ${expected.clipId}`);
+    }
+  }
   const outroDurationSeconds = Number(Math.min(
     snapshot.production.audio.outroDurationSeconds,
     versionA.inputDurationSeconds

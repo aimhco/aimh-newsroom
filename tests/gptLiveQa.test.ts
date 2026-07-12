@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from "vitest";
 import { GPT_LIVE_CONTENT } from "../src/production/gptLive/content";
 import {
   buildPostProductionManifest,
+  buildProgramAudioPlan,
   deriveSharedSourceGains,
   deriveSourceDuckIntervals,
   type FinalMediaInspection,
@@ -203,6 +204,14 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
     outroMusicPath: GPT_LIVE_CONTENT.audio.outroMusicPath,
     outroDurationSeconds: GPT_LIVE_CONTENT.audio.outroDurationSeconds,
     logoSha256: sha("a"),
+    programAudio: buildProgramAudioPlan(EPISODE_DIR, plan).inputs.map((input, index) => ({
+      clipId: input.clipId,
+      kind: input.kind,
+      path: input.relativePath,
+      sha256: String(index).padStart(64, "0"),
+      byteSize: index + 1,
+      durationSeconds: input.durationSeconds
+    })),
     sourceGains,
     logoEvidence: (["version-a", "version-b"] as const).map((name) => ({
       name,
@@ -334,6 +343,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
         sha256: variant.sha256,
         byteSize: variant.byteSize
       })),
+      programAudio: postProduction.programAudio.inputs.map((input) => ({ ...input })),
       finalPaths: [
         join(EPISODE_DIR, "final", "version-a.mp4"),
         join(EPISODE_DIR, "final", "version-b.mp4")
@@ -1191,6 +1201,31 @@ describe("GPT-Live full production QA", () => {
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/outro|audio policy/i);
   });
 
+  it("rejects any report implying that Tella input audio was used", () => {
+    const snapshot = validSnapshot();
+    (snapshot.postProduction.programAudio as Record<string, unknown>).tellaInputAudioUsed = true;
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/Tella.*audio|program audio/i);
+  });
+
+  it("rejects any serialized program-audio graph implying Tella audio use", () => {
+    const snapshot = validSnapshot();
+    (snapshot.postProduction.programAudio as Record<string, unknown>).filterGraph =
+      "[0:a]anull[program]";
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/program audio|Tella.*audio/i);
+  });
+
+  it("rejects program-audio bindings that differ from publication validation", () => {
+    const snapshot = validSnapshot();
+    const inputs = (snapshot.postProduction.programAudio as {
+      inputs: Array<Record<string, unknown>>;
+    }).inputs;
+    inputs[0] = { ...inputs[0], sha256: sha("9"), byteSize: 999 };
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/program audio|generation/i);
+  });
+
   it("rejects QA without a resolved outro path", () => {
     const snapshot = validSnapshot();
     delete snapshot.env.AIMH_OUTRO_MUSIC_PATH;
@@ -1654,6 +1689,15 @@ describe("GPT-Live full production QA", () => {
             ? { ...variant, inputSha256: sha("9"), inputByteSize: variant.inputByteSize + 1 }
             : variant)
         })
+    },
+    {
+      name: "program audio hash",
+      mutate: (generation: PublishedGenerationValidation) => ({
+        ...generation,
+        programAudio: generation.programAudio.map((input, index) => index === 0
+          ? { ...input, sha256: sha("9"), byteSize: input.byteSize + 1 }
+          : input)
+      })
     }
   ])("aborts when the $name changes before QA publication", async ({ mutate }) => {
     const harness = await createQaRunHarness();
@@ -1702,7 +1746,8 @@ describe("GPT-Live full production QA", () => {
       expect(report.generation).toEqual({
         generationId: harness.generation.generationId,
         preparationFingerprint: harness.generation.preparationFingerprint,
-        variants: harness.generation.variants
+        variants: harness.generation.variants,
+        programAudio: harness.generation.programAudio
       });
     } finally {
       await rm(harness.episodeDir, { recursive: true, force: true });
@@ -1760,6 +1805,10 @@ describe("GPT-Live full production QA", () => {
     expect(comparison).toContain("outro-only tail signal does not prove CTA completion");
     expect(comparison).not.toMatch(/visual[- ]host|host usefulness/i);
     expect(comparison).not.toContain("Music is present");
+    expect(comparison).toContain(
+      "No intro or body music is mixed because program audio is reconstructed from audited source and narration assets."
+    );
+    expect(comparison).toContain("Subjective clarity still requires full real-time playback.");
     expect(comparison).toContain("Full real-time listening");
   });
 

@@ -18,6 +18,7 @@ import { validatePreparedGeneration } from "./preparation";
 import { withEpisodeProductionLock } from "./productionLock";
 import { validateContainedEpisodePaths } from "./qa/paths";
 import { assertTellaProgramDuration, validateTellaTimelineAudit } from "./tellaState";
+import type { TellaPlan } from "./tellaPlan";
 
 const DIALOGUE_VOLUME = 1;
 const OUTRO_MUSIC_VOLUME = 0.16;
@@ -99,11 +100,37 @@ export interface FinalMediaInspection {
 export interface BuildFinishFfmpegArgsOptions {
   readonly inputPath: string;
   readonly logoPath: string;
+  readonly programAudio: ProgramAudioPlan;
   readonly outroMusicPath: string;
   readonly outroDurationSeconds: number;
   readonly outputPath: string;
   readonly durationSeconds: number;
   readonly sourceGains: readonly SourceIntervalGain[];
+}
+
+export interface ProgramAudioInput {
+  readonly inputIndex: number;
+  readonly clipId: string;
+  readonly kind: "source_clip" | "narration";
+  readonly path: string;
+  readonly relativePath: string;
+  readonly durationSeconds: number;
+}
+
+export interface ProgramAudioPlan {
+  readonly source: "audited_plan_media";
+  readonly tellaInputAudioUsed: false;
+  readonly clipOrder: readonly string[];
+  readonly inputs: readonly ProgramAudioInput[];
+}
+
+export interface ProgramAudioBinding {
+  readonly clipId: string;
+  readonly kind: "source_clip" | "narration";
+  readonly path: string;
+  readonly sha256: string;
+  readonly byteSize: number;
+  readonly durationSeconds: number;
 }
 
 export interface PostProductionVariant {
@@ -126,6 +153,7 @@ export interface BuildPostProductionManifestOptions {
   readonly outroMusicPath: string;
   readonly outroDurationSeconds: number;
   readonly logoSha256: string;
+  readonly programAudio: readonly ProgramAudioBinding[];
   readonly sourceGains: readonly SourceIntervalResult[];
   readonly logoEvidence: readonly LogoEvidence[];
   readonly variants: readonly PostProductionVariant[];
@@ -163,6 +191,7 @@ export interface PublishedGenerationValidation {
     readonly sha256: string;
     readonly byteSize: number;
   }[];
+  readonly programAudio: readonly ProgramAudioBinding[];
   readonly finalPaths: readonly [string, string];
   readonly reportPath: string;
 }
@@ -312,6 +341,52 @@ export function buildLogoFilter(): string {
   return "[1:v]scale=150:-1,format=rgba,colorchannelmixer=aa=0.85[lg];[0:v][lg]overlay=W-w-24:24";
 }
 
+export function buildProgramAudioPlan(episodeDir: string, plan: TellaPlan): ProgramAudioPlan {
+  const root = resolve(episodeDir);
+  if (
+    plan.schemaVersion !== "0.1.0" ||
+    plan.productionId !== GPT_LIVE_CONTENT.id ||
+    plan.clips.length !== GPT_LIVE_CONTENT.timeline.length
+  ) {
+    throw new Error("Invalid GPT-Live program audio plan count or production");
+  }
+
+  const inputs = plan.clips.map((clip, index): ProgramAudioInput => {
+    const expected = GPT_LIVE_CONTENT.timeline[index]!;
+    if (clip.id !== expected.id || clip.kind !== expected.kind) {
+      throw new Error(`Invalid GPT-Live program audio plan order or kind at index ${index}`);
+    }
+    requirePositiveDuration(clip.durationSeconds, `program audio clip ${clip.id}`);
+    const expectedPath = clip.kind === "source_clip"
+      ? join(root, "source", `${clip.id}.mp4`)
+      : join(root, "master", `${clip.id}.mp4`);
+    const path = clip.kind === "source_clip" ? clip.mediaPath : clip.masterPath;
+    if (
+      typeof path !== "string" ||
+      !path ||
+      (clip.kind === "source_clip" && clip.preserveOriginalAudio !== true) ||
+      resolve(path) !== expectedPath
+    ) {
+      throw new Error(`Invalid GPT-Live program audio path: ${clip.id}`);
+    }
+    return {
+      inputIndex: index + 2,
+      clipId: clip.id,
+      kind: clip.kind,
+      path,
+      relativePath: relative(root, path).split(sep).join("/"),
+      durationSeconds: clip.durationSeconds
+    };
+  });
+
+  return {
+    source: "audited_plan_media",
+    tellaInputAudioUsed: false,
+    clipOrder: inputs.map(({ clipId }) => clipId),
+    inputs
+  };
+}
+
 export function deriveSourceDuckIntervals(plan: FinishPlan): DuckInterval[] {
   let cursorSeconds = 0;
   const intervals: DuckInterval[] = [];
@@ -386,22 +461,49 @@ export function buildSourceDialogueGainExpression(
 export function buildFinishFilterGraph(
   durationSeconds: number,
   outroDurationSeconds: number,
-  sourceGains: readonly SourceIntervalGain[]
+  sourceGains: readonly SourceIntervalGain[],
+  programAudio: ProgramAudioPlan
 ): string {
   const outroTiming = deriveOutroTiming(durationSeconds, outroDurationSeconds);
-  const dialogueGainExpression = buildSourceDialogueGainExpression(sourceGains);
   const duration = fixedSeconds(durationSeconds);
+  let sourceIndex = 0;
+  const programInputs = programAudio.inputs.map((input, index) => {
+    const clipDuration = fixedSeconds(input.durationSeconds);
+    let gainFilter = "";
+    if (input.kind === "source_clip") {
+      const gain = sourceGains[sourceIndex++];
+      if (!gain) throw new Error("Source gain count does not match program audio");
+      const localGain = buildSourceDialogueGainExpression([{
+        ...gain,
+        startSeconds: 0,
+        endSeconds: input.durationSeconds
+      }]);
+      gainFilter = `,volume='${localGain}':eval=frame`;
+    }
+    return `[${input.inputIndex}:a]aresample=48000,` +
+      "aformat=sample_fmts=fltp:channel_layouts=stereo," +
+      `apad=whole_dur=${clipDuration},atrim=duration=${clipDuration},` +
+      `asetpts=PTS-STARTPTS${gainFilter}[program-${index}]`;
+  });
+  if (sourceIndex !== sourceGains.length) {
+    throw new Error("Source gain count does not match program audio");
+  }
+  const concatInputs = programAudio.inputs.map((_, index) => `[program-${index}]`).join("");
+  const outroInputIndex = programAudio.inputs.length + 2;
   return [
     `${buildLogoFilter()}[vout]`,
-    `[0:a]apad=whole_dur=${duration},atrim=duration=${duration},asetpts=PTS-STARTPTS,` +
-      `volume='${dialogueGainExpression}':eval=frame[dialogue]`,
-    `[2:a]atrim=duration=${fixedSeconds(outroTiming.durationSeconds)},asetpts=PTS-STARTPTS,` +
+    ...programInputs,
+    `${concatInputs}concat=n=${programAudio.inputs.length}:v=0:a=1,` +
+      `apad=whole_dur=${duration},atrim=duration=${duration},asetpts=PTS-STARTPTS[program]`,
+    `[${outroInputIndex}:a]aresample=48000,` +
+      "aformat=sample_fmts=fltp:channel_layouts=stereo," +
+      `atrim=duration=${fixedSeconds(outroTiming.durationSeconds)},asetpts=PTS-STARTPTS,` +
       `afade=t=in:st=0:d=${fixedSeconds(OUTRO_FADE_IN_SECONDS)},` +
       `afade=t=out:st=${fixedSeconds(outroTiming.fadeOutStartSeconds)}:` +
       `d=${fixedSeconds(outroTiming.fadeOutSeconds)},` +
       `volume=${OUTRO_MUSIC_VOLUME.toFixed(3)},` +
       `adelay=${outroTiming.delayMilliseconds}:all=1[outro]`,
-    `[dialogue][outro]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,` +
+    `[program][outro]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,` +
       `alimiter=limit=0.95:attack=5:release=50:level=false:latency=true,` +
       `atrim=duration=${duration},asetpts=PTS-STARTPTS[aout]`
   ].join(";");
@@ -415,13 +517,15 @@ export function buildFinishFfmpegArgs(options: BuildFinishFfmpegArgsOptions): st
     options.inputPath,
     "-i",
     options.logoPath,
+    ...options.programAudio.inputs.flatMap(({ path }) => ["-i", path]),
     "-i",
     options.outroMusicPath,
     "-filter_complex",
     buildFinishFilterGraph(
       options.durationSeconds,
       options.outroDurationSeconds,
-      options.sourceGains
+      options.sourceGains,
+      options.programAudio
     ),
     "-map",
     "[vout]",
@@ -717,6 +821,12 @@ export function buildPostProductionManifest(options: BuildPostProductionManifest
         fadeOutSeconds: outroTiming.fadeOutSeconds
       }
     },
+    programAudio: {
+      source: "audited_plan_media" as const,
+      tellaInputAudioUsed: false as const,
+      clipOrder: options.programAudio.map(({ clipId }) => clipId),
+      inputs: options.programAudio.map((input) => ({ ...input }))
+    },
     settings: {
       logoFilter: buildLogoFilter(),
       exactAudioDuration: true,
@@ -787,6 +897,12 @@ interface PublishedGenerationManifest {
       readonly fadeOutSeconds: number;
     };
   };
+  readonly programAudio: {
+    readonly source: "audited_plan_media";
+    readonly tellaInputAudioUsed: false;
+    readonly clipOrder: readonly string[];
+    readonly inputs: readonly ProgramAudioBinding[];
+  };
   readonly variants: readonly PublishedVariantRecord[];
 }
 
@@ -807,6 +923,7 @@ const PUBLISHED_MANIFEST_KEYS = [
   "preparationFingerprint",
   "assets",
   "audioPolicy",
+  "programAudio",
   "settings",
   "sourceDialogue",
   "logoEvidence",
@@ -893,6 +1010,7 @@ const parsePublishedAudioContract = (text: string): PublishedAudioContract => {
 const parsePublishedGenerationManifest = (
   text: string,
   expectedAudio: PublishedAudioContract,
+  expectedProgramAudio: ProgramAudioPlan,
   expectedSourceIntervals: readonly DuckInterval[],
   expectedPreparationFingerprint: string
 ): PublishedGenerationManifest => {
@@ -907,6 +1025,7 @@ const parsePublishedGenerationManifest = (
   }
   const candidate = value;
   const audioPolicy = candidate.audioPolicy;
+  const programAudio = candidate.programAudio;
   const assets = candidate.assets;
   const settings = candidate.settings;
   const expectedSettings = {
@@ -964,6 +1083,45 @@ const parsePublishedGenerationManifest = (
     ])
   ) {
     throw new Error("Invalid published generation manifest audio policy");
+  }
+  if (
+    !isRecord(programAudio) ||
+    !hasExactKeys(programAudio, ["source", "tellaInputAudioUsed", "clipOrder", "inputs"]) ||
+    programAudio.source !== "audited_plan_media" ||
+    programAudio.tellaInputAudioUsed !== false ||
+    !Array.isArray(programAudio.clipOrder) ||
+    !Array.isArray(programAudio.inputs) ||
+    programAudio.inputs.length !== expectedProgramAudio.inputs.length ||
+    programAudio.clipOrder.length !== expectedProgramAudio.inputs.length
+  ) {
+    throw new Error("Invalid published generation manifest program audio policy");
+  }
+  for (const [index, expectedInput] of expectedProgramAudio.inputs.entries()) {
+    const binding = programAudio.inputs[index];
+    if (
+      programAudio.clipOrder[index] !== expectedInput.clipId ||
+      !isRecord(binding) ||
+      !hasExactKeys(binding, [
+        "clipId",
+        "kind",
+        "path",
+        "sha256",
+        "byteSize",
+        "durationSeconds"
+      ]) ||
+      binding.clipId !== expectedInput.clipId ||
+      binding.kind !== expectedInput.kind ||
+      binding.path !== expectedInput.relativePath ||
+      typeof binding.path !== "string" ||
+      resolve("/", binding.path) !== join("/", expectedInput.relativePath) ||
+      typeof binding.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(binding.sha256) ||
+      !Number.isSafeInteger(binding.byteSize) ||
+      (binding.byteSize as number) <= 0 ||
+      binding.durationSeconds !== expectedInput.durationSeconds
+    ) {
+      throw new Error(`Invalid published generation program audio binding: ${expectedInput.clipId}`);
+    }
   }
   const outro = audioPolicy.outro;
   if (
@@ -1270,6 +1428,7 @@ export async function validatePublishedGeneration(
     }
   };
   const plan = parseFinishPlan(planText);
+  const expectedProgramAudio = buildProgramAudioPlan(episodeDir, plan as TellaPlan);
   const prepared = validatePreparedGeneration(
     parseJson(preparedText, "prepared generation"),
     GPT_LIVE_CONTENT.id,
@@ -1299,13 +1458,19 @@ export async function validatePublishedGeneration(
   const manifest = parsePublishedGenerationManifest(
     manifestText,
     expectedAudio,
+    expectedProgramAudio,
     expectedSourceIntervals,
     prepared.manifestFingerprint
   );
 
   await validateContainedPaths(
     episodeDir,
-    [...inputPaths, finalPaths[0], finalPaths[1]],
+    [
+      ...inputPaths,
+      ...expectedProgramAudio.inputs.map(({ path }) => path),
+      finalPaths[0],
+      finalPaths[1]
+    ],
     lstat,
     realpath
   );
@@ -1317,6 +1482,19 @@ export async function validatePublishedGeneration(
       throw new Error(
         `Published Tella input mismatch for ${name}: expected ` +
         `${expected.inputByteSize} bytes/${expected.inputSha256}, received ` +
+        `${bytes.byteLength} bytes/${actualSha256}`
+      );
+    }
+  }
+  const programAudioBindings = manifest.programAudio.inputs;
+  for (const [index, expected] of programAudioBindings.entries()) {
+    const input = expectedProgramAudio.inputs[index]!;
+    const bytes = await readFileBytes(input.path);
+    const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+    if (bytes.byteLength !== expected.byteSize || actualSha256 !== expected.sha256) {
+      throw new Error(
+        `Published program audio mismatch for ${expected.clipId}: expected ` +
+        `${expected.byteSize} bytes/${expected.sha256}, received ` +
         `${bytes.byteLength} bytes/${actualSha256}`
       );
     }
@@ -1354,6 +1532,7 @@ export async function validatePublishedGeneration(
         byteSize: variant.byteSize
       };
     }),
+    programAudio: programAudioBindings.map((input) => ({ ...input })),
     finalPaths: [finalPaths[0], finalPaths[1]],
     reportPath
   };
@@ -1599,12 +1778,21 @@ async function finishGptLiveProductionUnlocked(
     }
   );
   validateTellaTimelineAudit(plan, parseJson(stateText, "Tella state"));
+  const programAudio = buildProgramAudioPlan(options.episodeDir, plan as TellaPlan);
   const duckIntervals = deriveSourceDuckIntervals(plan);
   await mkdir(finalDirectory, { recursive: true });
   await mkdir(reportsDirectory, { recursive: true });
   await validateContainedPaths(
     options.episodeDir,
-    [exportsDirectory, ...inputPaths, finalDirectory, ...finalPaths, reportsDirectory, reportPath],
+    [
+      exportsDirectory,
+      ...inputPaths,
+      ...programAudio.inputs.map(({ path }) => path),
+      finalDirectory,
+      ...finalPaths,
+      reportsDirectory,
+      reportPath
+    ],
     lstat,
     realpath
   );
@@ -1612,6 +1800,17 @@ async function finishGptLiveProductionUnlocked(
   const inputIntegrity = inputBytes.map((bytes) => ({
     inputSha256: createHash("sha256").update(bytes).digest("hex"),
     inputByteSize: bytes.byteLength
+  }));
+  const programAudioBindings = await Promise.all(programAudio.inputs.map(async (input) => {
+    const bytes = await readFileBytes(input.path);
+    return {
+      clipId: input.clipId,
+      kind: input.kind,
+      path: input.relativePath,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      byteSize: bytes.byteLength,
+      durationSeconds: input.durationSeconds
+    };
   }));
   const logoSha256 = createHash("sha256").update(await readFileBytes(logoPath)).digest("hex");
 
@@ -1661,15 +1860,18 @@ async function finishGptLiveProductionUnlocked(
       GPT_LIVE_CONTENT.audio.outroDurationSeconds,
       "GPT-Live finish preflight failed"
     );
-    const inputLoudness = await Promise.all(
-      definitions.map((definition) =>
-        Promise.all(duckIntervals.map((interval) => measure(ffmpegPath, definition.inputPath, interval)))
-      )
+    const sourceInputs = programAudio.inputs.filter((input) => input.kind === "source_clip");
+    const sourceLoudness = await Promise.all(
+      sourceInputs.map((input) =>
+        measure(ffmpegPath, input.path, {
+          startSeconds: 0,
+          endSeconds: input.durationSeconds
+        }))
     );
     const sourceGains = deriveSharedSourceGains(
       duckIntervals,
-      inputLoudness[0]!,
-      inputLoudness[1]!
+      sourceLoudness,
+      sourceLoudness
     );
 
     for (const [index, definition] of definitions.entries()) {
@@ -1684,6 +1886,7 @@ async function finishGptLiveProductionUnlocked(
         buildFinishFfmpegArgs({
           inputPath: definition.inputPath,
           logoPath,
+          programAudio,
           outroMusicPath,
           outroDurationSeconds: GPT_LIVE_CONTENT.audio.outroDurationSeconds,
           outputPath: stagedPaths[index]!,
@@ -1796,6 +1999,7 @@ async function finishGptLiveProductionUnlocked(
             outroMusicPath,
             outroDurationSeconds: GPT_LIVE_CONTENT.audio.outroDurationSeconds,
             logoSha256,
+            programAudio: programAudioBindings,
             sourceGains: sourceResults,
             logoEvidence,
             variants

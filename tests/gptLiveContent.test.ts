@@ -1114,6 +1114,7 @@ describe("GPT-Live production preparation", () => {
             preparationFingerprint: "b".repeat(64),
             reportSha256: "a".repeat(64),
             variants: [],
+            programAudio: [],
             finalPaths: [
               join(episodeDir, "final", "version-a.mp4"),
               join(episodeDir, "final", "version-b.mp4")

@@ -557,7 +557,8 @@ const buildSafeQaReport = (
     generation: {
       generationId: snapshot.generation.generationId,
       preparationFingerprint: snapshot.generation.preparationFingerprint,
-      variants: snapshot.generation.variants
+      variants: snapshot.generation.variants,
+      programAudio: snapshot.generation.programAudio
     },
     youtubeUploadEnabled: false,
     checks: {
@@ -607,6 +608,16 @@ const assertUnchangedPublishedGeneration = (
     initial.generationId === current.generationId &&
     initial.preparationFingerprint === current.preparationFingerprint &&
     initial.reportSha256 === current.reportSha256 &&
+    initial.programAudio.length === current.programAudio.length &&
+    initial.programAudio.every((input, index) => {
+      const currentInput = current.programAudio[index];
+      return currentInput?.clipId === input.clipId &&
+        currentInput.kind === input.kind &&
+        currentInput.path === input.path &&
+        currentInput.sha256 === input.sha256 &&
+        currentInput.byteSize === input.byteSize &&
+        currentInput.durationSeconds === input.durationSeconds;
+    }) &&
     initial.variants.length === current.variants.length &&
     initial.variants.every((variant, index) => {
       const currentVariant = current.variants[index];

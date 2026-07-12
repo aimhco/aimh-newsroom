@@ -17,6 +17,7 @@ import {
   assertFinalMediaContract,
   assertSourceOutputLoudness,
   assertVariantDurationParity,
+  buildProgramAudioPlan,
   buildFinishFfmpegArgs,
   buildLogoCornerSampleArgs,
   buildLogoFilter,
@@ -30,7 +31,9 @@ import {
   type FinalMediaInspection,
   type FinishPlan
 } from "../src/production/gptLive/finish";
+import { buildTellaPlan } from "../src/production/gptLive/tellaPlan";
 import { buildTellaTimelineAudit } from "../src/production/gptLive/tellaState";
+import { runCommand } from "../src/render/process";
 
 const plan = (durations = [3, 5.5, 2.25, 1]): FinishPlan => ({
   schemaVersion: "0.1.0",
@@ -71,7 +74,237 @@ const sourceGains = deriveSharedSourceGains(
   [-20, -25]
 );
 
+const canonicalProgramAudio = () => {
+  const episodeDir = "/episode";
+  const tellaPlan = buildTellaPlan({
+    episodeDir,
+    narrationAssets: GPT_LIVE_CONTENT.narration.map(({ id }, index) => ({
+      id,
+      audioPath: join(episodeDir, "voice", `${id}.mp3`),
+      durationSeconds: index + 1
+    }))
+  });
+  return buildProgramAudioPlan(episodeDir, tellaPlan);
+};
+
+const fakeProgramAudioBindings = () => canonicalProgramAudio().inputs.map((input, index) => ({
+  clipId: input.clipId,
+  kind: input.kind,
+  path: input.relativePath,
+  sha256: String(index).padStart(64, "0"),
+  byteSize: index + 1,
+  durationSeconds: input.durationSeconds
+}));
+
 describe("GPT-Live finishing filters", () => {
+  it("reconstructs real output audio from plan media and excludes continuous Tella audio", async () => {
+    const fixtureDir = await mkdtemp(join(tmpdir(), "gpt-live-program-audio-"));
+    const episodeDir = join(fixtureDir, "episode");
+    const tellaPath = join(episodeDir, "exports", "tella-a.mp4");
+    const logoPath = join(fixtureDir, "logo.png");
+    const outroPath = join(fixtureDir, "outro.m4a");
+    const outputPath = join(fixtureDir, "finished.mp4");
+    const pcmPath = join(fixtureDir, "finished.f32le");
+    const durationSeconds = 4.5;
+    await Promise.all(["exports", "source", "master", "voice"].map((directory) =>
+      mkdir(join(episodeDir, directory), { recursive: true })
+    ));
+
+    try {
+      await runCommand("ffmpeg", [
+        "-y",
+        "-f", "lavfi", "-i", `color=c=0x202020:s=320x180:r=30:d=${durationSeconds}`,
+        "-f", "lavfi", "-i", `sine=frequency=1000:sample_rate=48000:duration=${durationSeconds}`,
+        "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", tellaPath
+      ]);
+      await runCommand("ffmpeg", [
+        "-y", "-f", "lavfi", "-i", "color=c=white:s=32x16:d=0.1",
+        "-frames:v", "1", "-update", "1", logoPath
+      ]);
+      await runCommand("ffmpeg", [
+        "-y", "-f", "lavfi", "-i", "sine=frequency=1500:sample_rate=48000:duration=1",
+        "-c:a", "aac", outroPath
+      ]);
+
+      const basePlan = buildTellaPlan({
+        episodeDir,
+        narrationAssets: GPT_LIVE_CONTENT.narration.map(({ id }) => ({
+          id,
+          audioPath: join(episodeDir, "voice", `${id}.mp3`),
+          durationSeconds: 0.5
+        }))
+      });
+      const testPlan = {
+        ...basePlan,
+        clips: basePlan.clips.map((clip) => ({ ...clip, durationSeconds: 0.5 }))
+      };
+      const tones = [300, 500, 400, 600, 0, 700, 0, 800, 0];
+      await Promise.all(testPlan.clips.map((clip, index) => {
+        const path = clip.kind === "source_clip" ? clip.mediaPath : clip.masterPath;
+        const tone = tones[index]!;
+        const source = tone === 0
+          ? "anullsrc=r=48000:cl=stereo:d=0.5"
+          : `sine=frequency=${tone}:sample_rate=48000:duration=0.5`;
+        return runCommand("ffmpeg", [
+          "-y", "-f", "lavfi", "-i", source, "-c:a", "aac", path
+        ]);
+      }));
+
+      const programAudio = buildProgramAudioPlan(episodeDir, testPlan);
+      const sourceIntervals = deriveSourceDuckIntervals(testPlan);
+      const unitySourceGains = deriveSharedSourceGains(
+        sourceIntervals,
+        [-23, -23],
+        [-23, -23]
+      );
+      const args = buildFinishFfmpegArgs({
+        inputPath: tellaPath,
+        logoPath,
+        programAudio,
+        outroMusicPath: outroPath,
+        outroDurationSeconds: 1,
+        outputPath,
+        durationSeconds,
+        sourceGains: unitySourceGains
+      });
+      const graph = args[args.indexOf("-filter_complex") + 1]!;
+      expect(graph).not.toContain("[0:a]");
+      await runCommand("ffmpeg", args);
+      await runCommand("ffmpeg", [
+        "-y", "-i", outputPath, "-map", "0:a:0", "-ac", "1", "-ar", "48000",
+        "-f", "f32le", pcmPath
+      ]);
+
+      const pcmBytes = await readFile(pcmPath);
+      const samples = new Float32Array(
+        pcmBytes.buffer,
+        pcmBytes.byteOffset,
+        Math.floor(pcmBytes.byteLength / Float32Array.BYTES_PER_ELEMENT)
+      );
+      expect(Math.abs(samples.length / 48_000 - durationSeconds)).toBeLessThan(0.05);
+      const amplitude = (frequency: number, startSeconds: number, endSeconds: number) => {
+        const start = Math.floor(startSeconds * 48_000);
+        const end = Math.min(samples.length, Math.floor(endSeconds * 48_000));
+        let sine = 0;
+        let cosine = 0;
+        for (let index = start; index < end; index += 1) {
+          const phase = 2 * Math.PI * frequency * index / 48_000;
+          sine += samples[index]! * Math.sin(phase);
+          cosine += samples[index]! * Math.cos(phase);
+        }
+        return 2 * Math.hypot(sine, cosine) / (end - start);
+      };
+
+      expect(amplitude(1000, 0.1, 3.4)).toBeLessThan(0.002);
+      expect(amplitude(300, 0.1, 0.4)).toBeGreaterThan(0.03);
+      expect(amplitude(500, 0.6, 0.9)).toBeGreaterThan(0.03);
+      expect(amplitude(400, 1.1, 1.4)).toBeGreaterThan(0.03);
+      expect(amplitude(1500, 3.7, 4.2)).toBeGreaterThan(0.005);
+    } finally {
+      await rm(fixtureDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+
+  it("binds exactly nine plan-owned audio inputs in timeline order", () => {
+    const programAudio = canonicalProgramAudio();
+
+    expect(programAudio).toMatchObject({
+      source: "audited_plan_media",
+      tellaInputAudioUsed: false,
+      clipOrder: GPT_LIVE_CONTENT.timeline.map(({ id }) => id)
+    });
+    expect(programAudio.inputs).toHaveLength(9);
+    expect(programAudio.inputs.map(({ inputIndex, clipId, kind, path }) => ({
+      inputIndex,
+      clipId,
+      kind,
+      path
+    }))).toEqual(programAudio.inputs.map((input, index) => ({
+      inputIndex: index + 2,
+      clipId: GPT_LIVE_CONTENT.timeline[index]!.id,
+      kind: GPT_LIVE_CONTENT.timeline[index]!.kind,
+      path: input.kind === "source_clip"
+        ? join("/episode", "source", `${input.clipId}.mp4`)
+        : join("/episode", "master", `${input.clipId}.mp4`)
+    })));
+  });
+
+  it.each([
+    ["count", (clips: any[]) => clips.slice(0, -1)],
+    ["order", (clips: any[]) => [clips[1], clips[0], ...clips.slice(2)]],
+    ["kind", (clips: any[]) => [{ ...clips[0], kind: "narration" }, ...clips.slice(1)]],
+    ["path", (clips: any[]) => [{ ...clips[0], mediaPath: "/outside/source.mp4" }, ...clips.slice(1)]],
+    ["duration", (clips: any[]) => [{ ...clips[0], durationSeconds: 0 }, ...clips.slice(1)]]
+  ])("rejects invalid program-audio plan %s", (_name, mutate) => {
+    const episodeDir = "/episode";
+    const tellaPlan = buildTellaPlan({
+      episodeDir,
+      narrationAssets: GPT_LIVE_CONTENT.narration.map(({ id }) => ({
+        id,
+        audioPath: join(episodeDir, "voice", `${id}.mp3`),
+        durationSeconds: 1
+      }))
+    });
+
+    expect(() => buildProgramAudioPlan(episodeDir, {
+      ...tellaPlan,
+      clips: mutate([...tellaPlan.clips])
+    })).toThrow(/program audio/i);
+  });
+
+  it("rejects a program-audio plan with the wrong schema or source preservation contract", () => {
+    const episodeDir = "/episode";
+    const tellaPlan = buildTellaPlan({
+      episodeDir,
+      narrationAssets: GPT_LIVE_CONTENT.narration.map(({ id }) => ({
+        id,
+        audioPath: join(episodeDir, "voice", `${id}.mp3`),
+        durationSeconds: 1
+      }))
+    });
+
+    expect(() => buildProgramAudioPlan(episodeDir, {
+      ...tellaPlan,
+      schemaVersion: "9.9.9"
+    } as any)).toThrow(/program audio/i);
+    expect(() => buildProgramAudioPlan(episodeDir, {
+      ...tellaPlan,
+      clips: tellaPlan.clips.map((clip, index) => index === 0
+        ? { ...clip, preserveOriginalAudio: false }
+        : clip)
+    } as any)).toThrow(/program audio/i);
+  });
+
+  it("uses Tella only for video and maps plan audio before the final outro input", () => {
+    const programAudio = canonicalProgramAudio();
+    const args = buildFinishFfmpegArgs({
+      inputPath: "/episode/exports/tella-a.mp4",
+      logoPath: "/assets/logo.png",
+      programAudio,
+      outroMusicPath: "/assets/outro.mp3",
+      outroDurationSeconds: 2,
+      outputPath: "/episode/final/version-a.mp4",
+      durationSeconds: 30,
+      sourceGains
+    });
+    const inputPaths = args.flatMap((arg, index) => arg === "-i" ? [args[index + 1]!] : []);
+    const graph = args[args.indexOf("-filter_complex") + 1]!;
+
+    expect(inputPaths).toEqual([
+      "/episode/exports/tella-a.mp4",
+      "/assets/logo.png",
+      ...programAudio.inputs.map(({ path }) => path),
+      "/assets/outro.mp3"
+    ]);
+    expect(graph).not.toContain("[0:a]");
+    expect(graph).toContain("[2:a]");
+    expect(graph).toContain("[10:a]");
+    expect(graph).toContain("[11:a]aresample=48000");
+    expect(graph).toContain("atrim=duration=2.000");
+    expect(graph).toContain("concat=n=9:v=0:a=1");
+  });
+
   it("returns the exact AIMH logo treatment", () => {
     expect(buildLogoFilter()).toBe(
       "[1:v]scale=150:-1,format=rgba,colorchannelmixer=aa=0.85[lg];[0:v][lg]overlay=W-w-24:24"
@@ -125,6 +358,7 @@ describe("GPT-Live finishing filters", () => {
     const args = buildFinishFfmpegArgs({
         inputPath: "/episode/exports/tella-a.mp4",
         logoPath: "/assets/logo.png",
+        programAudio: canonicalProgramAudio(),
         outroMusicPath: "/assets/Outro_Much_Higher_Causmic.mp3",
         outroDurationSeconds: 7,
         outputPath: "/episode/final/version-a.tmp.mp4",
@@ -132,21 +366,20 @@ describe("GPT-Live finishing filters", () => {
         sourceGains
       });
     expect(args).not.toContain("-stream_loop");
-    expect(args.slice(0, 7)).toEqual([
+    expect(args.slice(0, 5)).toEqual([
       "-y",
       "-i",
       "/episode/exports/tella-a.mp4",
       "-i",
-      "/assets/logo.png",
-      "-i",
-      "/assets/Outro_Much_Higher_Causmic.mp3"
+      "/assets/logo.png"
     ]);
     const graph = args[args.indexOf("-filter_complex") + 1]!;
     expect(graph).toContain(buildLogoFilter());
     expect(graph).toContain("apad=whole_dur=150.000");
     expect(graph).toContain("atrim=duration=150.000");
-    expect(graph).toContain("between(t,0.000,3.000)");
-    expect(graph).toContain("[2:a]atrim=duration=7.000,asetpts=PTS-STARTPTS");
+    expect(graph).toContain("between(t,0.000,12.350)");
+    expect(graph).toContain("[11:a]aresample=48000");
+    expect(graph).toContain("atrim=duration=7.000,asetpts=PTS-STARTPTS");
     expect(graph).toContain("afade=t=in:st=0:d=0.250");
     expect(graph).toContain("afade=t=out:st=6.250:d=0.750");
     expect(graph).toContain("volume=0.160");
@@ -197,15 +430,17 @@ describe("GPT-Live finishing filters", () => {
     const args = buildFinishFfmpegArgs({
       inputPath: "/episode/exports/tella-a.mp4",
       logoPath: "/assets/logo.png",
+      programAudio: canonicalProgramAudio(),
       outroMusicPath: "/assets/outro.mp3",
       outroDurationSeconds: 7,
       outputPath: "/episode/final/version-a.tmp.mp4",
       durationSeconds: 0.5,
-      sourceGains: []
+      sourceGains
     });
     const graph = args[args.indexOf("-filter_complex") + 1]!;
 
-    expect(graph).toContain("[2:a]atrim=duration=0.500");
+    expect(graph).toContain("[11:a]aresample=48000");
+    expect(graph).toContain("atrim=duration=0.500");
     expect(graph).toContain("afade=t=out:st=0.000:d=0.500");
     expect(graph).toContain("adelay=0:all=1");
     expect(graph).not.toContain("st=-");
@@ -216,6 +451,7 @@ describe("GPT-Live finishing filters", () => {
   it("builds identical finishing settings for both variants", () => {
     const shared = {
       logoPath: "/assets/logo.png",
+      programAudio: canonicalProgramAudio(),
       outroMusicPath: "/assets/music.mp3",
       outroDurationSeconds: 7,
       durationSeconds: 10.75,
@@ -302,7 +538,7 @@ describe("GPT-Live post-production publication", () => {
   const createContainedEpisode = async () => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-finish-contained-"));
     await Promise.all(
-      ["assets", "voice", "tella", "exports", "final", "reports"].map((directory) =>
+      ["assets", "voice", "tella", "exports", "final", "reports", "source", "master"].map((directory) =>
         mkdir(join(episodeDir, directory), { recursive: true })
       )
     );
@@ -319,7 +555,25 @@ describe("GPT-Live post-production publication", () => {
         outroDurationSeconds: 7
       }
     };
-    const episodePlan = plan();
+    const baseEpisodePlan = buildTellaPlan({
+      episodeDir,
+      narrationAssets: GPT_LIVE_CONTENT.narration.map(({ id }, index) => ({
+        id,
+        audioPath: join(episodeDir, "voice", `${id}.mp3`),
+        durationSeconds: index === 0 ? 5.5 : 1 / 6
+      }))
+    });
+    const episodePlan = {
+      ...baseEpisodePlan,
+      clips: baseEpisodePlan.clips.map((clip) => ({
+        ...clip,
+        durationSeconds: clip.id === "clip_translation"
+          ? 3
+          : clip.id === "clip_interruption"
+            ? 2.25
+            : clip.durationSeconds
+      }))
+    };
     const voice = { provider: "elevenlabs", chunks: [], warnings: [] };
     const sourceMatrix = "test source matrix";
     const sourceManifest = { schemaVersion: "0.1.0", productionId: GPT_LIVE_CONTENT.id, sources: [] };
@@ -399,6 +653,11 @@ describe("GPT-Live post-production publication", () => {
       writeFile(join(episodeDir, "tella", "state.json"), JSON.stringify({ ...state, timelineAudit }), "utf8"),
       writeFile(join(episodeDir, "exports", "tella-a.mp4"), "export-a", "utf8"),
       writeFile(join(episodeDir, "exports", "tella-b.mp4"), "export-b", "utf8"),
+      ...episodePlan.clips.map((clip) => writeFile(
+        clip.kind === "source_clip" ? clip.mediaPath : clip.masterPath,
+        `program-audio-${clip.id}`,
+        "utf8"
+      )),
       writeFile(join(episodeDir, "final", "version-a.mp4"), "approved-a", "utf8"),
       writeFile(join(episodeDir, "final", "version-b.mp4"), "approved-b", "utf8"),
       writeFile(join(episodeDir, "reports", "post-production.json"), "{}\n", "utf8"),
@@ -444,6 +703,15 @@ describe("GPT-Live post-production publication", () => {
 
   it("binds the prepared fingerprint and exact Tella inputs in the post-production manifest", () => {
     const preparationFingerprint = sha256("prepared-generation");
+    const programAudio = canonicalProgramAudio();
+    const programAudioBindings = programAudio.inputs.map((input, index) => ({
+      clipId: input.clipId,
+      kind: input.kind,
+      path: input.relativePath,
+      sha256: String(index).padStart(64, "0"),
+      byteSize: index + 1,
+      durationSeconds: input.durationSeconds
+    }));
     const manifest = buildPostProductionManifest({
       productionId: GPT_LIVE_CONTENT.id,
       generationId: "00000000-0000-4000-8000-000000000000",
@@ -452,6 +720,7 @@ describe("GPT-Live post-production publication", () => {
       outroMusicPath: "/assets/outro.mp3",
       outroDurationSeconds: 7,
       logoSha256: sha256("logo"),
+      programAudio: programAudioBindings,
       sourceGains: [],
       logoEvidence: [],
       variants: [
@@ -484,6 +753,12 @@ describe("GPT-Live post-production publication", () => {
 
     expect(manifest).toMatchObject({
       preparationFingerprint,
+      programAudio: {
+        source: "audited_plan_media",
+        tellaInputAudioUsed: false,
+        clipOrder: programAudio.clipOrder,
+        inputs: programAudioBindings
+      },
       variants: [
         { inputSha256: sha256("export-a"), inputByteSize: 8 },
         { inputSha256: sha256("export-b"), inputByteSize: 8 }
@@ -500,6 +775,22 @@ describe("GPT-Live post-production publication", () => {
     const prepared = JSON.parse(
       await readFile(join(episodeDir, "reports", "prepared.json"), "utf8")
     ) as { manifestFingerprint: string };
+    const episodePlan = JSON.parse(
+      await readFile(join(episodeDir, "tella", "plan.json"), "utf8")
+    );
+    const programAudio = await Promise.all(
+      buildProgramAudioPlan(episodeDir, episodePlan).inputs.map(async (input) => {
+        const bytes = await readFile(input.path);
+        return {
+          clipId: input.clipId,
+          kind: input.kind,
+          path: input.relativePath,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          byteSize: bytes.byteLength,
+          durationSeconds: input.durationSeconds
+        };
+      })
+    );
     const report = buildPostProductionManifest({
       productionId: GPT_LIVE_CONTENT.id,
       generationId,
@@ -508,6 +799,7 @@ describe("GPT-Live post-production publication", () => {
       outroMusicPath: "/assets/outro.mp3",
       outroDurationSeconds: 7,
       logoSha256: sha256("logo-bytes"),
+      programAudio,
       sourceGains: sourceGains.map((gain) => ({
         ...gain,
         outputLufsA: -23,
@@ -612,6 +904,16 @@ describe("GPT-Live post-production publication", () => {
         await rm(join(episodeDir, "reports", "post-production.json"));
         await symlink(outsideFile, join(episodeDir, "reports", "post-production.json"));
       }
+    },
+    {
+      name: "program audio file",
+      replace: async (episodeDir: string, outsideDir: string) => {
+        const outsideFile = join(outsideDir, "outside-program.mp4");
+        const sourcePath = join(episodeDir, "source", "clip_translation.mp4");
+        await writeFile(outsideFile, "outside", "utf8");
+        await rm(sourcePath);
+        await symlink(outsideFile, sourcePath);
+      }
     }
   ])("rejects a symlinked $name before running commands or writing reports", async ({ replace }) => {
     const episodeDir = await createContainedEpisode();
@@ -637,6 +939,26 @@ describe("GPT-Live post-production publication", () => {
     }
   });
 
+  it("rejects missing program audio before loudness measurement or FFmpeg", async () => {
+    const episodeDir = await createContainedEpisode();
+    const measureIntervalLoudness = vi.fn(async (_ffmpeg: string, _file: string) => -23);
+    const runCommand = vi.fn(async () => ({ stdout: "", stderr: "" }));
+    await rm(join(episodeDir, "master", "narration_hook.mp4"));
+
+    try {
+      await expect(finishGptLiveProduction(finishOptions(episodeDir), {
+        access: async () => undefined,
+        inspectFinalMediaFile: async () => validInspection(11.75),
+        measureIntervalLoudness,
+        runCommand
+      })).rejects.toThrow(/missing|not found|ENOENT|program audio/i);
+      expect(measureIntervalLoudness).not.toHaveBeenCalled();
+      expect(runCommand).not.toHaveBeenCalled();
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
   it("creates a secret-free manifest with only safe relative asset and media paths", () => {
     const manifest = buildPostProductionManifest({
       productionId: "test-production",
@@ -646,6 +968,7 @@ describe("GPT-Live post-production publication", () => {
       outroMusicPath: "/Users/editor/private/Outro_Much_Higher_Causmic.mp3",
       outroDurationSeconds: 7,
       logoSha256: "a".repeat(64),
+      programAudio: fakeProgramAudioBindings(),
       sourceGains: sourceGains.map((gain, index) => ({
         ...gain,
         outputLufsA: [-22.9, -23.1][index]!,
@@ -744,6 +1067,7 @@ describe("GPT-Live post-production publication", () => {
       outroMusicPath: "/assets/outro.mp3",
       outroDurationSeconds: 7,
       logoSha256: "a".repeat(64),
+      programAudio: fakeProgramAudioBindings(),
       sourceGains: [],
       logoEvidence: [],
       variants: (["version-a", "version-b"] as const).map((name) => ({
@@ -1023,6 +1347,27 @@ describe("GPT-Live post-production publication", () => {
     }
   });
 
+  it("rejects plan-owned program audio mutated after publication", async () => {
+    const episodeDir = await createContainedEpisode();
+    await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
+    await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
+    await writeGenerationMarker(episodeDir, "current-a", "current-b");
+    const sourcePath = join(episodeDir, "source", "clip_translation.mp4");
+
+    try {
+      const validation = await validatePublishedGeneration(episodeDir);
+      expect(validation.programAudio[0]).toMatchObject({
+        clipId: "clip_translation",
+        path: "source/clip_translation.mp4"
+      });
+      await writeFile(sourcePath, "mutated-program-audio", "utf8");
+
+      await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(/program audio|clip_translation/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a published generation after its prepared inputs become stale", async () => {
     const episodeDir = await createContainedEpisode();
     await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
@@ -1180,6 +1525,7 @@ describe("GPT-Live post-production publication", () => {
     const episodeDir = await createContainedEpisode();
     const events: string[] = [];
     const finishArgs: string[][] = [];
+    const measureIntervalLoudness = vi.fn(async (_ffmpeg: string, _file: string) => -23);
     const validateGeneration = vi.fn(async () => {
       events.push("validate");
       return {
@@ -1187,6 +1533,7 @@ describe("GPT-Live post-production publication", () => {
         preparationFingerprint: "c".repeat(64),
         reportSha256: "c".repeat(64),
         variants: publishedVariants,
+        programAudio: fakeProgramAudioBindings(),
         finalPaths: [
           join(episodeDir, "final", "version-a.mp4"),
           join(episodeDir, "final", "version-b.mp4")
@@ -1206,7 +1553,7 @@ describe("GPT-Live post-production publication", () => {
           return readFile(path);
         },
         inspectFinalMediaFile: async () => validInspection(11.75),
-        measureIntervalLoudness: async () => -23,
+        measureIntervalLoudness,
         sampleLogoCornerFrameHash: async (_ffmpeg, path) =>
           path.includes("exports") ? "a".repeat(64) : "b".repeat(64),
         runCommand: async (_command, args) => {
@@ -1237,16 +1584,27 @@ describe("GPT-Live post-production publication", () => {
         "validate"
       ]);
       expect(finishArgs).toHaveLength(2);
+      expect(measureIntervalLoudness.mock.calls.slice(0, 2).map((call) => call[1])).toEqual([
+        join(episodeDir, "source", "clip_translation.mp4"),
+        join(episodeDir, "source", "clip_interruption.mp4")
+      ]);
       for (const args of finishArgs) {
         expect(args).not.toContain("-stream_loop");
-        expect(args.slice(3, 7)).toEqual([
-          "-i",
+        expect(args.flatMap((arg, index) => arg === "-i" ? [args[index + 1]!] : [])).toEqual([
+          expect.stringMatching(/exports\/tella-[ab]\.mp4$/),
           "/assets/logo.png",
-          "-i",
+          ...GPT_LIVE_CONTENT.timeline.map((clip) => join(
+            episodeDir,
+            clip.kind === "source_clip" ? "source" : "master",
+            `${clip.id}.mp4`
+          )),
           "/assets/outro.mp3"
         ]);
         const graph = args[args.indexOf("-filter_complex") + 1]!;
-        expect(graph).toContain("[2:a]atrim=duration=7.000");
+        expect(graph).not.toContain("[0:a]");
+        expect(graph.match(/volume='/g)).toHaveLength(2);
+        expect(graph).toContain("[11:a]aresample=48000");
+        expect(graph).toContain("atrim=duration=7.000");
         expect(graph).toContain("adelay=4750:all=1");
       }
       expect(validateGeneration).toHaveBeenCalledWith(episodeDir);
@@ -1291,6 +1649,7 @@ describe("GPT-Live post-production publication", () => {
           preparationFingerprint: "c".repeat(64),
           reportSha256: "c".repeat(64),
           variants: publishedVariants,
+          programAudio: fakeProgramAudioBindings(),
           finalPaths: [
             join(episodeDir, "final", "version-a.mp4"),
             join(episodeDir, "final", "version-b.mp4")
@@ -1392,6 +1751,7 @@ describe("GPT-Live post-production publication", () => {
           preparationFingerprint: "c".repeat(64),
           reportSha256: "c".repeat(64),
           variants: publishedVariants,
+          programAudio: fakeProgramAudioBindings(),
           finalPaths: [
             join(episodeDir, "final", "version-a.mp4"),
             join(episodeDir, "final", "version-b.mp4")
