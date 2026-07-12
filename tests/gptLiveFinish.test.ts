@@ -19,7 +19,6 @@ import {
   buildFinishFfmpegArgs,
   buildLogoCornerSampleArgs,
   buildLogoFilter,
-  buildMusicVolumeExpression,
   buildPostProductionManifest,
   buildSourceDialogueGainExpression,
   deriveSharedSourceGains,
@@ -84,16 +83,6 @@ describe("GPT-Live finishing filters", () => {
     ]);
   });
 
-  it("builds a conservative music expression covering both source intervals", () => {
-    const expression = buildMusicVolumeExpression(deriveSourceDuckIntervals(plan()));
-    expect(expression).toContain("between(t,0.000,3.000)");
-    expect(expression).toContain("between(t,3.000,3.100)");
-    expect(expression).toContain("between(t,8.400,8.500)");
-    expect(expression).toContain("between(t,10.750,10.850)");
-    expect(expression).toContain("0.020");
-    expect(expression).toContain("0.070");
-  });
-
   it("derives one clamped shared gain policy from A/B interval measurements", () => {
     expect(sourceGains).toEqual([
       expect.objectContaining({
@@ -130,32 +119,41 @@ describe("GPT-Live finishing filters", () => {
     ).toBe(-22.9);
   });
 
-  it("uses exact input ordering, shared graph, maps, and encoding settings", () => {
+  it("mixes only a seven-second outro at the end of a 150-second program", () => {
     const args = buildFinishFfmpegArgs({
         inputPath: "/episode/exports/tella-a.mp4",
         logoPath: "/assets/logo.png",
-        musicPath: "/assets/Outro_Much_Higher_Causmic.mp3",
+        outroMusicPath: "/assets/Outro_Much_Higher_Causmic.mp3",
+        outroDurationSeconds: 7,
         outputPath: "/episode/final/version-a.tmp.mp4",
-        durationSeconds: 10.75,
-        duckIntervals: deriveSourceDuckIntervals(plan()),
+        durationSeconds: 150,
         sourceGains
       });
-    expect(args.slice(0, 9)).toEqual([
+    expect(args).not.toContain("-stream_loop");
+    expect(args.slice(0, 7)).toEqual([
       "-y",
       "-i",
       "/episode/exports/tella-a.mp4",
       "-i",
       "/assets/logo.png",
-      "-stream_loop",
-      "-1",
       "-i",
       "/assets/Outro_Much_Higher_Causmic.mp3"
     ]);
     const graph = args[args.indexOf("-filter_complex") + 1]!;
-    expect(graph).toContain("apad=whole_dur=10.750");
-    expect(graph).toContain("atrim=duration=10.750");
-    expect(graph).toContain("amix=inputs=2:duration=longest");
+    expect(graph).toContain(buildLogoFilter());
+    expect(graph).toContain("apad=whole_dur=150.000");
+    expect(graph).toContain("atrim=duration=150.000");
+    expect(graph).toContain("between(t,0.000,3.000)");
+    expect(graph).toContain("[2:a]atrim=duration=7.000,asetpts=PTS-STARTPTS");
+    expect(graph).toContain("afade=t=in:st=0:d=0.250");
+    expect(graph).toContain("afade=t=out:st=6.250:d=0.750");
+    expect(graph).toContain("volume=0.160");
+    expect(graph).toContain("adelay=143000|143000");
+    expect(graph).toContain("amix=inputs=2:duration=longest:dropout_transition=0:normalize=0");
     expect(graph).toContain("alimiter=limit=0.95:attack=5:release=50:level=false:latency=true");
+    expect(graph).not.toContain("0.070");
+    expect(graph).not.toContain("0.020");
+    expect(graph).not.toContain("volume='min(");
     expect(args.slice(args.indexOf("-map"))).toEqual([
       "-map",
       "[vout]",
@@ -186,19 +184,39 @@ describe("GPT-Live finishing filters", () => {
       "-ac",
       "2",
       "-t",
-      "10.750",
+      "150.000",
       "-movflags",
       "+faststart",
       "/episode/final/version-a.tmp.mp4"
     ]);
   });
 
+  it("clamps the outro to a short program without negative fade or delay times", () => {
+    const args = buildFinishFfmpegArgs({
+      inputPath: "/episode/exports/tella-a.mp4",
+      logoPath: "/assets/logo.png",
+      outroMusicPath: "/assets/outro.mp3",
+      outroDurationSeconds: 7,
+      outputPath: "/episode/final/version-a.tmp.mp4",
+      durationSeconds: 0.5,
+      sourceGains: []
+    });
+    const graph = args[args.indexOf("-filter_complex") + 1]!;
+
+    expect(graph).toContain("[2:a]atrim=duration=0.500");
+    expect(graph).toContain("afade=t=out:st=0.000:d=0.750");
+    expect(graph).toContain("adelay=0|0");
+    expect(graph).not.toContain("st=-");
+    expect(graph).not.toContain("adelay=-");
+    expect(args).not.toContain("-stream_loop");
+  });
+
   it("builds identical finishing settings for both variants", () => {
     const shared = {
       logoPath: "/assets/logo.png",
-      musicPath: "/assets/music.mp3",
+      outroMusicPath: "/assets/music.mp3",
+      outroDurationSeconds: 7,
       durationSeconds: 10.75,
-      duckIntervals: deriveSourceDuckIntervals(plan()),
       sourceGains
     };
     const a = buildFinishFfmpegArgs({
@@ -324,6 +342,17 @@ describe("GPT-Live post-production publication", () => {
       status: "finished",
       productionId: "test-production",
       generationId,
+      audioPolicy: {
+        introMusic: false,
+        bodyMusic: false,
+        outro: {
+          file: "outro.mp3",
+          startSeconds: 3.75,
+          durationSeconds: 7,
+          fadeInSeconds: 0.25,
+          fadeOutSeconds: 0.75
+        }
+      },
       variants: [
         {
           name: "version-a",
@@ -425,9 +454,9 @@ describe("GPT-Live post-production publication", () => {
       productionId: "test-production",
       generationId: "00000000-0000-4000-8000-000000000000",
       logoPath: "/Users/editor/private/logo.png",
-      musicPath: "/Users/editor/private/Outro_Much_Higher_Causmic.mp3",
+      outroMusicPath: "/Users/editor/private/Outro_Much_Higher_Causmic.mp3",
+      outroDurationSeconds: 7,
       logoSha256: "a".repeat(64),
-      duckIntervals: deriveSourceDuckIntervals(plan()),
       sourceGains: sourceGains.map((gain, index) => ({
         ...gain,
         outputLufsA: [-22.9, -23.1][index]!,
@@ -472,8 +501,18 @@ describe("GPT-Live post-production publication", () => {
       generationId: "00000000-0000-4000-8000-000000000000",
       assets: {
         logo: "logo.png",
-        logoSha256: "a".repeat(64),
-        music: "Outro_Much_Higher_Causmic.mp3"
+        logoSha256: "a".repeat(64)
+      },
+      audioPolicy: {
+        introMusic: false,
+        bodyMusic: false,
+        outro: {
+          file: "Outro_Much_Higher_Causmic.mp3",
+          startSeconds: 3.75,
+          durationSeconds: 7,
+          fadeInSeconds: 0.25,
+          fadeOutSeconds: 0.75
+        }
       },
       sourceDialogue: {
         targetLufs: -23,
@@ -484,13 +523,14 @@ describe("GPT-Live post-production publication", () => {
         ])
       },
       settings: {
-        dialogueVolume: 1,
-        normalMusicVolume: 0.07,
-        duckedMusicVolume: 0.02,
         videoCodec: "libx264",
         audioCodec: "aac"
       }
     });
+    expect(manifest).not.toHaveProperty("duckIntervals");
+    expect(manifest.settings).not.toHaveProperty("normalMusicVolume");
+    expect(manifest.settings).not.toHaveProperty("duckedMusicVolume");
+    expect(manifest.settings).not.toHaveProperty("musicLoop");
     expect(manifest.variants.map(({ inputPath, outputPath }) => ({ inputPath, outputPath }))).toEqual([
       { inputPath: "exports/tella-a.mp4", outputPath: "final/version-a.mp4" },
       { inputPath: "exports/tella-b.mp4", outputPath: "final/version-b.mp4" }
@@ -500,6 +540,25 @@ describe("GPT-Live post-production publication", () => {
       { sha256: "9".repeat(64), byteSize: 1001 }
     ]);
     expect(serialized).not.toMatch(/\/Users|\/private|secret|token|api.?key/i);
+  });
+
+  it("rejects a published generation marker without the outro audio policy", async () => {
+    const episodeDir = await createContainedEpisode();
+    await writeFile(join(episodeDir, "final", "version-a.mp4"), "current-a", "utf8");
+    await writeFile(join(episodeDir, "final", "version-b.mp4"), "current-b", "utf8");
+    const report = await writeGenerationMarker(episodeDir, "current-a", "current-b");
+    const { audioPolicy: _audioPolicy, ...legacyReport } = report;
+    await writeFile(
+      join(episodeDir, "reports", "post-production.json"),
+      `${JSON.stringify(legacyReport, null, 2)}\n`,
+      "utf8"
+    );
+
+    try {
+      await expect(validatePublishedGeneration(episodeDir)).rejects.toThrow(/audio policy|manifest/i);
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
   });
 
   it("exports the Task 10 QA validator for current generation and explicit paths", async () => {
@@ -592,6 +651,7 @@ describe("GPT-Live post-production publication", () => {
     const transactionId = "00000000-0000-4000-8000-000000000000";
     const episodeDir = await createContainedEpisode();
     const events: string[] = [];
+    const finishArgs: string[][] = [];
     const validateGeneration = vi.fn(async () => {
       events.push("validate");
       return {
@@ -620,6 +680,7 @@ describe("GPT-Live post-production publication", () => {
         sampleLogoCornerFrameHash: async (_ffmpeg, path) =>
           path.includes("exports") ? "a".repeat(64) : "b".repeat(64),
         runCommand: async (_command, args) => {
+          finishArgs.push([...args]);
           await writeFile(args.at(-1)!, "new-final", "utf8");
           return { stdout: "", stderr: "" };
         },
@@ -645,6 +706,19 @@ describe("GPT-Live post-production publication", () => {
         "publish-report",
         "validate"
       ]);
+      expect(finishArgs).toHaveLength(2);
+      for (const args of finishArgs) {
+        expect(args).not.toContain("-stream_loop");
+        expect(args.slice(3, 7)).toEqual([
+          "-i",
+          "/assets/logo.png",
+          "-i",
+          "/assets/outro.mp3"
+        ]);
+        const graph = args[args.indexOf("-filter_complex") + 1]!;
+        expect(graph).toContain("[2:a]atrim=duration=7.000");
+        expect(graph).toContain("adelay=3750|3750");
+      }
       expect(validateGeneration).toHaveBeenCalledWith(episodeDir);
     } finally {
       await rm(episodeDir, { recursive: true, force: true });

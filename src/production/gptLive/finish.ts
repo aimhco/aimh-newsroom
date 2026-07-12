@@ -13,12 +13,14 @@ import {
 import { basename, join, relative, resolve, sep } from "node:path";
 import { runCommand as defaultRunCommand } from "../../render/process";
 import { writeJsonAtomic as defaultWriteJsonAtomic } from "./atomicFiles";
+import { GPT_LIVE_CONTENT } from "./content";
 import { withEpisodeProductionLock } from "./productionLock";
 import { validateContainedEpisodePaths } from "./qa/paths";
 
-const NORMAL_MUSIC_VOLUME = 0.07;
-const DUCKED_MUSIC_VOLUME = 0.02;
 const DIALOGUE_VOLUME = 1;
+const OUTRO_MUSIC_VOLUME = 0.16;
+const OUTRO_FADE_IN_SECONDS = 0.25;
+const OUTRO_FADE_OUT_SECONDS = 0.75;
 const DURATION_TOLERANCE_SECONDS = 0.25;
 const VARIANT_DURATION_TOLERANCE_SECONDS = 0.5;
 const FRAME_RATE_TOLERANCE = 0.001;
@@ -94,10 +96,10 @@ export interface FinalMediaInspection {
 export interface BuildFinishFfmpegArgsOptions {
   readonly inputPath: string;
   readonly logoPath: string;
-  readonly musicPath: string;
+  readonly outroMusicPath: string;
+  readonly outroDurationSeconds: number;
   readonly outputPath: string;
   readonly durationSeconds: number;
-  readonly duckIntervals: readonly DuckInterval[];
   readonly sourceGains: readonly SourceIntervalGain[];
 }
 
@@ -115,9 +117,9 @@ export interface BuildPostProductionManifestOptions {
   readonly productionId: string;
   readonly generationId: string;
   readonly logoPath: string;
-  readonly musicPath: string;
+  readonly outroMusicPath: string;
+  readonly outroDurationSeconds: number;
   readonly logoSha256: string;
-  readonly duckIntervals: readonly DuckInterval[];
   readonly sourceGains: readonly SourceIntervalResult[];
   readonly logoEvidence: readonly LogoEvidence[];
   readonly variants: readonly PostProductionVariant[];
@@ -299,28 +301,6 @@ export function deriveSharedSourceGains(
   });
 }
 
-const musicIntervalExpression = ({ startSeconds, endSeconds }: DuckInterval): string => {
-  const rampStart = Math.max(0, startSeconds - GAIN_RAMP_SECONDS);
-  const rampEnd = endSeconds + GAIN_RAMP_SECONDS;
-  const afterRamp =
-    `if(between(t,${fixedSeconds(endSeconds)},${fixedSeconds(rampEnd)}),` +
-    `${DUCKED_MUSIC_VOLUME.toFixed(3)}+(${NORMAL_MUSIC_VOLUME.toFixed(3)}-${DUCKED_MUSIC_VOLUME.toFixed(3)})*` +
-    `(t-${fixedSeconds(endSeconds)})/${GAIN_RAMP_SECONDS.toFixed(3)},${NORMAL_MUSIC_VOLUME.toFixed(3)})`;
-  const beforeRamp = startSeconds > 0
-    ? `if(between(t,${fixedSeconds(rampStart)},${fixedSeconds(startSeconds)}),` +
-      `${NORMAL_MUSIC_VOLUME.toFixed(3)}+(${DUCKED_MUSIC_VOLUME.toFixed(3)}-${NORMAL_MUSIC_VOLUME.toFixed(3)})*` +
-      `(t-${fixedSeconds(rampStart)})/${GAIN_RAMP_SECONDS.toFixed(3)},${afterRamp})`
-    : afterRamp;
-  return `if(between(t,${fixedSeconds(startSeconds)},${fixedSeconds(endSeconds)}),${DUCKED_MUSIC_VOLUME.toFixed(3)},${beforeRamp})`;
-};
-
-export function buildMusicVolumeExpression(intervals: readonly DuckInterval[]): string {
-  if (intervals.length === 0) return NORMAL_MUSIC_VOLUME.toFixed(3);
-  return intervals
-    .map(musicIntervalExpression)
-    .reduce((combined, expression) => `min(${combined},${expression})`);
-}
-
 export function buildSourceDialogueGainExpression(
   sourceGains: readonly SourceIntervalGain[]
 ): string {
@@ -344,19 +324,27 @@ export function buildSourceDialogueGainExpression(
 
 export function buildFinishFilterGraph(
   durationSeconds: number,
-  intervals: readonly DuckInterval[],
+  outroDurationSeconds: number,
   sourceGains: readonly SourceIntervalGain[]
 ): string {
-  const volumeExpression = buildMusicVolumeExpression(intervals);
+  requirePositiveDuration(durationSeconds, "input video");
+  requirePositiveDuration(outroDurationSeconds, "outro music");
+  const outroDuration = Math.min(outroDurationSeconds, durationSeconds);
+  const outroStart = Math.max(0, durationSeconds - outroDuration);
+  const outroDelayMilliseconds = Math.round(outroStart * 1000);
+  const outroFadeOutStart = Math.max(0, outroDuration - OUTRO_FADE_OUT_SECONDS);
   const dialogueGainExpression = buildSourceDialogueGainExpression(sourceGains);
   const duration = fixedSeconds(durationSeconds);
   return [
     `${buildLogoFilter()}[vout]`,
     `[0:a]apad=whole_dur=${duration},atrim=duration=${duration},asetpts=PTS-STARTPTS,` +
       `volume='${dialogueGainExpression}':eval=frame[dialogue]`,
-    `[2:a]volume='${volumeExpression}':eval=frame,atrim=duration=${duration},` +
-      "asetpts=PTS-STARTPTS[music]",
-    `[dialogue][music]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,` +
+    `[2:a]atrim=duration=${fixedSeconds(outroDuration)},asetpts=PTS-STARTPTS,` +
+      `afade=t=in:st=0:d=${fixedSeconds(OUTRO_FADE_IN_SECONDS)},` +
+      `afade=t=out:st=${fixedSeconds(outroFadeOutStart)}:d=${fixedSeconds(OUTRO_FADE_OUT_SECONDS)},` +
+      `volume=${OUTRO_MUSIC_VOLUME.toFixed(3)},` +
+      `adelay=${outroDelayMilliseconds}|${outroDelayMilliseconds}[outro]`,
+    `[dialogue][outro]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,` +
       `alimiter=limit=0.95:attack=5:release=50:level=false:latency=true,` +
       `atrim=duration=${duration},asetpts=PTS-STARTPTS[aout]`
   ].join(";");
@@ -370,12 +358,14 @@ export function buildFinishFfmpegArgs(options: BuildFinishFfmpegArgsOptions): st
     options.inputPath,
     "-i",
     options.logoPath,
-    "-stream_loop",
-    "-1",
     "-i",
-    options.musicPath,
+    options.outroMusicPath,
     "-filter_complex",
-    buildFinishFilterGraph(options.durationSeconds, options.duckIntervals, options.sourceGains),
+    buildFinishFilterGraph(
+      options.durationSeconds,
+      options.outroDurationSeconds,
+      options.sourceGains
+    ),
     "-map",
     "[vout]",
     "-map",
@@ -647,6 +637,15 @@ const safeVariantPath = (directory: "exports" | "final", file: string): string =
   `${directory}/${basename(file)}`;
 
 export function buildPostProductionManifest(options: BuildPostProductionManifestOptions) {
+  const programDurationSeconds = options.variants[0]?.inputDurationSeconds ?? 0;
+  requirePositiveDuration(programDurationSeconds, "post-production program");
+  requirePositiveDuration(options.outroDurationSeconds, "outro music");
+  const outroDurationSeconds = roundedSeconds(
+    Math.min(options.outroDurationSeconds, programDurationSeconds)
+  );
+  const outroStartSeconds = roundedSeconds(
+    Math.max(0, programDurationSeconds - outroDurationSeconds)
+  );
   return {
     schemaVersion: "0.2.0" as const,
     status: "finished" as const,
@@ -654,20 +653,21 @@ export function buildPostProductionManifest(options: BuildPostProductionManifest
     generationId: options.generationId,
     assets: {
       logo: basename(options.logoPath),
-      logoSha256: options.logoSha256,
-      music: basename(options.musicPath)
+      logoSha256: options.logoSha256
     },
-    duckIntervals: options.duckIntervals.map(({ startSeconds, endSeconds }) => ({
-      startSeconds,
-      endSeconds
-    })),
+    audioPolicy: {
+      introMusic: false as const,
+      bodyMusic: false as const,
+      outro: {
+        file: basename(options.outroMusicPath),
+        startSeconds: outroStartSeconds,
+        durationSeconds: outroDurationSeconds,
+        fadeInSeconds: OUTRO_FADE_IN_SECONDS,
+        fadeOutSeconds: OUTRO_FADE_OUT_SECONDS
+      }
+    },
     settings: {
       logoFilter: buildLogoFilter(),
-      dialogueVolume: DIALOGUE_VOLUME,
-      normalMusicVolume: NORMAL_MUSIC_VOLUME,
-      duckedMusicVolume: DUCKED_MUSIC_VOLUME,
-      musicLoop: true,
-      audioMixDuration: "longest" as const,
       exactAudioDuration: true,
       limiter: "limit=0.95:attack=5:release=50:level=false:latency=true" as const,
       videoCodec: "libx264" as const,
@@ -717,6 +717,17 @@ interface PublishedGenerationManifest {
   readonly schemaVersion: "0.2.0";
   readonly status: "finished";
   readonly generationId: string;
+  readonly audioPolicy: {
+    readonly introMusic: false;
+    readonly bodyMusic: false;
+    readonly outro: {
+      readonly file: string;
+      readonly startSeconds: number;
+      readonly durationSeconds: number;
+      readonly fadeInSeconds: 0.25;
+      readonly fadeOutSeconds: 0.75;
+    };
+  };
   readonly variants: readonly PublishedVariantRecord[];
 }
 
@@ -731,11 +742,25 @@ const parsePublishedGenerationManifest = (text: string): PublishedGenerationMani
     throw new Error("Invalid published generation manifest");
   }
   const candidate = value as Partial<PublishedGenerationManifest>;
+  const audioPolicy = candidate.audioPolicy;
+  const outro = audioPolicy?.outro;
   if (
     candidate.schemaVersion !== "0.2.0" ||
     candidate.status !== "finished" ||
     typeof candidate.generationId !== "string" ||
     !candidate.generationId ||
+    audioPolicy?.introMusic !== false ||
+    audioPolicy.bodyMusic !== false ||
+    !outro ||
+    typeof outro.file !== "string" ||
+    !outro.file ||
+    basename(outro.file) !== outro.file ||
+    !Number.isFinite(outro.startSeconds) ||
+    outro.startSeconds < 0 ||
+    !Number.isFinite(outro.durationSeconds) ||
+    outro.durationSeconds <= 0 ||
+    outro.fadeInSeconds !== OUTRO_FADE_IN_SECONDS ||
+    outro.fadeOutSeconds !== OUTRO_FADE_OUT_SECONDS ||
     !Array.isArray(candidate.variants) ||
     candidate.variants.length !== 2
   ) {
@@ -984,7 +1009,7 @@ async function finishGptLiveProductionUnlocked(
   const ffmpegPath = requireConfiguredValue(options.ffmpegPath, "ffmpeg path");
   const ffprobePath = requireConfiguredValue(options.ffprobePath, "ffprobe path");
   const logoPath = requireConfiguredValue(options.env.AIMH_LOGO_PATH, "AIMH logo path");
-  const musicPath = requireConfiguredValue(
+  const outroMusicPath = requireConfiguredValue(
     options.env.AIMH_OUTRO_MUSIC_PATH,
     "AIMH outro music path"
   );
@@ -994,7 +1019,7 @@ async function finishGptLiveProductionUnlocked(
     throw new Error("GPT-Live finish preflight failed: AIMH logo is not readable");
   }
   try {
-    await access(musicPath, constants.R_OK);
+    await access(outroMusicPath, constants.R_OK);
   } catch {
     throw new Error("GPT-Live finish preflight failed: AIMH outro music is not readable");
   }
@@ -1099,10 +1124,10 @@ async function finishGptLiveProductionUnlocked(
         buildFinishFfmpegArgs({
           inputPath: definition.inputPath,
           logoPath,
-          musicPath,
+          outroMusicPath,
+          outroDurationSeconds: GPT_LIVE_CONTENT.audio.outroDurationSeconds,
           outputPath: stagedPaths[index]!,
           durationSeconds: inputInspections[index]!.durationSeconds,
-          duckIntervals,
           sourceGains
         })
       );
@@ -1206,9 +1231,9 @@ async function finishGptLiveProductionUnlocked(
             productionId: plan.productionId,
             generationId: transactionId,
             logoPath,
-            musicPath,
+            outroMusicPath,
+            outroDurationSeconds: GPT_LIVE_CONTENT.audio.outroDurationSeconds,
             logoSha256,
-            duckIntervals,
             sourceGains: sourceResults,
             logoEvidence,
             variants

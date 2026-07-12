@@ -173,9 +173,9 @@ const validSnapshot = (): GptLiveQaSnapshot => {
     productionId: GPT_LIVE_CONTENT.id,
     generationId: "00000000-0000-4000-8000-000000000000",
     logoPath: GPT_LIVE_CONTENT.branding.logoPath,
-    musicPath: GPT_LIVE_CONTENT.audio.outroMusicPath,
+    outroMusicPath: GPT_LIVE_CONTENT.audio.outroMusicPath,
+    outroDurationSeconds: GPT_LIVE_CONTENT.audio.outroDurationSeconds,
     logoSha256: sha("a"),
-    duckIntervals,
     sourceGains,
     logoEvidence: (["version-a", "version-b"] as const).map((name) => ({
       name,
@@ -757,7 +757,10 @@ describe("GPT-Live full production QA", () => {
       ...snapshot.production.audio,
       outroMusicPath: resolvedOutroPath
     };
-    (snapshot.postProduction.assets as Record<string, unknown>).music = "Outro_Alternate.mp3";
+    const audioPolicy = snapshot.postProduction.audioPolicy as {
+      outro: Record<string, unknown>;
+    };
+    audioPolicy.outro.file = "Outro_Alternate.mp3";
     refreshPreparedFingerprint(snapshot);
 
     expect(() => validateGptLiveQaSnapshot(snapshot)).not.toThrow();
@@ -772,6 +775,16 @@ describe("GPT-Live full production QA", () => {
     refreshPreparedFingerprint(snapshot);
 
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/audio policy|production manifest/i);
+  });
+
+  it("rejects post-production outro timing that does not match the final duration", () => {
+    const snapshot = validSnapshot();
+    const audioPolicy = snapshot.postProduction.audioPolicy as {
+      outro: Record<string, unknown>;
+    };
+    audioPolicy.outro.startSeconds = 0;
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/outro|audio policy/i);
   });
 
   it("rejects QA without a resolved outro path", () => {

@@ -508,7 +508,12 @@ const collectSnapshot = async (
 
 const postSourceIntervals = (snapshot: GptLiveQaSnapshot) => {
   const sourceDialogue = snapshot.postProduction.sourceDialogue as {
-    intervals: Array<{ outputLufsA: number; outputLufsB: number }>;
+    intervals: Array<{
+      startSeconds: number;
+      endSeconds: number;
+      outputLufsA: number;
+      outputLufsB: number;
+    }>;
   };
   return sourceDialogue.intervals;
 };
@@ -665,10 +670,9 @@ async function runGptLiveQaUnlocked(
         throw new Error(`GPT-Live QA failed: expected 58 checked frames, received ${artifacts.checkedFrameCount}`);
       }
 
-      const sourceIntervals = snapshot.postProduction.duckIntervals as Array<{
-        startSeconds: number;
-        endSeconds: number;
-      }>;
+      const sourceIntervals = postSourceIntervals(snapshot).map(
+        ({ startSeconds, endSeconds }) => ({ startSeconds, endSeconds })
+      );
       const comparison = renderComparisonMarkdown({
         artifacts,
         durations: {

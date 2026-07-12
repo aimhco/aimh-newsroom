@@ -591,18 +591,33 @@ const validateBrandingAndAudio = (snapshot: GptLiveQaSnapshot): void => {
   if (!isRecord(post.assets)) fail("post-production assets are invalid");
   exact(post.assets, {
     logo: "logo.png",
-    logoSha256: snapshot.logo.sha256,
-    music: basename(snapshot.production.audio.outroMusicPath)
+    logoSha256: snapshot.logo.sha256
   }, "post-production assets");
+
+  const versionA = postVariants(post).find((variant) => variant.name === "version-a")!;
+  const outroDurationSeconds = Number(Math.min(
+    snapshot.production.audio.outroDurationSeconds,
+    versionA.inputDurationSeconds
+  ).toFixed(6));
+  const outroStartSeconds = Number(Math.max(
+    0,
+    versionA.inputDurationSeconds - outroDurationSeconds
+  ).toFixed(6));
+  exact(post.audioPolicy, {
+    introMusic: false,
+    bodyMusic: false,
+    outro: {
+      file: basename(snapshot.production.audio.outroMusicPath),
+      startSeconds: outroStartSeconds,
+      durationSeconds: outroDurationSeconds,
+      fadeInSeconds: 0.25,
+      fadeOutSeconds: 0.75
+    }
+  }, "post-production audio policy");
 
   if (!isRecord(post.settings)) fail("post-production settings are invalid");
   exact(post.settings, {
     logoFilter: buildLogoFilter(),
-    dialogueVolume: 1,
-    normalMusicVolume: 0.07,
-    duckedMusicVolume: 0.02,
-    musicLoop: true,
-    audioMixDuration: "longest",
     exactAudioDuration: true,
     limiter: "limit=0.95:attack=5:release=50:level=false:latency=true",
     videoCodec: "libx264",
@@ -620,11 +635,19 @@ const validateBrandingAndAudio = (snapshot: GptLiveQaSnapshot): void => {
   }, "identical A/B audio and finish settings");
 
   const expectedIntervals = deriveSourceDuckIntervals(snapshot.plan);
-  exact(post.duckIntervals, expectedIntervals, "source dialogue intervals");
   const sourceDialogue = requireRecord(post.sourceDialogue, "source dialogue report");
   if (!Array.isArray(sourceDialogue.intervals)) {
     fail("source dialogue report is invalid");
   }
+  const intervals = sourceDialogue.intervals as Array<SourceIntervalGain & {
+    outputLufsA: number;
+    outputLufsB: number;
+  }>;
+  exact(
+    intervals.map(({ startSeconds, endSeconds }) => ({ startSeconds, endSeconds })),
+    expectedIntervals,
+    "source dialogue intervals"
+  );
   if (
     sourceDialogue.targetLufs !== -23 ||
     sourceDialogue.gainClampDb !== 12 ||
@@ -633,10 +656,6 @@ const validateBrandingAndAudio = (snapshot: GptLiveQaSnapshot): void => {
   ) {
     fail("source dialogue policy is outside documented ranges");
   }
-  const intervals = sourceDialogue.intervals as Array<SourceIntervalGain & {
-    outputLufsA: number;
-    outputLufsB: number;
-  }>;
   if (intervals.length !== expectedIntervals.length) fail("source dialogue interval count mismatch");
   const expectedGains = deriveSharedSourceGains(
     expectedIntervals,
