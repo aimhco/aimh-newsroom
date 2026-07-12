@@ -309,7 +309,7 @@ export function buildSourceManifest(): GptLiveSourceManifest {
           .map((claim) => claim.id),
         onScreenAttribution: unique(evidence.map((item) => item.displayUrl)),
         playbackDecisions: unique(evidence.map((item) => item.playbackDecision)),
-        youtubeDescription: evidence.some((item) => item.youtubeDescription)
+        youtubeDescription: evidence.length > 0
       };
     })
   };

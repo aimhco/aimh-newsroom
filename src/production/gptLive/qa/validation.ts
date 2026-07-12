@@ -31,13 +31,6 @@ const HASH = /^[a-f0-9]{64}$/;
 const FRAME_RATE_TOLERANCE = 0.001;
 const SOURCE_DURATION_TOLERANCE_SECONDS = 0.25;
 const TAIL_SIGNAL_FLOOR_DB = -50;
-const UNSAFE_URL_PARAMETER_SUFFIXES = [
-  "token",
-  "signature",
-  "key",
-  "expires",
-  "credential"
-] as const;
 
 const fail = (detail: string): never => {
   throw new Error(`GPT-Live QA failed: ${detail}`);
@@ -64,8 +57,14 @@ const uniqueStringArray = (value: unknown, label: string): string[] => {
   return values;
 };
 
-const safeHttpsUrl = (value: unknown, label: string): string => {
-  if (typeof value !== "string" || !value.trim()) fail(`${label} must be a non-empty URL`);
+export function assertSafeSourceManifestUrl(
+  value: unknown,
+  kind: "canonical" | "media"
+): string {
+  const label = `source manifest ${kind} URL`;
+  if (typeof value !== "string" || !value.trim() || value !== value.trim()) {
+    fail(`${label} must be a non-empty URL without surrounding whitespace`);
+  }
   const parsed = (() => {
     try {
       return new URL(value as string);
@@ -73,17 +72,23 @@ const safeHttpsUrl = (value: unknown, label: string): string => {
       return fail(`${label} must be a valid HTTPS URL`);
     }
   })();
-  if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
-    fail(`${label} must be a safe HTTPS URL without credentials`);
+  if (parsed.protocol !== "https:") {
+    fail(`${label} must use HTTPS`);
   }
-  for (const key of parsed.searchParams.keys()) {
-    const normalized = key.toLowerCase().replaceAll(/[^a-z]/g, "");
-    if (UNSAFE_URL_PARAMETER_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) {
-      fail(`${label} contains an unsafe query parameter`);
-    }
+  if (parsed.username || parsed.password) {
+    fail(`${label} must not contain credentials`);
+  }
+  if ((value as string).includes("#")) {
+    fail(`${label} must not contain a fragment`);
+  }
+  if (kind === "canonical" && (value as string).includes("?")) {
+    fail(`${label} must not contain query parameters`);
+  }
+  if (kind === "media" && parsed.search && !/^\?video=\d+$/.test(parsed.search)) {
+    fail(`${label} may contain only one video query parameter with a non-empty decimal media ID`);
   }
   return value as string;
-};
+}
 
 const validateSourceManifest = (snapshot: GptLiveQaSnapshot): void => {
   const manifest = requireRecord(snapshot.sourceManifest, "source manifest");
@@ -121,7 +126,7 @@ const validateSourceManifest = (snapshot: GptLiveQaSnapshot): void => {
     ) {
       fail(`source manifest entry ${index + 1} is malformed`);
     }
-    safeHttpsUrl(entry.canonicalUrl, `source manifest canonical URL for ${entry.sourceId}`);
+    assertSafeSourceManifestUrl(entry.canonicalUrl, "canonical");
     uniqueStringArray(entry.scenes, `source manifest scenes for ${entry.sourceId}`);
     uniqueStringArray(entry.claims, `source manifest claims for ${entry.sourceId}`);
     uniqueStringArray(
@@ -136,7 +141,7 @@ const validateSourceManifest = (snapshot: GptLiveQaSnapshot): void => {
       entry.mediaUrls,
       `source manifest media URLs for ${entry.sourceId}`
     )) {
-      safeHttpsUrl(mediaUrl, `source manifest media URL for ${entry.sourceId}`);
+      assertSafeSourceManifestUrl(mediaUrl, "media");
     }
     return entry;
   });
@@ -162,6 +167,12 @@ const validateSourceManifest = (snapshot: GptLiveQaSnapshot): void => {
         claim.sourceIds.some((sourceId) => sourceId === expectedEntry.sourceId)
       )
       .map((claim) => claim.id);
+
+    if (sourceEvidence.length > 0 && entry.youtubeDescription !== true) {
+      fail(
+        `source manifest source ${expectedEntry.sourceId} with evidence must be included in the YouTube description`
+      );
+    }
 
     exact(entry.publisher, expectedEntry.publisher, `source manifest publisher for ${expectedEntry.sourceId}`);
     exact(entry.title, expectedEntry.title, `source manifest title for ${expectedEntry.sourceId}`);
@@ -193,8 +204,8 @@ const validateSourceManifest = (snapshot: GptLiveQaSnapshot): void => {
       ) {
         fail(`source manifest is missing media URL for ${evidence.id}`);
       }
-      if (entry.youtubeDescription !== evidence.youtubeDescription) {
-        fail(`source manifest YouTube-description flag does not map ${evidence.id}`);
+      if (evidence.youtubeDescription !== true) {
+        fail(`visible evidence ${evidence.id} must be included in the YouTube description`);
       }
     }
     exact(entry.scenes, expectedEntry.scenes, `source manifest evidence scenes for ${expectedEntry.sourceId}`);
@@ -273,6 +284,11 @@ const validateProduction = (
 ): void => {
   validateProductionManifest(production as unknown as GptLiveProduction);
   if (production.schemaVersion !== "0.1.0") fail("production schema version is invalid");
+  for (const evidence of production.evidence) {
+    if (evidence.youtubeDescription !== true) {
+      fail(`visible evidence ${evidence.id} must be included in the YouTube description`);
+    }
+  }
 
   const approvedCore = {
     id: GPT_LIVE_CONTENT.id,

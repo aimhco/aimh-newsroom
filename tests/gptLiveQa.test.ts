@@ -43,6 +43,7 @@ import {
   assertMeaningfulFrameContent,
   renderComparisonMarkdown
 } from "../src/production/gptLive/qa/visual";
+import { assertSafeSourceManifestUrl } from "../src/production/gptLive/qa/validation";
 import { buildTellaPlan } from "../src/production/gptLive/tellaPlan";
 import { buildVoiceCacheKey } from "../src/voice/elevenLabsAdapter";
 
@@ -71,7 +72,7 @@ const canonicalSourceManifest = () => ({
       ),
       onScreenAttribution: [...new Set(evidence.map((item) => item.displayUrl))],
       playbackDecisions: [...new Set(evidence.map((item) => item.playbackDecision))],
-      youtubeDescription: evidence.some((item) => item.youtubeDescription)
+      youtubeDescription: evidence.length > 0
     };
   })
 });
@@ -602,6 +603,14 @@ describe("GPT-Live full production QA", () => {
   });
 
   it.each([
+    ["canonical", "https://openai.com/index/introducing-gpt-live/"],
+    ["media", "https://cdn.example.com/video.mp4"],
+    ["media", "https://openai.com/index/introducing-gpt-live/?video=1208096618"]
+  ] as const)("accepts a safe %s URL at the independent allowlist gate", (kind, url) => {
+    expect(() => assertSafeSourceManifestUrl(url, kind)).not.toThrow();
+  });
+
+  it.each([
     ["missing source", (sources: any[]) => sources.slice(1)],
     ["duplicate source", (sources: any[]) => [...sources, structuredClone(sources[0])]],
     ["extra source", (sources: any[]) => [...sources, { ...structuredClone(sources[0]), sourceId: "src_extra" }]]
@@ -634,25 +643,52 @@ describe("GPT-Live full production QA", () => {
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/source manifest/i);
   });
 
-  it.each(["token", "signature", "key", "expires", "credential"])(
-    "rejects an unsafe canonical source URL containing %s",
-    (parameter) => {
+  it.each([
+    ["HTTP", "http://openai.com/index/introducing-gpt-live/"],
+    ["credentials", "https://user:password@openai.com/index/introducing-gpt-live/"],
+    ["fragment", "https://openai.com/index/introducing-gpt-live/#source"],
+    ...["sig", "h", "auth", "policy", "jwt", "token", "expires", "credential", "key", "Token"]
+      .map((parameter) => [
+        `${parameter} query parameter`,
+        `https://openai.com/index/introducing-gpt-live/?${parameter}=secret`
+      ])
+  ])("rejects a canonical source URL containing %s at the URL safety gate", (_name, url) => {
       const snapshot = validSnapshot();
-      snapshot.sourceManifest.sources[0]!.canonicalUrl =
-        `https://openai.com/index/introducing-gpt-live/?${parameter}=secret`;
-      expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/source manifest.*URL|unsafe/i);
-    }
-  );
+      snapshot.sourceManifest.sources[0]!.canonicalUrl = url;
+      expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(
+        /source manifest canonical URL.*(?:HTTPS|credentials|fragment|query parameters)/i
+      );
+  });
 
   it.each([
-    "file:///tmp/source.mp4",
-    "/tmp/source.mp4",
-    "https://openai.com/index/introducing-gpt-live/?token=secret",
-    "https://openai.com/index/introducing-gpt-live/?video=9999999999"
-  ])("rejects undeclared or unsafe source-manifest media URL %s", (mediaUrl) => {
+    ["local file URL", "file:///tmp/source.mp4"],
+    ["local path", "/tmp/source.mp4"],
+    ["HTTP", "http://openai.com/index/introducing-gpt-live/?video=1208096618"],
+    ["credentials", "https://user:password@openai.com/index/introducing-gpt-live/?video=1208096618"],
+    ["fragment", "https://openai.com/index/introducing-gpt-live/?video=1208096618#source"],
+    ["mixed-case parameter", "https://openai.com/index/introducing-gpt-live/?Video=1208096618"],
+    ["duplicate video parameters", "https://openai.com/index/introducing-gpt-live/?video=1208096618&video=1208152658"],
+    ["empty video ID", "https://openai.com/index/introducing-gpt-live/?video="],
+    ["non-decimal video ID", "https://openai.com/index/introducing-gpt-live/?video=abc"],
+    ...["sig", "h", "auth", "policy", "jwt", "token", "expires", "credential", "key"]
+      .map((parameter) => [
+        `${parameter} query parameter`,
+        `https://openai.com/index/introducing-gpt-live/?${parameter}=secret`
+      ])
+  ])("rejects a source-manifest media URL containing %s at the URL safety gate", (_name, mediaUrl) => {
     const snapshot = validSnapshot();
     snapshot.sourceManifest.sources[0]!.mediaUrls![0] = mediaUrl;
-    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/source manifest.*media URL|unsafe/i);
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(
+      /source manifest media URL.*(?:HTTPS|credentials|fragment|only.*video|decimal media ID)/i
+    );
+  });
+
+  it("rejects a safe but undeclared decimal media ID during exact manifest validation", () => {
+    const snapshot = validSnapshot();
+    snapshot.sourceManifest.sources[0]!.mediaUrls[0] =
+      "https://openai.com/index/introducing-gpt-live/?video=9999999999";
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/does not match the approved contract/i);
   });
 
   it.each([
@@ -665,6 +701,27 @@ describe("GPT-Live full production QA", () => {
     const snapshot = validSnapshot();
     mutate(snapshot.sourceManifest.sources[0]);
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/source manifest/i);
+  });
+
+  it("rejects a visible evidence item excluded from the YouTube description", () => {
+    const snapshot = validSnapshot();
+    snapshot.production.evidence[0] = {
+      ...snapshot.production.evidence[0]!,
+      youtubeDescription: false
+    };
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(
+      /visible evidence.*must be included in the YouTube description/i
+    );
+  });
+
+  it("rejects a source with evidence excluded from the YouTube description", () => {
+    const snapshot = validSnapshot();
+    snapshot.sourceManifest.sources[0]!.youtubeDescription = false;
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(
+      /source manifest.*must be included in the YouTube description/i
+    );
   });
 
   it.each([

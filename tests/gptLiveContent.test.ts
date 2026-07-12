@@ -462,7 +462,7 @@ const EXPECTED_SOURCE_MANIFEST = {
       ),
       onScreenAttribution: unique(evidence.map((item) => item.displayUrl)),
       playbackDecisions: unique(evidence.map((item) => item.playbackDecision)),
-      youtubeDescription: evidence.some((item) => item.youtubeDescription)
+      youtubeDescription: evidence.length > 0
     };
   })
 } as const;
