@@ -778,7 +778,7 @@ describe("GPT-Live full production QA", () => {
     }
   }, 30_000);
 
-  it("fails closed when a boundary cannot resolve to two distinct 30fps frames", () => {
+  it("fails closed when a boundary cannot resolve to three distinct consecutive 30fps frames", () => {
     const plan = {
       schemaVersion: "0.1.0" as const,
       productionId: "transition-test",
@@ -788,7 +788,22 @@ describe("GPT-Live full production QA", () => {
       ]
     } as any;
     expect(() => planTransitionBoundarySamples(plan, 0.02))
-      .toThrow(/distinct 30fps frames|two distinct frames/i);
+      .toThrow(/three distinct consecutive 30fps frames/i);
+  });
+
+  it("fails closed when a final boundary cannot provide three distinct consecutive frames", () => {
+    const plan = {
+      schemaVersion: "0.1.0" as const,
+      productionId: "transition-test",
+      clips: [
+        { id: "clip-one", kind: "source_clip" as const, durationSeconds: 0.02 },
+        { id: "clip-two", kind: "source_clip" as const, durationSeconds: 0.06 },
+        { id: "clip-three", kind: "source_clip" as const, durationSeconds: 0.02 }
+      ]
+    } as any;
+
+    expect(() => planTransitionBoundarySamples(plan, 0.1))
+      .toThrow(/three distinct consecutive 30fps frames/i);
   });
 
   it("samples the exact cut frame between the immediately previous and next frames", () => {
@@ -828,23 +843,23 @@ describe("GPT-Live full production QA", () => {
     ]);
   });
 
-  it("samples before, exact, and after frames at every clip boundary with safe clamping", async () => {
+  it("samples before, exact, and after at every clip boundary with consecutive indices", async () => {
     const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-transition-content-"));
     const calls: Array<{ command: string; args: string[] }> = [];
     const plan = {
       schemaVersion: "0.1.0" as const,
       productionId: "transition-test",
       clips: [
-        { id: "clip-one", kind: "source_clip" as const, durationSeconds: 0.02 },
-        { id: "clip-two", kind: "source_clip" as const, durationSeconds: 0.06 },
-        { id: "clip-three", kind: "source_clip" as const, durationSeconds: 0.02 }
+        { id: "clip-one", kind: "source_clip" as const, durationSeconds: 0.05 },
+        { id: "clip-two", kind: "source_clip" as const, durationSeconds: 0.05 },
+        { id: "clip-three", kind: "source_clip" as const, durationSeconds: 0.05 }
       ]
     } as any;
     try {
       const artifacts = await generateVisualArtifacts({
         episodeDir,
         finalPaths: { "version-a": "/final-a.mp4", "version-b": "/final-b.mp4" },
-        durations: { "version-a": 0.1, "version-b": 0.1 },
+        durations: { "version-a": 0.15, "version-b": 0.15 },
         plan,
         ffmpegPath: "ffmpeg"
       }, {
@@ -883,37 +898,37 @@ describe("GPT-Live full production QA", () => {
         input: args[args.indexOf("-i") + 1],
         time: args[args.indexOf("-ss") + 1]
       }))).toEqual([
-        { input: "/final-a.mp4", time: "0.000000" },
-        { input: "/final-a.mp4", time: "0.020000" },
-        { input: "/final-a.mp4", time: "0.053333" },
-        { input: "/final-a.mp4", time: "0.033333" },
+        { input: "/final-a.mp4", time: "0.016666" },
+        { input: "/final-a.mp4", time: "0.050000" },
+        { input: "/final-a.mp4", time: "0.083333" },
         { input: "/final-a.mp4", time: "0.066666" },
-        { input: "/final-a.mp4", time: "0.066666" },
-        { input: "/final-b.mp4", time: "0.000000" },
-        { input: "/final-b.mp4", time: "0.020000" },
-        { input: "/final-b.mp4", time: "0.053333" },
-        { input: "/final-b.mp4", time: "0.033333" },
+        { input: "/final-a.mp4", time: "0.100000" },
+        { input: "/final-a.mp4", time: "0.133333" },
+        { input: "/final-b.mp4", time: "0.016666" },
+        { input: "/final-b.mp4", time: "0.050000" },
+        { input: "/final-b.mp4", time: "0.083333" },
         { input: "/final-b.mp4", time: "0.066666" },
-        { input: "/final-b.mp4", time: "0.066666" }
+        { input: "/final-b.mp4", time: "0.100000" },
+        { input: "/final-b.mp4", time: "0.133333" }
       ]);
       expect(artifacts.transitionContent).toEqual({
         "version-a": {
           sampledFrames: 4,
           samples: [
-            { boundaryId: "boundary-01-clip-one-to-clip-two", side: "before", timeSeconds: 0, frameIndex: 0 },
-            { boundaryId: "boundary-01-clip-one-to-clip-two", side: "after", timeSeconds: 0.053333, frameIndex: 2 },
-            { boundaryId: "boundary-02-clip-two-to-clip-three", side: "before", timeSeconds: 0.033333, frameIndex: 1 },
-            { boundaryId: "boundary-02-clip-two-to-clip-three", side: "after", timeSeconds: 0.066666, frameIndex: 2 }
+            { boundaryId: "boundary-01-clip-one-to-clip-two", side: "before", timeSeconds: 0.016666, frameIndex: 1 },
+            { boundaryId: "boundary-01-clip-one-to-clip-two", side: "after", timeSeconds: 0.083333, frameIndex: 3 },
+            { boundaryId: "boundary-02-clip-two-to-clip-three", side: "before", timeSeconds: 0.066666, frameIndex: 2 },
+            { boundaryId: "boundary-02-clip-two-to-clip-three", side: "after", timeSeconds: 0.133333, frameIndex: 4 }
           ],
           blankFrames: []
         },
         "version-b": {
           sampledFrames: 4,
           samples: [
-            { boundaryId: "boundary-01-clip-one-to-clip-two", side: "before", timeSeconds: 0, frameIndex: 0 },
-            { boundaryId: "boundary-01-clip-one-to-clip-two", side: "after", timeSeconds: 0.053333, frameIndex: 2 },
-            { boundaryId: "boundary-02-clip-two-to-clip-three", side: "before", timeSeconds: 0.033333, frameIndex: 1 },
-            { boundaryId: "boundary-02-clip-two-to-clip-three", side: "after", timeSeconds: 0.066666, frameIndex: 2 }
+            { boundaryId: "boundary-01-clip-one-to-clip-two", side: "before", timeSeconds: 0.016666, frameIndex: 1 },
+            { boundaryId: "boundary-01-clip-one-to-clip-two", side: "after", timeSeconds: 0.083333, frameIndex: 3 },
+            { boundaryId: "boundary-02-clip-two-to-clip-three", side: "before", timeSeconds: 0.066666, frameIndex: 2 },
+            { boundaryId: "boundary-02-clip-two-to-clip-three", side: "after", timeSeconds: 0.133333, frameIndex: 4 }
           ],
           blankFrames: []
         }
@@ -924,6 +939,56 @@ describe("GPT-Live full production QA", () => {
             .toBe(sample.frameIndex);
         }
       }
+    } finally {
+      await rm(episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a uniform blue exact-cut frame during visual artifact generation", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "gpt-live-transition-exact-blank-"));
+    const transitionTimes: string[] = [];
+    const plan = {
+      schemaVersion: "0.1.0" as const,
+      productionId: "transition-test",
+      clips: [
+        { id: "clip-one", kind: "source_clip" as const, durationSeconds: 1 },
+        { id: "clip-two", kind: "source_clip" as const, durationSeconds: 1 }
+      ]
+    } as any;
+    try {
+      await expect(generateVisualArtifacts({
+        episodeDir,
+        finalPaths: { "version-a": "/final-a.mp4", "version-b": "/final-b.mp4" },
+        durations: { "version-a": 2, "version-b": 2 },
+        plan,
+        ffmpegPath: "ffmpeg"
+      }, {
+        runCommand: async (_command, args) => {
+          if (args.some((arg) => arg.includes("signalstats") && arg.endsWith("metadata=print"))) {
+            const time = args[args.indexOf("-ss") + 1]!;
+            transitionTimes.push(time);
+            const exactCut = time === "1.000000";
+            return {
+              stdout: "",
+              stderr: [
+                `showinfo stdev:[${exactCut ? "0.0" : "20.0"} 0.0 0.0]`,
+                `lavfi.signalstats.YMIN=${exactCut ? 41 : 16}`,
+                `lavfi.signalstats.YMAX=${exactCut ? 41 : 40}`,
+                `lavfi.signalstats.UMIN=${exactCut ? 240 : 100}`,
+                `lavfi.signalstats.UMAX=${exactCut ? 240 : 110}`,
+                `lavfi.signalstats.VMIN=${exactCut ? 110 : 120}`,
+                `lavfi.signalstats.VMAX=${exactCut ? 110 : 128}`,
+                `lavfi.entropy.normalized_entropy.normal.Y=${exactCut ? "0" : "0.1"}`
+              ].join("\n")
+            };
+          }
+          return {
+            stdout: "",
+            stderr: "lavfi.blackframe.pblack=0\nshowinfo stdev:[20.0 0.0 0.0]\nlavfi.entropy.normalized_entropy.normal.Y=0.1"
+          };
+        }
+      })).rejects.toThrow(/transition frame is blank|base layer/i);
+      expect(transitionTimes).toContain("1.000000");
     } finally {
       await rm(episodeDir, { recursive: true, force: true });
     }

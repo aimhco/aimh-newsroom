@@ -250,20 +250,12 @@ export const planTransitionBoundarySamples = (
         after!.timeSeconds = Number(transitionFixed(laterFrameIndex / 30));
       }
     }
-    if (before!.frameIndex === after!.frameIndex) {
-      const earlierFrameIndex = before!.frameIndex - 1;
-      const laterFrameIndex = after!.frameIndex + 1;
-      if (earlierFrameIndex >= 0 && earlierFrameIndex / 30 < boundaryTime) {
-        before!.frameIndex = earlierFrameIndex;
-        before!.timeSeconds = Number(transitionFixed(earlierFrameIndex / 30));
-      } else if (laterFrameIndex < frameCount && laterFrameIndex / 30 > boundaryTime) {
-        after!.frameIndex = laterFrameIndex;
-        after!.timeSeconds = Number(transitionFixed(laterFrameIndex / 30));
-      }
-    }
-    if (before!.frameIndex === after!.frameIndex) {
+    if (
+      exact!.frameIndex !== before!.frameIndex + 1 ||
+      after!.frameIndex !== exact!.frameIndex + 1
+    ) {
       throw new Error(
-        `GPT-Live QA failed: ${boundaryId} cannot resolve to two distinct 30fps frames`
+        `GPT-Live QA failed: ${boundaryId} cannot resolve to three distinct consecutive 30fps frames`
       );
     }
     samples.push(before!, exact!, after!);
