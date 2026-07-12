@@ -1886,6 +1886,64 @@ describe("GPT-Live preparation CLI", () => {
     expect(sealTellaExports).not.toHaveBeenCalled();
   });
 
+  it("rejects a positional signed URL without exposing its raw value", async () => {
+    const signedUrl = "https://prod-compose.tella.tv/a?positional-must-not-appear";
+    const loadEnvSnapshotFromFiles = vi.fn();
+    const sealTellaExports = vi.fn();
+    let message = "";
+    try {
+      await runGptLiveCli(["seal-exports", signedUrl], {
+        loadEnvSnapshotFromFiles,
+        sealTellaExports
+      });
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).toMatch(/Unexpected positional argument/);
+    expect(message).not.toContain(signedUrl);
+    expect(message).not.toContain("positional-must-not-appear");
+    expect(loadEnvSnapshotFromFiles).not.toHaveBeenCalled();
+    expect(sealTellaExports).not.toHaveBeenCalled();
+  });
+
+  it("rejects a signed URL source variant without exposing its raw value", async () => {
+    const signedUrl = "https://prod-compose.tella.tv/a?variant-must-not-appear";
+    const sealTellaExports = vi.fn();
+    let message = "";
+    try {
+      await runGptLiveCli([
+        "seal-exports",
+        "--episode-dir", "episodes/custom",
+        "--version-a-source-variant", signedUrl,
+        "--version-a-video-id", "vid_dynamic",
+        "--version-a-workflow-id", "Export-Story-vid_dynamic/2026-07-12T17:23:26.147Z/Story/1920x1080/30FPS",
+        "--version-b-source-variant", "aimh_visual_host",
+        "--version-b-video-id", "vid_host",
+        "--version-b-workflow-id", "Export-Story-vid_host/2026-07-12T17:24:26.147Z/Story/1920x1080/30FPS"
+      ], {
+        cwd: () => "/project",
+        loadEnvSnapshotFromFiles: async () => ({
+          values: {
+            GPT_LIVE_TELLA_VERSION_A_DOWNLOAD_URL: "https://prod-compose.tella.tv/a?secret-a",
+            GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL: "https://prod-compose.tella.tv/b?secret-b"
+          },
+          status: {
+            GPT_LIVE_TELLA_VERSION_A_DOWNLOAD_URL: { present: true, source: "shell" },
+            GPT_LIVE_TELLA_VERSION_B_DOWNLOAD_URL: { present: true, source: "shell" }
+          }
+        }),
+        sealTellaExports,
+        ...virtualCliFileSystem
+      });
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).toMatch(/Invalid --version-a-source-variant/);
+    expect(message).not.toContain(signedUrl);
+    expect(message).not.toContain("variant-must-not-appear");
+    expect(sealTellaExports).not.toHaveBeenCalled();
+  });
+
   it("formats seal output without environment URL values", () => {
     const signedUrl = "https://prod-compose.tella.tv/a?must-not-appear";
     const lines = formatGptLiveCliResult({

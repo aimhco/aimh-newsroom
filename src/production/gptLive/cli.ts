@@ -102,6 +102,9 @@ const SEAL_OPTIONS = [
 ] as const;
 type SealOption = (typeof SEAL_OPTIONS)[number];
 
+const formatUnknownSealOption = (rawName: string): string =>
+  /^--[A-Za-z0-9-]+$/.test(rawName) ? `Unknown option: ${rawName}` : "Unknown option";
+
 const parseSealArgs = (
   rawArgs: readonly string[]
 ): { readonly episodeDir?: string; readonly values: Partial<Record<SealOption, string>> } => {
@@ -116,10 +119,10 @@ const parseSealArgs = (
     const equalsIndex = argument.indexOf("=");
     const rawName = equalsIndex === -1 ? argument : argument.slice(0, equalsIndex);
     const inlineValue = equalsIndex === -1 ? undefined : argument.slice(equalsIndex + 1);
-    if (!rawName.startsWith("--")) throw new Error(`Unexpected positional argument: ${argument}`);
+    if (!rawName.startsWith("--")) throw new Error("Unexpected positional argument");
     const name = rawName.slice(2);
     if (name !== "episode-dir" && !SEAL_OPTIONS.includes(name as SealOption)) {
-      throw new Error(`Unknown option: ${rawName}`);
+      throw new Error(formatUnknownSealOption(rawName));
     }
     const key = name === "episode-dir" ? name : name as SealOption;
     const existing = key === "episode-dir" ? episodeDir : values[key];
@@ -157,7 +160,7 @@ const buildSealIdentities = (
       `GPT_LIVE_TELLA_VERSION_${prefix}_SOURCE_VARIANT`
     );
     if (sourceVariant !== "dynamic_editorial" && sourceVariant !== "aimh_visual_host") {
-      throw new Error(`Invalid --${version}-source-variant: ${sourceVariant}`);
+      throw new Error(`Invalid --${version}-source-variant`);
     }
     return {
       version,
