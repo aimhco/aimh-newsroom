@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import {
   lstat as defaultLstat,
   mkdir as defaultMkdir,
   mkdtemp as defaultMakeTempDirectory,
   open as defaultOpen,
+  readFile as defaultReadFile,
   realpath as defaultRealpath,
   rm as defaultRemoveDirectory,
   stat as defaultStat,
@@ -11,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { runCommand as defaultRunCommand } from "../../render/process";
 import { GPT_LIVE_CONTENT } from "./content";
 import { validateContainedEpisodePaths } from "./qa/paths";
 import type { EvidenceSpec, GptLiveScene } from "./types";
@@ -33,6 +36,14 @@ export interface EvidenceAssetDependencies {
   readonly stat?: (path: string) => Promise<EvidenceAssetStat>;
 }
 
+export interface InspectEvidenceAssetsDependencies extends EvidenceAssetDependencies {
+  readonly ffmpegPath?: string;
+  readonly makeTempDirectory?: (prefix: string) => Promise<string>;
+  readonly readFileBytes?: (path: string) => Promise<Uint8Array>;
+  readonly removeDirectory?: (path: string) => Promise<void>;
+  readonly runCommand?: typeof defaultRunCommand;
+}
+
 export interface StageEvidencePublicAssetsDependencies extends EvidenceAssetDependencies {
   readonly makeTempDirectory?: (prefix: string) => Promise<string>;
   readonly mkdir?: (path: string, options: { recursive: true }) => Promise<unknown>;
@@ -50,6 +61,18 @@ export interface EvidenceAssetDimensions {
   readonly height: number;
 }
 
+export interface EvidenceInspection extends EvidenceAssetDimensions {
+  readonly evidenceId: string;
+  readonly sourceId: string;
+  readonly canonicalUrl: string;
+  readonly assetPath: string;
+  readonly sha256: string;
+  readonly byteSize: number;
+  readonly lumaRange: number;
+  readonly lumaVariance: number;
+  readonly normalizedEntropy: number;
+}
+
 export type EvidenceAssetDimensionsByPath = Readonly<
   Record<string, EvidenceAssetDimensions>
 >;
@@ -58,6 +81,11 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 const READ_ONLY_NOFOLLOW =
   constants.O_RDONLY |
   (typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0);
+const MIN_EVIDENCE_WIDTH = 1280;
+const MIN_EVIDENCE_HEIGHT = 720;
+const MIN_LUMA_RANGE = 16;
+const MIN_LUMA_VARIANCE = 25;
+const MIN_NORMALIZED_ENTROPY = 0.02;
 
 interface CapturedEvidenceRoots {
   readonly episodeRoot: string;
@@ -109,10 +137,102 @@ const assertPngHeader = (
   ) {
     throw new Error(`Evidence capture has an invalid PNG IHDR: ${evidence.id}`);
   }
-  return {
+  const dimensions = {
     width: contents.readUInt32BE(16),
     height: contents.readUInt32BE(20)
   };
+  if (
+    dimensions.width < MIN_EVIDENCE_WIDTH ||
+    dimensions.height < MIN_EVIDENCE_HEIGHT
+  ) {
+    throw new Error(
+      `Evidence capture dimensions must be at least ${MIN_EVIDENCE_WIDTH}x${MIN_EVIDENCE_HEIGHT}: ${evidence.id}`
+    );
+  }
+  return dimensions;
+};
+
+const metadataNumber = (output: string, pattern: RegExp, label: string): number => {
+  const value = Number(output.match(pattern)?.[1]);
+  if (!Number.isFinite(value)) {
+    throw new Error(`Evidence raster metadata is unreadable: ${label}`);
+  }
+  return value;
+};
+
+const inspectDecodedRaster = async (
+  ffmpegPath: string,
+  path: string,
+  evidence: EvidenceSpec,
+  runCommand: typeof defaultRunCommand
+): Promise<Omit<EvidenceInspection, "evidenceId" | "sourceId" | "canonicalUrl" | "assetPath" | "sha256" | "byteSize">> => {
+  let result: Awaited<ReturnType<typeof defaultRunCommand>>;
+  try {
+    result = await runCommand(ffmpegPath, [
+      "-hide_banner",
+      "-nostats",
+      "-i",
+      path,
+      "-vf",
+      "format=gray,signalstats,entropy,showinfo,metadata=print",
+      "-frames:v",
+      "1",
+      "-f",
+      "null",
+      "-"
+    ]);
+  } catch (error) {
+    throw new Error(`Evidence capture is not a decodable PNG raster: ${evidence.id}`, {
+      cause: error
+    });
+  }
+  const output = `${result.stdout}\n${result.stderr}`;
+  const dimensionsMatch = output.match(/showinfo[^\n]*\bs:(\d+)x(\d+)\b/);
+  if (!dimensionsMatch) {
+    throw new Error(`Evidence raster metadata is unreadable: dimensions (${evidence.id})`);
+  }
+  const width = Number(dimensionsMatch[1]);
+  const height = Number(dimensionsMatch[2]);
+  const lumaMinimum = metadataNumber(
+    output,
+    /lavfi\.signalstats\.YMIN=([^\s]+)/,
+    `luma minimum (${evidence.id})`
+  );
+  const lumaMaximum = metadataNumber(
+    output,
+    /lavfi\.signalstats\.YMAX=([^\s]+)/,
+    `luma maximum (${evidence.id})`
+  );
+  const lumaStandardDeviation = metadataNumber(
+    output,
+    /showinfo[^\n]*stdev:\[([\d.]+)/,
+    `luma variance (${evidence.id})`
+  );
+  const normalizedEntropy = metadataNumber(
+    output,
+    /lavfi\.entropy\.normalized_entropy\.normal\.Y=([^\s]+)/,
+    `normalized entropy (${evidence.id})`
+  );
+  const metrics = {
+    width,
+    height,
+    lumaRange: lumaMaximum - lumaMinimum,
+    lumaVariance: Number((lumaStandardDeviation ** 2).toFixed(6)),
+    normalizedEntropy
+  };
+  if (width < MIN_EVIDENCE_WIDTH || height < MIN_EVIDENCE_HEIGHT) {
+    throw new Error(
+      `Evidence capture dimensions must be at least ${MIN_EVIDENCE_WIDTH}x${MIN_EVIDENCE_HEIGHT}: ${evidence.id}`
+    );
+  }
+  if (
+    metrics.lumaRange < MIN_LUMA_RANGE ||
+    metrics.lumaVariance < MIN_LUMA_VARIANCE ||
+    metrics.normalizedEntropy < MIN_NORMALIZED_ENTROPY
+  ) {
+    throw new Error(`Evidence capture is uniform, blank, or lacks meaningful content: ${evidence.id}`);
+  }
+  return metrics;
 };
 
 const inspectOpenedEvidence = async (
@@ -295,29 +415,72 @@ export function evidenceForScene(scene: GptLiveScene): readonly EvidenceSpec[] {
   );
 }
 
-export async function validateEvidenceAssets(
+export async function inspectEvidenceAssets(
   episodeDir: string,
   evidenceItems: readonly EvidenceSpec[] = GPT_LIVE_CONTENT.evidence,
-  dependencies: EvidenceAssetDependencies = {}
-): Promise<void> {
+  dependencies: InspectEvidenceAssetsDependencies = {}
+): Promise<readonly EvidenceInspection[]> {
   const captures = capturedEvidence(evidenceItems);
-  if (captures.length === 0) return;
-  const validatedPaths = await validateCapturePaths(episodeDir, captures, dependencies);
+  if (captures.length === 0) return [];
+  const makeTempDirectory = dependencies.makeTempDirectory ?? defaultMakeTempDirectory;
+  const readFileBytes = dependencies.readFileBytes ??
+    ((path: string) => defaultReadFile(path) as Promise<Uint8Array>);
+  const removeDirectory = dependencies.removeDirectory ??
+    ((path: string) => defaultRemoveDirectory(path, { recursive: true, force: true }));
+  const runCommand = dependencies.runCommand ?? defaultRunCommand;
   const lstat = dependencies.lstat ?? defaultLstat;
   const open = dependencies.open ?? defaultOpen;
   const realpath = dependencies.realpath ?? defaultRealpath;
   const stat = dependencies.stat ?? defaultStat;
-  for (const [index, evidence] of captures.entries()) {
-    await inspectOpenedEvidence(
-      validatedPaths.capturePaths[index]!,
-      evidence,
-      lstat,
-      open,
-      realpath,
-      stat,
-      validatedPaths.roots
-    );
+  const ffmpegPath = dependencies.ffmpegPath ?? process.env.FFMPEG_PATH ?? "ffmpeg";
+  const validatedPaths = await validateCapturePaths(episodeDir, captures, dependencies);
+  const inspectionDirectory = await makeTempDirectory(
+    join(tmpdir(), "gpt-live-evidence-inspection-")
+  );
+
+  try {
+    const inspections: EvidenceInspection[] = [];
+    for (const [index, evidence] of captures.entries()) {
+      const inspectionPath = join(
+        inspectionDirectory,
+        `${String(index).padStart(2, "0")}-${basename(evidence.assetPath)}`
+      );
+      await inspectOpenedEvidence(
+        validatedPaths.capturePaths[index]!,
+        evidence,
+        lstat,
+        open,
+        realpath,
+        stat,
+        validatedPaths.roots,
+        (handle) => copyOpenedFile(handle, inspectionPath, open)
+      );
+      const bytes = await readFileBytes(inspectionPath);
+      const metrics = await inspectDecodedRaster(ffmpegPath, inspectionPath, evidence, runCommand);
+      const source = GPT_LIVE_CONTENT.sources.find((item) => item.id === evidence.sourceId);
+      if (!source) throw new Error(`Evidence references unknown canonical source: ${evidence.id}`);
+      inspections.push({
+        evidenceId: evidence.id,
+        sourceId: evidence.sourceId,
+        canonicalUrl: source.url,
+        assetPath: evidence.assetPath,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        byteSize: bytes.byteLength,
+        ...metrics
+      });
+    }
+    return inspections;
+  } finally {
+    await removeDirectory(inspectionDirectory);
   }
+}
+
+export async function validateEvidenceAssets(
+  episodeDir: string,
+  evidenceItems: readonly EvidenceSpec[] = GPT_LIVE_CONTENT.evidence,
+  dependencies: InspectEvidenceAssetsDependencies = {}
+): Promise<void> {
+  await inspectEvidenceAssets(episodeDir, evidenceItems, dependencies);
 }
 
 export async function stageEvidencePublicAssets(

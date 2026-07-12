@@ -359,7 +359,10 @@ const validatePreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
   let prepared;
   try {
     prepared = parsePreparedGenerationRecord(snapshot.prepared, GPT_LIVE_CONTENT.id);
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && /evidence inspection/i.test(error.message)) {
+      return fail("prepared artifact evidence inspection record is invalid");
+    }
     return fail("prepared generation record is invalid");
   }
   const expected = buildPreparationFingerprint({
@@ -368,7 +371,8 @@ const validatePreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
     plan: snapshot.plan,
     sourceMatrix: snapshot.sourceMatrix,
     sourceManifest: snapshot.sourceManifest,
-    artifacts: prepared.artifacts
+    artifacts: prepared.artifacts,
+    evidenceInspections: prepared.evidenceInspections
   });
   if (prepared.manifestFingerprint !== expected) {
     fail("prepared generation fingerprint does not match production records");
@@ -383,6 +387,11 @@ const validatePreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
     snapshot.generation.preparedArtifacts,
     prepared.artifacts,
     "published generation prepared artifact bindings"
+  );
+  exact(
+    snapshot.observedEvidenceInspections,
+    prepared.evidenceInspections,
+    "fresh evidence inspections"
   );
 };
 

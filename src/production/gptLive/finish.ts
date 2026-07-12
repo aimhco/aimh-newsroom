@@ -17,6 +17,7 @@ import { GPT_LIVE_CONTENT } from "./content";
 import {
   derivePreparedArtifactDescriptors,
   hashPreparedArtifactDescriptors,
+  parsePreparedGenerationRecord,
   validatePreparedGeneration,
   type PreparedArtifactBinding,
   type PreparedGenerationRecord
@@ -376,6 +377,7 @@ interface ValidateCurrentPreparationOptions {
 const validateCurrentPreparation = async (
   options: ValidateCurrentPreparationOptions
 ): Promise<PreparedGenerationRecord> => {
+  const prepared = parsePreparedGenerationRecord(options.prepared, GPT_LIVE_CONTENT.id);
   const descriptors = derivePreparedArtifactDescriptors({
     episodeDir: options.episodeDir,
     production: options.production,
@@ -399,7 +401,8 @@ const validateCurrentPreparation = async (
     plan: options.plan,
     sourceMatrix: options.sourceMatrix,
     sourceManifest: options.sourceManifest,
-    artifacts
+    artifacts,
+    evidenceInspections: prepared.evidenceInspections
   });
 };
 

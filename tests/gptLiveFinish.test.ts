@@ -146,15 +146,47 @@ const preparedArtifact = (logicalId = "source:clip_translation") => ({
   byteSize: 17
 });
 
-describe("GPT-Live prepared artifact bindings", () => {
-  const fingerprintInput = () => ({
-    production: { id: GPT_LIVE_CONTENT.id },
-    voice: { provider: "elevenlabs" },
-    plan: { productionId: GPT_LIVE_CONTENT.id },
-    sourceMatrix: "matrix",
-    sourceManifest: { productionId: GPT_LIVE_CONTENT.id },
-    artifacts: [preparedArtifact(), preparedArtifact("voice:narration_hook")]
+const evidenceInspectionsFor = (
+  artifacts: readonly { logicalId: string; sha256: string; byteSize: number }[]
+) => GPT_LIVE_CONTENT.evidence
+  .filter((evidence) => evidence.playbackDecision === "captured_source")
+  .map((evidence, index) => {
+    const source = GPT_LIVE_CONTENT.sources.find((item) => item.id === evidence.sourceId)!;
+    const artifact = artifacts.find((item) => item.logicalId === `evidence:${evidence.id}`)!;
+    return {
+      evidenceId: evidence.id,
+      sourceId: evidence.sourceId,
+      canonicalUrl: source.url,
+      assetPath: evidence.assetPath,
+      sha256: artifact.sha256,
+      byteSize: artifact.byteSize,
+      width: 1280,
+      height: 720,
+      lumaRange: 200 - index,
+      lumaVariance: 900 + index,
+      normalizedEntropy: 0.2 + index / 100
+    };
   });
+
+describe("GPT-Live prepared artifact bindings", () => {
+  const fingerprintInput = () => {
+    const artifacts = [
+      ...GPT_LIVE_CONTENT.evidence
+        .filter((evidence) => evidence.playbackDecision === "captured_source")
+        .map((evidence) => preparedArtifact(`evidence:${evidence.id}`)),
+      preparedArtifact(),
+      preparedArtifact("voice:narration_hook")
+    ];
+    return {
+      production: { id: GPT_LIVE_CONTENT.id },
+      voice: { provider: "elevenlabs" },
+      plan: { productionId: GPT_LIVE_CONTENT.id },
+      sourceMatrix: "matrix",
+      sourceManifest: { productionId: GPT_LIVE_CONTENT.id },
+      artifacts,
+      evidenceInspections: evidenceInspectionsFor(artifacts)
+    };
+  };
 
   const preparedRecord = () => {
     const input = fingerprintInput();
@@ -163,6 +195,7 @@ describe("GPT-Live prepared artifact bindings", () => {
       status: "prepared",
       productionId: GPT_LIVE_CONTENT.id,
       artifacts: input.artifacts,
+      evidenceInspections: input.evidenceInspections,
       manifestFingerprint: buildPreparationFingerprint(input as any)
     };
   };
@@ -817,19 +850,22 @@ describe("GPT-Live post-production publication", () => {
       }),
       async (path) => readFile(path)
     );
+    const evidenceInspections = evidenceInspectionsFor(artifacts);
     const preparationFingerprint = buildPreparationFingerprint({
       production,
       voice,
       plan: episodePlan,
       sourceMatrix,
       sourceManifest,
-      artifacts
+      artifacts,
+      evidenceInspections
     });
     await writeFile(join(episodeDir, "reports", "prepared.json"), JSON.stringify({
       schemaVersion: "0.1.0",
       status: "prepared",
       productionId: GPT_LIVE_CONTENT.id,
       artifacts,
+      evidenceInspections,
       manifestFingerprint: preparationFingerprint
     }), "utf8");
     await sealTellaExports({

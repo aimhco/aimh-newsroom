@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { GPT_LIVE_CONTENT } from "./content";
-import { resolveEvidenceAssetPath } from "./evidence";
+import { resolveEvidenceAssetPath, type EvidenceInspection } from "./evidence";
 import { buildTellaPlan } from "./tellaPlan";
 
 export interface PreparationFingerprintInput {
@@ -11,6 +11,7 @@ export interface PreparationFingerprintInput {
   readonly sourceMatrix: string;
   readonly sourceManifest: unknown;
   readonly artifacts: readonly PreparedArtifactBinding[];
+  readonly evidenceInspections: readonly EvidenceInspection[];
 }
 
 export interface PreparedArtifactBinding {
@@ -40,6 +41,7 @@ export interface PreparedGenerationRecord {
   readonly status: "prepared";
   readonly productionId: string;
   readonly artifacts: readonly PreparedArtifactBinding[];
+  readonly evidenceInspections: readonly EvidenceInspection[];
   readonly manifestFingerprint: string;
 }
 
@@ -50,9 +52,23 @@ const PREPARED_KEYS = [
   "status",
   "productionId",
   "artifacts",
+  "evidenceInspections",
   "manifestFingerprint"
 ] as const;
 const ARTIFACT_KEYS = ["logicalId", "path", "sha256", "byteSize"] as const;
+const EVIDENCE_INSPECTION_KEYS = [
+  "evidenceId",
+  "sourceId",
+  "canonicalUrl",
+  "assetPath",
+  "sha256",
+  "byteSize",
+  "width",
+  "height",
+  "lumaRange",
+  "lumaVariance",
+  "normalizedEntropy"
+] as const;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -243,6 +259,54 @@ const parsePreparedArtifactBindings = (value: unknown): readonly PreparedArtifac
   });
 };
 
+const parseEvidenceInspectionRecords = (
+  value: unknown,
+  artifacts: readonly PreparedArtifactBinding[]
+): readonly EvidenceInspection[] => {
+  const captures = GPT_LIVE_CONTENT.evidence.filter(
+    (evidence) => evidence.playbackDecision === "captured_source"
+  );
+  if (!Array.isArray(value) || value.length !== captures.length) {
+    throw new Error("Invalid prepared evidence inspection coverage");
+  }
+  return value.map((item, index) => {
+    const evidence = captures[index]!;
+    const source = GPT_LIVE_CONTENT.sources.find((candidate) => candidate.id === evidence.sourceId);
+    const artifact = artifacts.find(
+      (candidate) => candidate.logicalId === `evidence:${evidence.id}`
+    );
+    if (
+      !source ||
+      !artifact ||
+      !isRecord(item) ||
+      !hasExactKeys(item, EVIDENCE_INSPECTION_KEYS) ||
+      item.evidenceId !== evidence.id ||
+      item.sourceId !== evidence.sourceId ||
+      item.canonicalUrl !== source.url ||
+      item.assetPath !== evidence.assetPath ||
+      item.sha256 !== artifact.sha256 ||
+      item.byteSize !== artifact.byteSize ||
+      !Number.isSafeInteger(item.width) ||
+      (item.width as number) < 1280 ||
+      !Number.isSafeInteger(item.height) ||
+      (item.height as number) < 720 ||
+      typeof item.lumaRange !== "number" ||
+      !Number.isFinite(item.lumaRange) ||
+      item.lumaRange < 16 ||
+      typeof item.lumaVariance !== "number" ||
+      !Number.isFinite(item.lumaVariance) ||
+      item.lumaVariance < 25 ||
+      typeof item.normalizedEntropy !== "number" ||
+      !Number.isFinite(item.normalizedEntropy) ||
+      item.normalizedEntropy < 0.02 ||
+      item.normalizedEntropy > 1
+    ) {
+      throw new Error(`Invalid prepared artifact evidence inspection: ${evidence.id}`);
+    }
+    return item as unknown as EvidenceInspection;
+  });
+};
+
 export function buildPreparationFingerprint(input: PreparationFingerprintInput): string {
   return createHash("sha256").update(JSON.stringify(input)).digest("hex");
 }
@@ -262,7 +326,8 @@ export function parsePreparedGenerationRecord(
   ) {
     throw new Error("Invalid prepared generation record");
   }
-  parsePreparedArtifactBindings(value.artifacts);
+  const artifacts = parsePreparedArtifactBindings(value.artifacts);
+  parseEvidenceInspectionRecords(value.evidenceInspections, artifacts);
   return value as unknown as PreparedGenerationRecord;
 }
 
@@ -274,6 +339,12 @@ export function validatePreparedGeneration(
   const prepared = parsePreparedGenerationRecord(preparedValue, expectedProductionId);
   if (JSON.stringify(prepared.artifacts) !== JSON.stringify(input.artifacts)) {
     throw new Error("Prepared artifact mismatch with current production artifacts");
+  }
+  if (
+    JSON.stringify(prepared.evidenceInspections) !==
+    JSON.stringify(input.evidenceInspections)
+  ) {
+    throw new Error("Prepared evidence inspection mismatch with current production evidence");
   }
   const currentFingerprint = buildPreparationFingerprint(input);
   if (prepared.manifestFingerprint !== currentFingerprint) {

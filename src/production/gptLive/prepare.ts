@@ -20,7 +20,10 @@ import {
   writeJsonAtomic as defaultWriteJsonAtomic,
   writeTextAtomic as defaultWriteTextAtomic
 } from "./atomicFiles";
-import { resolveEvidenceAssetPath, validateEvidenceAssets } from "./evidence";
+import {
+  inspectEvidenceAssets as defaultInspectEvidenceAssets,
+  resolveEvidenceAssetPath
+} from "./evidence";
 import { extractSourceClip as defaultExtractSourceClip } from "./media";
 import {
   buildPreparationFingerprint,
@@ -84,6 +87,7 @@ export interface PrepareGptLiveProductionDependencies {
   readonly synthesizeNarration?: SynthesizeNarration;
   readonly runCommand?: typeof defaultRunCommand;
   readonly inspectMediaFile?: typeof defaultInspectMediaFile;
+  readonly inspectEvidenceAssets?: typeof defaultInspectEvidenceAssets;
   readonly lstat?: typeof defaultLstat;
   readonly realpath?: typeof defaultRealpath;
   readonly readFileBytes?: ReadPreparedArtifactBytes;
@@ -355,6 +359,7 @@ export async function prepareGptLiveProduction(
   const synthesizeNarration = dependencies.synthesizeNarration ?? defaultSynthesizeNarration;
   const runCommand = dependencies.runCommand ?? defaultRunCommand;
   const inspectMediaFile = dependencies.inspectMediaFile ?? defaultInspectMediaFile;
+  const inspectEvidenceAssets = dependencies.inspectEvidenceAssets ?? defaultInspectEvidenceAssets;
   const lstat = dependencies.lstat ?? defaultLstat;
   const realpath = dependencies.realpath ?? defaultRealpath;
   const readFileBytes = dependencies.readFileBytes ??
@@ -395,10 +400,16 @@ export async function prepareGptLiveProduction(
     allowMissingEpisodeDir: true
   });
   await runPreflight(options, access);
-  await validateEvidenceAssets(options.episodeDir, GPT_LIVE_CONTENT.evidence, {
-    lstat,
-    realpath
-  });
+  const evidenceInspections = await inspectEvidenceAssets(
+    options.episodeDir,
+    GPT_LIVE_CONTENT.evidence,
+    {
+      ffmpegPath: options.ffmpegPath,
+      runCommand,
+      lstat,
+      realpath
+    }
+  );
 
   await Promise.all(
     EPISODE_SUBDIRECTORIES.map((directory) => ensureDir(join(options.episodeDir, directory)))
@@ -499,19 +510,35 @@ export async function prepareGptLiveProduction(
   );
   await validateAbsolutePreparedArtifacts(artifactDescriptors, lstat);
   const artifacts = await hashPreparedArtifactDescriptors(artifactDescriptors, readFileBytes);
+  for (const inspection of evidenceInspections) {
+    const artifact = artifacts.find(
+      (candidate) => candidate.logicalId === `evidence:${inspection.evidenceId}`
+    );
+    if (
+      !artifact ||
+      artifact.sha256 !== inspection.sha256 ||
+      artifact.byteSize !== inspection.byteSize
+    ) {
+      throw new Error(
+        `Evidence asset changed after raster inspection: ${inspection.evidenceId}`
+      );
+    }
+  }
   const manifestFingerprint = buildPreparationFingerprint({
     production,
     voice,
     plan,
     sourceMatrix,
     sourceManifest,
-    artifacts
+    artifacts,
+    evidenceInspections
   });
   const prepared = {
     schemaVersion: "0.1.0",
     status: "prepared",
     productionId: GPT_LIVE_CONTENT.id,
     artifacts,
+    evidenceInspections,
     manifestFingerprint
   } as const;
 

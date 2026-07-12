@@ -13,12 +13,14 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { Resvg } from "@resvg/resvg-js";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_ENV_KEYS, loadEnvSnapshot } from "../src/config/env";
 import * as contentModule from "../src/production/gptLive/content";
 import { formatGptLiveCliResult, runGptLiveCli } from "../src/production/gptLive/cli";
 import {
   evidenceForScene,
+  inspectEvidenceAssets,
   resolveEvidenceAssetPath,
   stageEvidencePublicAssets,
   validateEvidenceAssets
@@ -48,10 +50,24 @@ const { GPT_LIVE_CONTENT, GPT_LIVE_TIMELINE, validateProductionManifest } = cont
 const CAPTURED_EVIDENCE = GPT_LIVE_CONTENT.evidence.filter(
   (item) => item.playbackDecision === "captured_source"
 );
-const VALID_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-  "base64"
-);
+const VALID_PNG = Buffer.from(new Resvg(`
+  <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">
+    <defs><linearGradient id="g"><stop stop-color="#fff"/><stop offset="1" stop-color="#172554"/></linearGradient></defs>
+    <rect width="1280" height="720" fill="url(#g)"/>
+    <rect x="80" y="90" width="900" height="90" fill="#fff"/>
+    <rect x="80" y="240" width="1100" height="42" fill="#111827"/>
+    <circle cx="1060" cy="520" r="110" fill="#ef4444"/>
+  </svg>
+`).render().asPng());
+const inspectEvidenceFixtures: typeof inspectEvidenceAssets = (
+  episodeDir,
+  evidenceItems,
+  dependencies
+) => inspectEvidenceAssets(episodeDir, evidenceItems, {
+  ...dependencies,
+  ffmpegPath: process.env.FFMPEG_PATH ?? "ffmpeg",
+  runCommand: undefined
+});
 
 const materializeEvidenceFixtures = async (episodeDir: string): Promise<void> => {
   await mkdir(join(episodeDir, "evidence"), { recursive: true });
@@ -822,7 +838,7 @@ describe("GPT-Live production preparation", () => {
         Object.fromEntries(
           CAPTURED_EVIDENCE.map((evidence) => [
             evidence.assetPath,
-            { width: 1, height: 1 }
+            { width: 1280, height: 720 }
           ])
         )
       );
@@ -1050,6 +1066,7 @@ describe("GPT-Live production preparation", () => {
     });
     const readFileBytes = vi.fn(async (path: string) => {
       publications.push(`hash:${path}`);
+      if (path.startsWith(join(episodeDir, "evidence"))) return readFile(path);
       return new TextEncoder().encode(`prepared-bytes:${path}`);
     });
     const writeJsonAtomic = vi.fn(async (path: string, value: unknown) => {
@@ -1071,6 +1088,7 @@ describe("GPT-Live production preparation", () => {
         },
         {
           extractSourceClip,
+          inspectEvidenceAssets: inspectEvidenceFixtures,
           synthesizeNarration,
           runCommand,
           inspectMediaFile,
@@ -1165,6 +1183,22 @@ describe("GPT-Live production preparation", () => {
       expect(prepared.artifacts.every(({ sha256, byteSize }: any) =>
         /^[a-f0-9]{64}$/.test(sha256) && byteSize > 0
       )).toBe(true);
+      expect(prepared.evidenceInspections).toHaveLength(CAPTURED_EVIDENCE.length);
+      expect(prepared.evidenceInspections.map(({ evidenceId }: { evidenceId: string }) => evidenceId))
+        .toEqual(CAPTURED_EVIDENCE.map(({ id }) => id));
+      expect(prepared.evidenceInspections.every((inspection: any) => {
+        const artifact = prepared.artifacts.find(
+          ({ logicalId }: { logicalId: string }) =>
+            logicalId === `evidence:${inspection.evidenceId}`
+        );
+        return artifact?.sha256 === inspection.sha256 &&
+          artifact.byteSize === inspection.byteSize &&
+          inspection.width >= 1280 &&
+          inspection.height >= 720 &&
+          inspection.lumaRange >= 16 &&
+          inspection.lumaVariance >= 25 &&
+          inspection.normalizedEntropy >= 0.02;
+      })).toBe(true);
       expect(readFileBytes).toHaveBeenCalledTimes(expectedArtifactIds.length);
       expect(publications.indexOf("plates-complete")).toBeLessThan(
         publications.findIndex((event) => event.startsWith("hash:"))
@@ -1186,6 +1220,7 @@ describe("GPT-Live production preparation", () => {
         status: "prepared",
         productionId: GPT_LIVE_CONTENT.id,
         artifacts: prepared.artifacts,
+        evidenceInspections: prepared.evidenceInspections,
         manifestFingerprint: createHash("sha256")
           .update(JSON.stringify({
             production: JSON.parse(productionText),
@@ -1193,7 +1228,8 @@ describe("GPT-Live production preparation", () => {
             plan: JSON.parse(planText),
             sourceMatrix: matrixText,
             sourceManifest: EXPECTED_SOURCE_MANIFEST,
-            artifacts: prepared.artifacts
+            artifacts: prepared.artifacts,
+            evidenceInspections: prepared.evidenceInspections
           }))
           .digest("hex")
       });
@@ -1269,6 +1305,7 @@ describe("GPT-Live production preparation", () => {
           },
           {
             extractSourceClip: async () => undefined,
+            inspectEvidenceAssets: inspectEvidenceFixtures,
             synthesizeNarration: async ({ outDir }) => successfulVoiceResult(outDir),
             runCommand: async () => ({ stdout: "", stderr: "" }),
             inspectMediaFile: async (_ffprobePath, path) =>
@@ -1333,6 +1370,7 @@ describe("GPT-Live production preparation", () => {
         },
         {
           extractSourceClip: async () => undefined,
+          inspectEvidenceAssets: inspectEvidenceFixtures,
           synthesizeNarration: (async ({ outDir }: { outDir: string }) =>
             mutate(successfulVoiceResult(outDir))),
           runCommand: async () => ({ stdout: "", stderr: "" }),
@@ -1371,6 +1409,7 @@ describe("GPT-Live production preparation", () => {
           },
           {
             access: async () => undefined,
+            inspectEvidenceAssets: inspectEvidenceFixtures,
             extractSourceClip: async () => {
               throw new Error("injected source failure");
             }
@@ -1540,6 +1579,7 @@ describe("GPT-Live production preparation", () => {
           {
             access: async () => undefined,
             extractSourceClip: async () => undefined,
+            inspectEvidenceAssets: inspectEvidenceFixtures,
             synthesizeNarration: async ({ outDir }) => successfulVoiceResult(outDir),
             stat: async () => ({ size: 100, isFile: () => true }),
             runCommand: async () => ({ stdout: "", stderr: "" }),

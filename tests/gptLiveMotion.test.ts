@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundle as bundleRemotion } from "@remotion/bundler";
+import { Resvg } from "@resvg/resvg-js";
 import {
   openBrowser,
   renderStill,
@@ -71,10 +72,15 @@ import { runCommand } from "../src/render/process";
 
 const VARIANTS = ["dynamic_editorial", "aimh_visual_host"] as const satisfies readonly GptLiveVariant[];
 const SAFE_AREA: SceneRect = { x: 1722, y: 0, width: 198, height: 198 };
-const VALID_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-  "base64"
-);
+const VALID_PNG = Buffer.from(new Resvg(`
+  <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">
+    <defs><linearGradient id="g"><stop stop-color="#fff"/><stop offset="1" stop-color="#172554"/></linearGradient></defs>
+    <rect width="1280" height="720" fill="url(#g)"/>
+    <rect x="80" y="90" width="900" height="90" fill="#fff"/>
+    <rect x="80" y="240" width="1100" height="42" fill="#111827"/>
+    <circle cx="1060" cy="520" r="110" fill="#ef4444"/>
+  </svg>
+`).render().asPng());
 const MOTION_DIR = fileURLToPath(
   new URL("../src/production/gptLive/motion/", import.meta.url)
 );

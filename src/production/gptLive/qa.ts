@@ -12,6 +12,7 @@ import { join, relative, sep } from "node:path";
 import { runCommand as defaultRunCommand } from "../../render/process";
 import { writeJsonAtomic as defaultWriteJsonAtomic, writeTextAtomic as defaultWriteTextAtomic } from "./atomicFiles";
 import { GPT_LIVE_CONTENT } from "./content";
+import { inspectEvidenceAssets as defaultInspectEvidenceAssets } from "./evidence";
 import {
   inspectFinalMediaFile as defaultInspectFinalMediaFile,
   validatePublishedGeneration as defaultValidatePublishedGeneration,
@@ -116,6 +117,7 @@ export interface RunGptLiveQaDependencies {
   rm?: typeof defaultRm;
   runCommand?: typeof defaultRunCommand;
   inspectMediaFile?: (ffprobePath: string, path: string) => Promise<QaPreparedMediaInspection>;
+  inspectEvidenceAssets?: typeof defaultInspectEvidenceAssets;
   inspectFinalMediaFile?: (ffprobePath: string, path: string) => Promise<FinalMediaInspection>;
   generateVisualArtifacts?: typeof generateVisualArtifacts;
   writeJsonAtomic?: typeof defaultWriteJsonAtomic;
@@ -335,7 +337,7 @@ const collectSnapshot = async (
   generation: PublishedGenerationValidation,
   dependencies: Required<Pick<
     RunGptLiveQaDependencies,
-    "readFile" | "readFileBytes" | "stat" | "runCommand" | "inspectMediaFile" | "inspectFinalMediaFile" | "lstat" | "realpath" | "validateSealedTellaExports" | "verifySourceFullscreen"
+    "readFile" | "readFileBytes" | "stat" | "runCommand" | "inspectMediaFile" | "inspectEvidenceAssets" | "inspectFinalMediaFile" | "lstat" | "realpath" | "validateSealedTellaExports" | "verifySourceFullscreen"
   >>
 ): Promise<GptLiveQaSnapshot> => {
   const productionPath = join(options.episodeDir, "production.json");
@@ -508,6 +510,16 @@ const collectSnapshot = async (
     chunk.id,
     createHash("sha256").update(await dependencies.readFileBytes(chunk.file)).digest("hex")
   ] as const));
+  const observedEvidenceInspections = await dependencies.inspectEvidenceAssets(
+    options.episodeDir,
+    GPT_LIVE_CONTENT.evidence,
+    {
+      ffmpegPath: options.ffmpegPath,
+      runCommand: dependencies.runCommand,
+      lstat: dependencies.lstat,
+      realpath: dependencies.realpath
+    }
+  );
 
   return {
     episodeDir: options.episodeDir,
@@ -556,7 +568,8 @@ const collectSnapshot = async (
     observedIntegrityHashes: {
       sources: Object.fromEntries(sourceHashEntries),
       voice: Object.fromEntries(voiceHashEntries)
-    }
+    },
+    observedEvidenceInspections
   };
 };
 
@@ -605,6 +618,7 @@ const buildSafeQaReport = (
       tellaExportProvenance: true,
       sourceClipsFullscreen: true,
       finalGenerationIntegrity: true,
+      preparedEvidenceIntegrity: true,
       brandingAndSafeArea: true,
       audioTreatmentAndTailSignal: true,
       sampledFramesNonblank: true
@@ -634,7 +648,10 @@ const buildSafeQaReport = (
         path: `voice/${id}.mp3`,
         sha256
       }))
-    }
+    },
+    evidenceInspections: snapshot.observedEvidenceInspections,
+    evidenceOriginLimitation:
+      "Decoded pixels and file hashes prove inspected-byte integrity, not cryptographic URL origin; browser capture and human review remain trust boundaries."
   };
 };
 
@@ -704,6 +721,7 @@ async function runGptLiveQaUnlocked(
       defaultVerifySourceFullscreen(input, { runCommand }));
   const inspectMediaFile = dependencies.inspectMediaFile ??
     ((ffprobePath: string, path: string) => inspectPreparedMediaFile(ffprobePath, path, runCommand));
+  const inspectEvidenceAssets = dependencies.inspectEvidenceAssets ?? defaultInspectEvidenceAssets;
   const inspectFinalMediaFile = dependencies.inspectFinalMediaFile ??
     ((ffprobePath: string, path: string) => defaultInspectFinalMediaFile(ffprobePath, path, runCommand));
   const generateArtifacts = dependencies.generateVisualArtifacts ?? generateVisualArtifacts;
@@ -720,6 +738,7 @@ async function runGptLiveQaUnlocked(
     stat,
     runCommand,
     inspectMediaFile,
+    inspectEvidenceAssets,
     inspectFinalMediaFile,
     lstat,
     realpath,

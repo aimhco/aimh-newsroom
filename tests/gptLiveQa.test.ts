@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { GPT_LIVE_CONTENT } from "../src/production/gptLive/content";
+import type { EvidenceInspection } from "../src/production/gptLive/evidence";
 import {
   buildPostProductionManifest,
   buildProgramAudioPlan,
@@ -69,6 +70,27 @@ import { buildVoiceCacheKey } from "../src/voice/elevenLabsAdapter";
 
 const EPISODE_DIR = "/episode";
 const sha = (character: string): string => character.repeat(64);
+const evidenceInspectionsFor = (
+  artifacts: readonly { logicalId: string; sha256: string; byteSize: number }[]
+): EvidenceInspection[] => GPT_LIVE_CONTENT.evidence
+  .filter((evidence) => evidence.playbackDecision === "captured_source")
+  .map((evidence, index) => {
+    const source = GPT_LIVE_CONTENT.sources.find((item) => item.id === evidence.sourceId)!;
+    const artifact = artifacts.find((item) => item.logicalId === `evidence:${evidence.id}`)!;
+    return {
+      evidenceId: evidence.id,
+      sourceId: evidence.sourceId,
+      canonicalUrl: source.url,
+      assetPath: evidence.assetPath,
+      sha256: artifact.sha256,
+      byteSize: artifact.byteSize,
+      width: 1280,
+      height: 720,
+      lumaRange: 208 - index,
+      lumaVariance: 1024 + index,
+      normalizedEntropy: 0.25 + index / 100
+    };
+  });
 const transitionSampleRecords = (clips: readonly { id: string }[]) =>
   clips.slice(0, -1).flatMap((clip, index) => {
     const boundaryId = `boundary-${String(index + 1).padStart(2, "0")}-${clip.id}-to-${clips[index + 1]!.id}`;
@@ -356,6 +378,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
     sha256: createHash("sha256").update(`artifact-${index}`).digest("hex"),
     byteSize: index + 1
   }));
+  const evidenceInspections = evidenceInspectionsFor(preparedArtifacts);
   const manifestFingerprint = createHash("sha256")
     .update(JSON.stringify({
       production,
@@ -363,7 +386,8 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
       plan,
       sourceMatrix,
       sourceManifest,
-      artifacts: preparedArtifacts
+      artifacts: preparedArtifacts,
+      evidenceInspections
     }))
     .digest("hex");
   (postProduction as { preparationFingerprint: string }).preparationFingerprint = manifestFingerprint;
@@ -411,6 +435,7 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
       status: "prepared",
       productionId: GPT_LIVE_CONTENT.id,
       artifacts: preparedArtifacts,
+      evidenceInspections,
       manifestFingerprint
     },
     voice,
@@ -478,7 +503,8 @@ const validSnapshot = (outputDurationDeltaSeconds = 0): GptLiveQaSnapshot => {
           .map((item) => [item.id, sha("1")])
       ),
       voice: Object.fromEntries(voice.chunks.map((chunk) => [chunk.id, sha("2")]))
-    }
+    },
+    observedEvidenceInspections: structuredClone(evidenceInspections)
   } as unknown as GptLiveQaSnapshot;
 };
 
@@ -491,7 +517,8 @@ const refreshPreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
         plan: snapshot.plan,
         sourceMatrix: snapshot.sourceMatrix,
         sourceManifest: snapshot.sourceManifest,
-        artifacts: snapshot.prepared.artifacts
+        artifacts: snapshot.prepared.artifacts,
+        evidenceInspections: snapshot.prepared.evidenceInspections
       })
     )
     .digest("hex");
@@ -517,7 +544,8 @@ const createQaRunHarness = async () => {
       plan: snapshot.plan,
       sourceMatrix: snapshot.sourceMatrix,
       sourceManifest: snapshot.sourceManifest,
-      artifacts: snapshot.prepared.artifacts
+      artifacts: snapshot.prepared.artifacts,
+      evidenceInspections: snapshot.prepared.evidenceInspections
     }))
     .digest("hex");
   (snapshot.generation as { preparationFingerprint: string }).preparationFingerprint =
@@ -628,6 +656,7 @@ const createQaRunHarness = async () => {
       stat: async () => ({ isFile: () => true, size: 100 }),
       lstat: async () => ({ isDirectory: () => true, isSymbolicLink: () => false }) as any,
       realpath: async (path: any) => String(path),
+      inspectEvidenceAssets: async () => structuredClone(snapshot.observedEvidenceInspections),
       runCommand: async () => ({ stdout: "", stderr: "max_volume: -8.0 dB" }),
       inspectMediaFile: async (_ffprobePath: string, path: string) => preparedInspections.get(path)!,
       inspectFinalMediaFile: async (_ffprobePath: string, path: string) =>
@@ -1352,6 +1381,24 @@ describe("GPT-Live full production QA", () => {
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/prepared artifact|generation/i);
   });
 
+  it.each([
+    ["missing", (inspections: any[]) => inspections.slice(1)],
+    ["reordered", (inspections: any[]) => [inspections[1], inspections[0], ...inspections.slice(2)]],
+    ["extra", (inspections: any[]) => [...inspections, { ...inspections[0] }]],
+    ["source-rebound", (inspections: any[]) => [
+      { ...inspections[0], sourceId: GPT_LIVE_CONTENT.sources[1]!.id },
+      ...inspections.slice(1)
+    ]]
+  ])("rejects $name prepared evidence inspection coverage", (_name, mutate) => {
+    const snapshot = validSnapshot();
+    snapshot.prepared.evidenceInspections = mutate(
+      structuredClone(snapshot.prepared.evidenceInspections) as any[]
+    );
+    refreshPreparedFingerprint(snapshot);
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/evidence inspection/i);
+  });
+
   it("rejects published Tella input lineage that differs from the post-production report", () => {
     const snapshot = validSnapshot();
     const variants = snapshot.generation.variants as Array<
@@ -1436,6 +1483,35 @@ describe("GPT-Live full production QA", () => {
       expect(events).toEqual(["receipt", "fullscreen"]);
       expect(validateSealedTellaExports).toHaveBeenCalledOnce();
       expect(verifySourceFullscreen).toHaveBeenCalledOnce();
+      expect(generateVisualArtifacts).not.toHaveBeenCalled();
+    } finally {
+      await rm(harness.episodeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects evidence bytes mutated after prepare before generating visual QA artifacts", async () => {
+    const harness = await createQaRunHarness();
+    const changedInspections = structuredClone(
+      harness.snapshot.observedEvidenceInspections
+    ) as EvidenceInspection[];
+    changedInspections[0] = { ...changedInspections[0]!, sha256: sha("9") };
+    const inspectEvidenceAssets = vi.fn(async () => changedInspections);
+    const generateVisualArtifacts = vi.fn(harness.dependencies.generateVisualArtifacts!);
+
+    try {
+      await expect(runGptLiveQa({
+        episodeDir: harness.episodeDir,
+        env: harness.snapshot.env,
+        ffmpegPath: "ffmpeg",
+        ffprobePath: "ffprobe"
+      }, {
+        ...harness.dependencies,
+        validatePublishedGeneration: async () => harness.generation,
+        inspectEvidenceAssets,
+        generateVisualArtifacts
+      })).rejects.toThrow(/evidence inspection|evidence.*hash/i);
+
+      expect(inspectEvidenceAssets).toHaveBeenCalledOnce();
       expect(generateVisualArtifacts).not.toHaveBeenCalled();
     } finally {
       await rm(harness.episodeDir, { recursive: true, force: true });
@@ -2062,6 +2138,19 @@ describe("GPT-Live full production QA", () => {
         tellaExports: harness.generation.tellaExports,
         sourceFullscreen: harness.generation.sourceFullscreen
       });
+      expect(report.checks.preparedEvidenceIntegrity).toBe(true);
+      expect(report.evidenceInspections).toEqual(
+        harness.snapshot.observedEvidenceInspections
+      );
+      expect(report.evidenceInspections.map(({ evidenceId }: EvidenceInspection) => evidenceId))
+        .toEqual(
+          GPT_LIVE_CONTENT.evidence
+            .filter((evidence) => evidence.playbackDecision === "captured_source")
+            .map(({ id }) => id)
+        );
+      expect(report.evidenceOriginLimitation).toMatch(
+        /not cryptographic URL origin.*browser capture.*human review.*trust boundaries/i
+      );
     } finally {
       await rm(harness.episodeDir, { recursive: true, force: true });
     }
