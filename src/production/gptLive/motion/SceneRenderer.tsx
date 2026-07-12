@@ -8,33 +8,42 @@ import type { ScenePalette } from "./sceneStyle";
 import { HookScene, FullDuplexScene } from "./scenes/ConversationScenes";
 import { EvidenceScene, UseCasesScene } from "./scenes/EditorialScenes";
 import { AvailabilityScene, CtaScene, FutureScene } from "./scenes/ProductScenes";
+import { evidenceStage } from "./evidenceStages";
 
-export type EvidenceStage = "establish" | "explain" | "spotlight";
-
-export const evidenceStage = (frame: number, durationInFrames: number): EvidenceStage => {
-  const establishUntil = Math.min(60, Math.floor(durationInFrames * 0.2));
-  const spotlightFrom = Math.min(
-    durationInFrames - 1,
-    Math.max(establishUntil + 1, Math.floor(durationInFrames * 0.58))
-  );
-  if (frame < establishUntil) return "establish";
-  return frame >= spotlightFrom ? "spotlight" : "explain";
-};
+export { evidenceStage, evidenceStageFrames, type EvidenceStage } from "./evidenceStages";
 
 export const EvidenceSequence = ({
   evidence,
   frame,
-  durationInFrames
+  durationInFrames,
+  viewportWidth,
+  viewportHeight
 }: {
   readonly evidence: RenderableEvidence;
   readonly frame: number;
   readonly durationInFrames: number;
+  readonly viewportWidth: number;
+  readonly viewportHeight: number;
 }) => {
   const stage = evidenceStage(frame, durationInFrames);
   if (stage === "establish") {
-    return <EvidenceViewport evidence={evidence} spotlight={false} />;
+    return (
+      <EvidenceViewport
+        evidence={evidence}
+        spotlight={false}
+        viewportWidth={viewportWidth}
+        viewportHeight={viewportHeight}
+      />
+    );
   }
-  return <EvidenceLayout evidence={evidence} spotlight={stage === "spotlight"} />;
+  return (
+    <EvidenceLayout
+      evidence={evidence}
+      spotlight={stage === "spotlight"}
+      layoutWidth={viewportWidth}
+      layoutHeight={viewportHeight}
+    />
+  );
 };
 
 export const SceneRenderer = ({
@@ -43,7 +52,9 @@ export const SceneRenderer = ({
   frame,
   stateIndex,
   durationInFrames,
-  evidence
+  evidence,
+  viewportWidth,
+  viewportHeight
 }: {
   readonly content: SceneContent;
   readonly palette: ScenePalette;
@@ -51,6 +62,8 @@ export const SceneRenderer = ({
   readonly stateIndex: number;
   readonly durationInFrames: number;
   readonly evidence?: RenderableEvidence;
+  readonly viewportWidth: number;
+  readonly viewportHeight: number;
 }) => {
   if (evidence?.playbackDecision === "captured_source") {
     return (
@@ -58,6 +71,8 @@ export const SceneRenderer = ({
         evidence={evidence}
         frame={frame}
         durationInFrames={durationInFrames}
+        viewportWidth={viewportWidth}
+        viewportHeight={viewportHeight}
       />
     );
   }

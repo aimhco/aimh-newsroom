@@ -10,8 +10,18 @@ import type { GptLivePlateProps } from "./Root";
 import { SceneRenderer } from "./SceneRenderer";
 import { sceneStateIndex } from "./beatState";
 import { resolveEvidenceAssetUrl } from "./evidenceAsset";
+import { evidenceStage, type EvidenceStage } from "./evidenceStages";
 import { MOTION_SANS_FONT } from "./fonts";
-import { sceneStyle } from "./sceneStyle";
+import { sceneStyle, type SceneRect } from "./sceneStyle";
+
+export const evidencePlateLayout = (
+  stage: EvidenceStage,
+  frameRect: SceneRect,
+  contentRect: SceneRect
+): { readonly rect: SceneRect; readonly animateEntrance: boolean } => ({
+  rect: stage === "establish" ? frameRect : contentRect,
+  animateEntrance: false
+});
 
 export const GptLivePlate = (props: GptLivePlateProps) => {
   const { delayRender, continueRender, cancelRender } = useDelayRender();
@@ -30,9 +40,13 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
     props.evidence?.playbackDecision === "captured_source"
       ? { ...props.evidence, assetUrl: resolveEvidenceAssetUrl(props.evidence.assetPath) }
       : undefined;
-  const entrance = evidence
-    ? 1
-    : spring({ frame, fps, config: { damping: 18, stiffness: 130, mass: 0.8 } });
+  const frameRect = { x: 0, y: 0, width, height };
+  const plateLayout = evidence
+    ? evidencePlateLayout(evidenceStage(frame, durationInFrames), frameRect, contentRegion)
+    : { rect: contentRegion, animateEntrance: true };
+  const entrance = plateLayout.animateEntrance
+    ? spring({ frame, fps, config: { damping: 18, stiffness: 130, mass: 0.8 } })
+    : 1;
   const stateIndex = sceneStateIndex(
     content.scene,
     frame,
@@ -55,12 +69,14 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
       <div
         style={{
           position: "absolute",
-          left: contentRegion.x,
-          top: contentRegion.y,
-          width: contentRegion.width,
-          height: contentRegion.height,
+          left: plateLayout.rect.x,
+          top: plateLayout.rect.y,
+          width: plateLayout.rect.width,
+          height: plateLayout.rect.height,
           boxSizing: "border-box",
-          transform: `translateX(${(1 - entrance) * -28}px)`,
+          transform: plateLayout.animateEntrance
+            ? `translateX(${(1 - entrance) * -28}px)`
+            : "none",
           opacity: entrance
         }}
       >
@@ -71,6 +87,8 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
           stateIndex={stateIndex}
           durationInFrames={durationInFrames}
           evidence={evidence}
+          viewportWidth={plateLayout.rect.width}
+          viewportHeight={plateLayout.rect.height}
         />
       </div>
     </AbsoluteFill>

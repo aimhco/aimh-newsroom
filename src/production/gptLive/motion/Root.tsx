@@ -6,11 +6,16 @@ import { GptLivePlate } from "./GptLivePlate";
 
 export { resolveEvidenceAssetUrl } from "./evidenceAsset";
 
+export interface RenderedEvidenceSpec extends EvidenceSpec {
+  readonly assetWidth: number;
+  readonly assetHeight: number;
+}
+
 export interface GptLivePlateProps extends Record<string, unknown> {
   readonly variant: GptLiveVariant;
   readonly durationSeconds: number;
   readonly sceneContent: SceneContent;
-  readonly evidence?: EvidenceSpec;
+  readonly evidence?: RenderedEvidenceSpec;
 }
 
 const DEFAULT_PROPS: GptLivePlateProps = {

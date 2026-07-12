@@ -58,7 +58,11 @@ export const Waveform = ({ palette, frame }: { palette: ScenePalette; frame: num
   </div>
 );
 
-export type RenderableEvidence = EvidenceSpec & { readonly assetUrl: string };
+export type RenderableEvidence = EvidenceSpec & {
+  readonly assetUrl: string;
+  readonly assetWidth: number;
+  readonly assetHeight: number;
+};
 
 export interface EvidencePlacementGeometry {
   readonly gridTemplateColumns: string;
@@ -102,15 +106,38 @@ export const evidencePlacementGeometry = (
   }
 };
 
-const percentage = (value: number): string => `${Number((value * 100).toFixed(6))}%`;
+export const calculateContainedRect = (
+  viewportWidth: number,
+  viewportHeight: number,
+  assetWidth: number,
+  assetHeight: number
+): { readonly x: number; readonly y: number; readonly width: number; readonly height: number } => {
+  if (
+    ![viewportWidth, viewportHeight, assetWidth, assetHeight].every(
+      (value) => Number.isFinite(value) && value > 0
+    )
+  ) {
+    throw new Error("Contained evidence dimensions must be finite and positive");
+  }
+  const scale = Math.min(viewportWidth / assetWidth, viewportHeight / assetHeight);
+  const width = assetWidth * scale;
+  const height = assetHeight * scale;
+  return {
+    x: (viewportWidth - width) / 2,
+    y: (viewportHeight - height) / 2,
+    width,
+    height
+  };
+};
 
-export const focalRectStyle = (
+export const calculateFocalRect = (
+  containedRect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
   focalRect: EvidenceFocalRect
-): Pick<CSSProperties, "left" | "top" | "width" | "height"> => ({
-  left: percentage(focalRect.x),
-  top: percentage(focalRect.y),
-  width: percentage(focalRect.width),
-  height: percentage(focalRect.height)
+): { readonly x: number; readonly y: number; readonly width: number; readonly height: number } => ({
+  x: containedRect.x + containedRect.width * focalRect.x,
+  y: containedRect.y + containedRect.height * focalRect.y,
+  width: containedRect.width * focalRect.width,
+  height: containedRect.height * focalRect.height
 });
 
 export const EditorialBand = ({ evidence }: { readonly evidence: EvidenceSpec }) => {
@@ -193,48 +220,79 @@ export const CompactAttribution = ({ evidence }: { readonly evidence: EvidenceSp
 
 export const EvidenceViewport = ({
   evidence,
-  spotlight
+  spotlight,
+  viewportWidth,
+  viewportHeight
 }: {
   readonly evidence: RenderableEvidence;
   readonly spotlight: boolean;
-}) => (
-  <div
-    style={{
-      position: "relative",
-      width: "100%",
-      height: "100%",
-      overflow: "hidden",
-      background: "#F2F3F1"
-    }}
-  >
-    <Img
-      src={evidence.assetUrl}
-      style={{ width: "100%", height: "100%", display: "block", objectFit: "contain" }}
-    />
-    {spotlight ? (
-      <div
+  readonly viewportWidth: number;
+  readonly viewportHeight: number;
+}) => {
+  const containedRect = calculateContainedRect(
+    viewportWidth,
+    viewportHeight,
+    evidence.assetWidth,
+    evidence.assetHeight
+  );
+  const spotlightRect = calculateFocalRect(containedRect, evidence.focalRect);
+  return (
+    <div
+      style={{
+        position: "relative",
+        width: "100%",
+        height: "100%",
+        overflow: "hidden",
+        background: "#F2F3F1"
+      }}
+    >
+      <Img
+        src={evidence.assetUrl}
         style={{
           position: "absolute",
-          ...focalRectStyle(evidence.focalRect),
-          zIndex: 1,
-          border: "6px solid #E85B50",
-          boxShadow: "0 0 0 9999px rgba(255,255,255,0.4)",
-          boxSizing: "border-box"
+          left: containedRect.x,
+          top: containedRect.y,
+          width: containedRect.width,
+          height: containedRect.height,
+          display: "block",
+          objectFit: "contain"
         }}
       />
-    ) : null}
-    <CompactAttribution evidence={evidence} />
-  </div>
-);
+      {spotlight ? (
+        <div
+          style={{
+            position: "absolute",
+            left: spotlightRect.x,
+            top: spotlightRect.y,
+            width: spotlightRect.width,
+            height: spotlightRect.height,
+            zIndex: 1,
+            border: "6px solid #E85B50",
+            boxShadow: "0 0 0 9999px rgba(255,255,255,0.4)",
+            boxSizing: "border-box"
+          }}
+        />
+      ) : null}
+      <CompactAttribution evidence={evidence} />
+    </div>
+  );
+};
 
 export const EvidenceLayout = ({
   evidence,
-  spotlight
+  spotlight,
+  layoutWidth,
+  layoutHeight
 }: {
   readonly evidence: RenderableEvidence;
   readonly spotlight: boolean;
+  readonly layoutWidth: number;
+  readonly layoutHeight: number;
 }) => {
   const geometry = evidencePlacementGeometry(evidence.placement);
+  const sidePlacement = evidence.placement === "left" || evidence.placement === "right";
+  const viewportWidth = sidePlacement ? layoutWidth * 0.64 : layoutWidth;
+  const viewportHeight = sidePlacement ? layoutHeight : layoutHeight * 0.72;
   return (
     <div
       style={{
@@ -250,7 +308,12 @@ export const EvidenceLayout = ({
         <EditorialBand evidence={evidence} />
       </div>
       <div style={{ gridArea: geometry.viewportGridArea, minWidth: 0, minHeight: 0 }}>
-        <EvidenceViewport evidence={evidence} spotlight={spotlight} />
+        <EvidenceViewport
+          evidence={evidence}
+          spotlight={spotlight}
+          viewportWidth={viewportWidth}
+          viewportHeight={viewportHeight}
+        />
       </div>
     </div>
   );

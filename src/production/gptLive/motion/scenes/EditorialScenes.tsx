@@ -19,10 +19,7 @@ export const UseCasesScene = ({
       <Header palette={palette} content={content} />
       <div style={{ marginTop: 52, display: "grid", gridTemplateColumns: "1.3fr 0.7fr", gap: 68 }}>
         <div>
-          <div style={{ ...factLabelStyle(palette), color: palette.accent }}>
-            {content.progressLabel} / {active + 1} OF {content.items.length}
-          </div>
-          <div style={{ marginTop: 34, fontSize: 104, lineHeight: 0.96, fontWeight: 880, maxWidth: 950 }}>
+          <div style={{ fontSize: 104, lineHeight: 0.96, fontWeight: 880, maxWidth: 950 }}>
             {content.items[active]!.label}
           </div>
           <div style={{ marginTop: 30, fontSize: 40, lineHeight: 1.2, maxWidth: 900 }}>

@@ -59,7 +59,7 @@ const renderFrame = async (
 };
 
 const createContactSheet = async (ffmpegPath: string, outputDir: string): Promise<string> => {
-  const output = join(outputDir, "contact-sheet-960.png");
+  const output = join(outputDir, "contact-sheet-1500.png");
   await runCommand(ffmpegPath, [
     "-y",
     "-loglevel",
@@ -73,7 +73,7 @@ const createContactSheet = async (ffmpegPath: string, outputDir: string): Promis
     "-i",
     join(outputDir, "frames", "dynamic*.png"),
     "-filter_complex",
-    "[0:v][1:v]concat=n=2:v=1:a=0,scale=480:270,tile=4x4:nb_frames=14:padding=8:margin=8:color=0x242424,scale=960:-1",
+    "[0:v][1:v]concat=n=2:v=1:a=0,scale=320:180,tile=5x6:nb_frames=30:padding=8:margin=8:color=0x242424,scale=1500:-1",
     "-frames:v",
     "1",
     "-update",
@@ -123,13 +123,29 @@ export async function renderGptLiveMotionSmoke(
 
     for (const item of buildSmokeFramePlan(DURATION_IN_FRAMES)) {
       const output = join(framesDir, item.outputName);
+      const dimensions = item.evidence
+        ? stagedEvidence.dimensions[item.evidence.assetPath]
+        : undefined;
+      if (item.evidence && !dimensions) {
+        throw new Error(`Missing smoke evidence dimensions: ${item.evidence.id}`);
+      }
       await renderFrame(serveUrl, output, item.frame, {
         variant: item.variant,
         durationSeconds: DURATION_SECONDS,
         sceneContent: item.sceneContent,
-        ...(item.evidence ? { evidence: item.evidence } : {})
+        ...(item.evidence && dimensions
+          ? {
+              evidence: {
+                ...item.evidence,
+                assetWidth: dimensions.width,
+                assetHeight: dimensions.height
+              }
+            }
+          : {})
       });
-      await assertRenderedSafeArea(ffmpegPath, output);
+      if (item.stage !== "establish") {
+        await assertRenderedSafeArea(ffmpegPath, output);
+      }
     }
 
     for (const [index, frame] of useCaseTemporalFrames(DURATION_IN_FRAMES).entries()) {

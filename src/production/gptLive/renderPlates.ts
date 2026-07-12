@@ -20,6 +20,7 @@ import {
   evidenceForScene,
   evidencePublicAssetPath,
   stageEvidencePublicAssets as defaultStageEvidencePublicAssets,
+  type EvidenceAssetDimensionsByPath,
   type StagedEvidencePublicAssets
 } from "./evidence";
 import {
@@ -53,6 +54,7 @@ export interface PlateRenderJob {
 export interface BuildPlateRenderJobsOptions {
   readonly episodeDir: string;
   readonly narrationRecords: readonly PlateNarrationRecord[];
+  readonly evidenceDimensions: EvidenceAssetDimensionsByPath;
 }
 
 export interface RenderGptLivePlatesOptions {
@@ -175,6 +177,13 @@ export function buildPlateRenderJobs(options: BuildPlateRenderJobsOptions): read
   return GPT_LIVE_CONTENT.narration.flatMap((narration) => {
     const record = records.get(narration.id)!;
     const evidence = evidenceForScene(narration.scene);
+    const publicAssetPath = evidence ? evidencePublicAssetPath(evidence) : undefined;
+    const assetDimensions = publicAssetPath
+      ? options.evidenceDimensions[publicAssetPath]
+      : undefined;
+    if (evidence && !assetDimensions) {
+      throw new Error(`Missing staged evidence dimensions: ${evidence.id}`);
+    }
     return GPT_LIVE_CONTENT.variants.map((variant) => ({
       narrationId: narration.id,
       variant,
@@ -185,8 +194,15 @@ export function buildPlateRenderJobs(options: BuildPlateRenderJobsOptions): read
         variant,
         durationSeconds: record.durationSeconds,
         sceneContent: GPT_LIVE_VISUAL_CONTENT[narration.scene],
-        ...(evidence
-          ? { evidence: { ...evidence, assetPath: evidencePublicAssetPath(evidence) } }
+        ...(evidence && publicAssetPath && assetDimensions
+          ? {
+              evidence: {
+                ...evidence,
+                assetPath: publicAssetPath,
+                assetWidth: assetDimensions.width,
+                assetHeight: assetDimensions.height
+              }
+            }
           : {})
       }
     }));
@@ -255,10 +271,6 @@ export async function renderGptLivePlates(
   const writeJsonAtomic = dependencies.writeJsonAtomic ?? defaultWriteJsonAtomic;
   const narrationRecords = options.narrationRecords ??
     await readPlateNarrationRecords(options.episodeDir, dependencies.readFile ?? defaultReadFile);
-  const jobs = buildPlateRenderJobs({
-    episodeDir: options.episodeDir,
-    narrationRecords
-  });
   const plan = buildTellaPlan({
     episodeDir: options.episodeDir,
     narrationAssets: narrationRecords.map((record) => ({
@@ -296,6 +308,11 @@ export async function renderGptLivePlates(
   };
 
   try {
+    const jobs = buildPlateRenderJobs({
+      episodeDir: options.episodeDir,
+      narrationRecords,
+      evidenceDimensions: stagedEvidence.dimensions
+    });
     stagingPath = await makeTempDirectory(join(options.episodeDir, ".plates-staging-"));
     const backupPath = `${stagingPath}.backup`;
     const serveUrl = await bundle({ entryPoint, publicDir: stagedEvidence.publicDir });

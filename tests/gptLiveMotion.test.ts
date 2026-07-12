@@ -8,7 +8,7 @@ import {
   symlink,
   writeFile
 } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,9 +37,10 @@ import {
   type SceneRect
 } from "../src/production/gptLive/motion/sceneStyle";
 import {
-  evidencePlacementGeometry,
-  focalRectStyle
+  evidencePlacementGeometry
 } from "../src/production/gptLive/motion/scenePrimitives";
+import * as plateModule from "../src/production/gptLive/motion/GptLivePlate";
+import * as primitiveModule from "../src/production/gptLive/motion/scenePrimitives";
 import { evidenceStage } from "../src/production/gptLive/motion/SceneRenderer";
 import {
   assertUniformSafeAreaMetadata,
@@ -68,6 +69,35 @@ const VALID_PNG = Buffer.from(
 const MOTION_DIR = fileURLToPath(
   new URL("../src/production/gptLive/motion/", import.meta.url)
 );
+const TEST_EVIDENCE_DIMENSIONS = Object.fromEntries(
+  GPT_LIVE_CONTENT.evidence
+    .filter((item) => item.playbackDecision === "captured_source")
+    .map((item) => [item.assetPath, { width: 1920, height: 1080 }])
+);
+const calculateContainedRect = (
+  primitiveModule as unknown as {
+    calculateContainedRect?: (
+      viewportWidth: number,
+      viewportHeight: number,
+      assetWidth: number,
+      assetHeight: number
+    ) => SceneRect;
+  }
+).calculateContainedRect;
+const calculateFocalRect = (
+  primitiveModule as unknown as {
+    calculateFocalRect?: (containedRect: SceneRect, focalRect: EvidenceSpec["focalRect"]) => SceneRect;
+  }
+).calculateFocalRect;
+const evidencePlateLayout = (
+  plateModule as unknown as {
+    evidencePlateLayout?: (
+      stage: "establish" | "explain" | "spotlight",
+      frameRect: SceneRect,
+      contentRect: SceneRect
+    ) => { readonly rect: SceneRect; readonly animateEntrance: boolean };
+  }
+).evidencePlateLayout;
 
 const withTimeout = async <T>(
   operation: Promise<T>,
@@ -139,6 +169,7 @@ const virtualAtomicFs = (episodeDir: string, finalExists = false) => {
     cleanupEvidence,
     stageEvidencePublicAssets: vi.fn(async () => ({
       publicDir: evidencePublicDir,
+      dimensions: TEST_EVIDENCE_DIMENSIONS,
       cleanup: cleanupEvidence
     }))
   };
@@ -146,6 +177,7 @@ const virtualAtomicFs = (episodeDir: string, finalExists = false) => {
 
 const virtualEvidenceStage = (episodeDir: string) => ({
   publicDir: join(episodeDir, ".evidence-public-test"),
+  dimensions: TEST_EVIDENCE_DIMENSIONS,
   cleanup: async () => undefined
 });
 
@@ -276,13 +308,25 @@ describe("GPT-Live Remotion composition metadata", () => {
 });
 
 describe("GPT-Live evidence-first motion contracts", () => {
-  it("removes host and experimental footer UI from motion source", () => {
-    const plateSource = readFileSync(join(MOTION_DIR, "GptLivePlate.tsx"), "utf8");
-    const primitivesSource = readFileSync(join(MOTION_DIR, "scenePrimitives.tsx"), "utf8");
+  it("removes internal host, footer, and use-case labels from all motion source", () => {
+    const motionSource = readdirSync(MOTION_DIR, { recursive: true })
+      .filter((path): path is string => typeof path === "string" && /\.tsx?$/.test(path))
+      .map((path) => readFileSync(join(MOTION_DIR, path), "utf8"))
+      .join("\n");
+    const editorialSource = readFileSync(
+      join(MOTION_DIR, "scenes", "EditorialScenes.tsx"),
+      "utf8"
+    );
 
-    expect(`${plateSource}\n${primitivesSource}`).not.toMatch(
+    expect(motionSource).not.toMatch(
       /HostRail|DYNAMIC EDITORIAL|AIMH VISUAL HOST|PLATE \//
     );
+    expect(editorialSource).not.toMatch(/progressLabel|OF \{content\.items\.length\}/);
+  });
+
+  it("keeps the Node-side smoke planner free of React renderer imports", () => {
+    const smokePlanSource = readFileSync(join(MOTION_DIR, "smokePlan.ts"), "utf8");
+    expect(smokePlanSource).not.toMatch(/from "\.\/SceneRenderer"/);
   });
 
   it("uses Remotion evidence images with contain and never cover", () => {
@@ -334,12 +378,47 @@ describe("GPT-Live evidence-first motion contracts", () => {
     expect(evidencePlacementGeometry(placement)).toEqual(expected);
   });
 
-  it("maps normalized focal geometry directly to percentage bounds", () => {
-    expect(focalRectStyle({ x: 0.18, y: 0.22, width: 0.64, height: 0.46 })).toEqual({
-      left: "18%",
-      top: "22%",
-      width: "64%",
-      height: "46%"
+  it("calculates a 16:9 contained rect in the narrow side viewport", () => {
+    expect(calculateContainedRect).toBeTypeOf("function");
+    const rect = calculateContainedRect?.(1011.2, 900, 1920, 1080);
+    expect(rect?.x).toBeCloseTo(0, 5);
+    expect(rect?.y).toBeCloseTo(165.6, 5);
+    expect(rect?.width).toBeCloseTo(1011.2, 5);
+    expect(rect?.height).toBeCloseTo(568.8, 5);
+  });
+
+  it("calculates the contained rect for the 1271x658 GPT-Live capture", () => {
+    expect(calculateContainedRect).toBeTypeOf("function");
+    const rect = calculateContainedRect?.(1011.2, 900, 1271, 658);
+    expect(rect?.x).toBeCloseTo(0, 5);
+    expect(rect?.y).toBeCloseTo(188.25, 2);
+    expect(rect?.width).toBeCloseTo(1011.2, 5);
+    expect(rect?.height).toBeCloseTo(523.501, 3);
+  });
+
+  it("maps focal geometry inside the actual contained image rect", () => {
+    expect(calculateFocalRect).toBeTypeOf("function");
+    const rect = calculateFocalRect?.(
+      { x: 0, y: 165.6, width: 1011.2, height: 568.8 },
+      { x: 0.08, y: 0.22, width: 0.78, height: 0.46 }
+    );
+    expect(rect?.x).toBeCloseTo(80.896, 5);
+    expect(rect?.y).toBeCloseTo(290.736, 5);
+    expect(rect?.width).toBeCloseTo(788.736, 5);
+    expect(rect?.height).toBeCloseTo(261.648, 5);
+  });
+
+  it("uses a genuine full-frame wrapper only during evidence establish", () => {
+    expect(evidencePlateLayout).toBeTypeOf("function");
+    const frameRect = { x: 0, y: 0, width: 1920, height: 1080 };
+    const contentRect = { x: 72, y: 90, width: 1580, height: 900 };
+    expect(evidencePlateLayout?.("establish", frameRect, contentRect)).toEqual({
+      rect: frameRect,
+      animateEntrance: false
+    });
+    expect(evidencePlateLayout?.("explain", frameRect, contentRect)).toEqual({
+      rect: contentRect,
+      animateEntrance: false
     });
   });
 
@@ -417,27 +496,38 @@ describe("GPT-Live normalized beat scheduling", () => {
 });
 
 describe("GPT-Live rendered smoke planning", () => {
-  it("plans one safe-area-checked still per scene and variant", () => {
+  it("plans every evidence stage plus one still for each preserved motion scene", () => {
     const plan = buildSmokeFramePlan(8 * 30);
-    expect(plan).toHaveLength(14);
-    expect(new Set(plan.map(({ outputName }) => outputName)).size).toBe(14);
+    expect(plan).toHaveLength(30);
+    expect(new Set(plan.map(({ outputName }) => outputName)).size).toBe(30);
     expect(new Set(plan.map(({ sceneContent }) => sceneContent.scene))).toEqual(
       new Set(GPT_LIVE_SCENES)
     );
     expect(new Set(plan.map(({ variant }) => variant))).toEqual(new Set(VARIANTS));
   });
 
-  it("includes captured evidence only for evidence-first smoke scenes", () => {
+  it("samples establish, explain, and spotlight for every captured evidence scene", () => {
     const plan = buildSmokeFramePlan(8 * 30);
-    for (const item of plan) {
-      const expected = GPT_LIVE_CONTENT.evidence.find(
-        (evidence) =>
-          evidence.scene === item.sceneContent.scene &&
-          evidence.playbackDecision === "captured_source"
-      );
-      expect((item as typeof item & { readonly evidence?: EvidenceSpec }).evidence).toEqual(
-        expected
-      );
+    const capturedScenes = GPT_LIVE_CONTENT.evidence
+      .filter((evidence) => evidence.playbackDecision === "captured_source")
+      .map(({ scene }) => scene);
+    for (const variant of VARIANTS) {
+      for (const scene of capturedScenes) {
+        const items = plan.filter(
+          (item) => item.variant === variant && item.sceneContent.scene === scene
+        ) as readonly (typeof plan[number] & { readonly stage?: string })[];
+        expect(items.map(({ stage }) => stage)).toEqual([
+          "establish",
+          "explain",
+          "spotlight"
+        ]);
+        expect(items.map(({ frame }) => frame).map((frame) => evidenceStage(frame, 240))).toEqual([
+          "establish",
+          "explain",
+          "spotlight"
+        ]);
+        expect(items.every(({ evidence }) => evidence?.scene === scene)).toBe(true);
+      }
     }
   });
 
@@ -490,7 +580,11 @@ describe("GPT-Live plate render planning", () => {
 
   it("builds exactly one job per narration and variant with shared measured durations", () => {
     const episodeDir = "/tmp/gpt-live-motion";
-    const jobs = buildPlateRenderJobs({ episodeDir, narrationRecords });
+    const jobs = buildPlateRenderJobs({
+      episodeDir,
+      narrationRecords,
+      evidenceDimensions: TEST_EVIDENCE_DIMENSIONS
+    });
 
     expect(jobs).toHaveLength(14);
     for (const [index, narration] of GPT_LIVE_CONTENT.narration.entries()) {
@@ -512,7 +606,11 @@ describe("GPT-Live plate render planning", () => {
         (item) => item.scene === narration.scene && item.playbackDecision === "captured_source"
       );
       if (capturedEvidence) {
-        expect(matching[0]!.inputProps.evidence).toEqual(capturedEvidence);
+        expect(matching[0]!.inputProps.evidence).toMatchObject({
+          ...capturedEvidence,
+          assetWidth: 1920,
+          assetHeight: 1080
+        });
         expect(matching[0]!.inputProps.evidence).not.toHaveProperty("assetUrl");
       } else {
         expect(matching[0]!.inputProps).not.toHaveProperty("evidence");
@@ -521,7 +619,11 @@ describe("GPT-Live plate render planning", () => {
   });
 
   it("never creates plate jobs for source clips", () => {
-    const jobs = buildPlateRenderJobs({ episodeDir: "/tmp/gpt-live-motion", narrationRecords });
+    const jobs = buildPlateRenderJobs({
+      episodeDir: "/tmp/gpt-live-motion",
+      narrationRecords,
+      evidenceDimensions: TEST_EVIDENCE_DIMENSIONS
+    });
     const sourceIds = new Set<string>(GPT_LIVE_CONTENT.timeline
       .filter((item) => item.kind === "source_clip")
       .map(({ id }) => id));
@@ -553,7 +655,12 @@ describe("GPT-Live plate render planning", () => {
     const events: string[] = [];
     const bundle = vi.fn(async () => "serve-url");
     const selectComposition = vi.fn(async (_options: unknown) => ({ id: "GptLivePlate" }));
-    const renderMedia = vi.fn(async (options: { outputLocation: string; muted?: boolean; codec: string }) => {
+    const renderMedia = vi.fn(async (options: {
+      outputLocation: string;
+      muted?: boolean;
+      codec: string;
+      inputProps: GptLivePlateProps;
+    }) => {
       events.push(`render:${options.outputLocation}`);
     });
     const inspectMediaFile = vi.fn(async (_ffprobe: string, outputPath: string) => {
@@ -604,6 +711,14 @@ describe("GPT-Live plate render planning", () => {
     }
     expect(renderMedia.mock.calls.every(([options]) => options.codec === "h264")).toBe(true);
     expect(renderMedia.mock.calls.every(([options]) => options.muted === true)).toBe(true);
+    expect(
+      renderMedia.mock.calls
+        .map(([options]) => options.inputProps.evidence)
+        .filter(Boolean)
+        .every((evidence) =>
+          evidence?.assetWidth === 1920 && evidence.assetHeight === 1080
+        )
+    ).toBe(true);
     expect(writeJsonAtomic).toHaveBeenCalledOnce();
     expect(atomicFs.renameDirectory).toHaveBeenCalledWith(
       join(episodeDir, ".plates-staging-test"),
@@ -713,7 +828,11 @@ describe("GPT-Live plate render planning", () => {
         }
       );
 
-      const evidenceJob = buildPlateRenderJobs({ episodeDir, narrationRecords }).find(
+      const evidenceJob = buildPlateRenderJobs({
+        episodeDir,
+        narrationRecords,
+        evidenceDimensions: staged.dimensions
+      }).find(
         (job) => job.inputProps.evidence
       )!;
       const composition = await withTimeout(

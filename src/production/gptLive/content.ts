@@ -536,7 +536,7 @@ const GPT_LIVE_EVIDENCE = [
     placement: "left",
     takeaway: "Listen and speak at the same time.",
     detail: "This is why GPT-Live feels like a call instead of a walkie-talkie.",
-    focalRect: { x: 0.18, y: 0.18, width: 0.64, height: 0.34 },
+    focalRect: { x: 0.26, y: 0.39, width: 0.48, height: 0.22 },
     youtubeDescription: true
   },
   {
@@ -553,7 +553,7 @@ const GPT_LIVE_EVIDENCE = [
     placement: "right",
     takeaway: "A live broadcast became continuous interpretation.",
     detail: "Tom's Guide reported English interpretation over rapid Spanish commentary.",
-    focalRect: { x: 0.08, y: 0.22, width: 0.78, height: 0.46 },
+    focalRect: { x: 0.25, y: 0.78, width: 0.34, height: 0.14 },
     youtubeDescription: true
   },
   {
@@ -569,7 +569,7 @@ const GPT_LIVE_EVIDENCE = [
     placement: "left",
     takeaway: "Free gets mini. Paid plans get GPT-Live-1.",
     detail: "Launch access and limitations remain visible beside the explanation.",
-    focalRect: { x: 0.12, y: 0.18, width: 0.76, height: 0.5 },
+    focalRect: { x: 0.11, y: 0.88, width: 0.58, height: 0.1 },
     youtubeDescription: true
   },
   {
@@ -587,7 +587,7 @@ const GPT_LIVE_EVIDENCE = [
     takeaway: "Voice becomes an interface for action.",
     detail:
       "Realtime tools point toward scheduling, support, travel changes, and multilingual work.",
-    focalRect: { x: 0.08, y: 0.2, width: 0.82, height: 0.48 },
+    focalRect: { x: 0.35, y: 0.61, width: 0.45, height: 0.2 },
     youtubeDescription: true
   }
 ] as const satisfies readonly EvidenceSpec[];

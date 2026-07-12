@@ -41,8 +41,18 @@ export interface StageEvidencePublicAssetsDependencies extends EvidenceAssetDepe
 
 export interface StagedEvidencePublicAssets {
   readonly publicDir: string;
+  readonly dimensions: EvidenceAssetDimensionsByPath;
   cleanup(): Promise<void>;
 }
+
+export interface EvidenceAssetDimensions {
+  readonly width: number;
+  readonly height: number;
+}
+
+export type EvidenceAssetDimensionsByPath = Readonly<
+  Record<string, EvidenceAssetDimensions>
+>;
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const READ_ONLY_NOFOLLOW =
@@ -83,7 +93,10 @@ const capturedEvidence = (evidenceItems: readonly EvidenceSpec[]): readonly Evid
   return captures;
 };
 
-const assertPngHeader = (contents: Buffer, evidence: EvidenceSpec): void => {
+const assertPngHeader = (
+  contents: Buffer,
+  evidence: EvidenceSpec
+): EvidenceAssetDimensions => {
   if (!contents.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
     throw new Error(`Evidence capture has an invalid PNG signature: ${evidence.id}`);
   }
@@ -96,6 +109,10 @@ const assertPngHeader = (contents: Buffer, evidence: EvidenceSpec): void => {
   ) {
     throw new Error(`Evidence capture has an invalid PNG IHDR: ${evidence.id}`);
   }
+  return {
+    width: contents.readUInt32BE(16),
+    height: contents.readUInt32BE(20)
+  };
 };
 
 const inspectOpenedEvidence = async (
@@ -106,8 +123,8 @@ const inspectOpenedEvidence = async (
   realpath: (path: string) => Promise<string>,
   stat: (path: string) => Promise<EvidenceAssetStat>,
   roots: CapturedEvidenceRoots,
-  action?: (handle: FileHandle) => Promise<void>
-): Promise<void> => {
+  action?: (handle: FileHandle, dimensions: EvidenceAssetDimensions) => Promise<void>
+): Promise<EvidenceAssetDimensions> => {
   let pathStat: EvidenceAssetStat;
   try {
     pathStat = await lstat(evidencePath);
@@ -177,8 +194,9 @@ const inspectOpenedEvidence = async (
     }
     const header = Buffer.alloc(24);
     const { bytesRead } = await handle.read(header, 0, header.length, 0);
-    assertPngHeader(header.subarray(0, bytesRead), evidence);
-    await action?.(handle);
+    const dimensions = assertPngHeader(header.subarray(0, bytesRead), evidence);
+    await action?.(handle, dimensions);
+    return dimensions;
   } finally {
     await handle.close();
   }
@@ -322,6 +340,7 @@ export async function stageEvidencePublicAssets(
   const realpath = dependencies.realpath ?? defaultRealpath;
   const stat = dependencies.stat ?? defaultStat;
   const publicDir = await makeTempDirectory(join(tmpdir(), "gpt-live-evidence-public-"));
+  const dimensions: Record<string, EvidenceAssetDimensions> = {};
   let cleaned = false;
   const cleanup = async (): Promise<void> => {
     if (cleaned) return;
@@ -334,7 +353,7 @@ export async function stageEvidencePublicAssets(
     if (captures.length > 0) {
       const validatedPaths = await validateCapturePaths(episodeDir, captures, dependencies);
       for (const [index, evidence] of captures.entries()) {
-        await inspectOpenedEvidence(
+        dimensions[publicPaths[index]!] = await inspectOpenedEvidence(
           validatedPaths.capturePaths[index]!,
           evidence,
           lstat,
@@ -346,7 +365,7 @@ export async function stageEvidencePublicAssets(
         );
       }
     }
-    return { publicDir, cleanup };
+    return { publicDir, dimensions, cleanup };
   } catch (error) {
     await cleanup();
     throw error;
