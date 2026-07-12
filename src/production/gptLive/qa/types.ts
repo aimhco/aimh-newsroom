@@ -30,6 +30,25 @@ export interface QaProduction {
   };
 }
 
+export interface GptLiveSourceManifestEntry {
+  sourceId: string;
+  publisher: string;
+  title: string;
+  canonicalUrl: string;
+  mediaUrls?: string[];
+  scenes: EvidenceSpec["scene"][];
+  claims: string[];
+  onScreenAttribution: string[];
+  playbackDecisions: EvidenceSpec["playbackDecision"][];
+  youtubeDescription: boolean;
+}
+
+export interface GptLiveSourceManifest {
+  schemaVersion: string;
+  productionId: string;
+  sources: GptLiveSourceManifestEntry[];
+}
+
 export interface QaVoiceChunk {
   id: string;
   text: string;
@@ -87,6 +106,7 @@ export interface GptLiveQaSnapshot {
   generation: PublishedGenerationValidation;
   production: QaProduction;
   sourceMatrix: string;
+  sourceManifest: GptLiveSourceManifest;
   prepared: Record<string, unknown>;
   voice: QaVoice;
   voiceCacheMetadata: Record<string, QaVoiceCacheMetadata | null>;

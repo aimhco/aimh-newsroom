@@ -24,6 +24,7 @@ import type { TellaPlan } from "./tellaPlan";
 import type {
   GptLiveQaResult,
   GptLiveQaSnapshot,
+  GptLiveSourceManifest,
   QaProduction,
   QaPreparedMediaInspection,
   QaTailAudioCheck,
@@ -42,6 +43,8 @@ export { validateGptLiveQaSnapshot } from "./qa/validation";
 export type {
   GptLiveQaResult,
   GptLiveQaSnapshot,
+  GptLiveSourceManifest,
+  GptLiveSourceManifestEntry,
   QaProduction,
   QaPreparedMediaInspection,
   QaSafeArea,
@@ -328,6 +331,7 @@ const collectSnapshot = async (
   const statePath = join(options.episodeDir, "tella", "state.json");
   const preparedPath = join(options.episodeDir, "reports", "prepared.json");
   const sourceMatrixPath = join(options.episodeDir, "reports", "source-matrix.md");
+  const sourceManifestPath = join(options.episodeDir, "reports", "source-manifest.json");
   const humanPlaybackPath = join(options.episodeDir, "reports", "human-playback.json");
 
   await validateNoSymlinkPaths(options.episodeDir, [
@@ -338,10 +342,20 @@ const collectSnapshot = async (
     generation.reportPath,
     preparedPath,
     sourceMatrixPath,
+    sourceManifestPath,
     humanPlaybackPath
   ], dependencies);
 
-  const [productionText, voiceText, planText, stateText, postText, preparedText, sourceMatrix] =
+  const [
+    productionText,
+    voiceText,
+    planText,
+    stateText,
+    postText,
+    preparedText,
+    sourceMatrix,
+    sourceManifestText
+  ] =
     await Promise.all([
       dependencies.readFile(productionPath, "utf8"),
       dependencies.readFile(voicePath, "utf8"),
@@ -349,7 +363,8 @@ const collectSnapshot = async (
       dependencies.readFile(statePath, "utf8"),
       dependencies.readFile(generation.reportPath, "utf8"),
       dependencies.readFile(preparedPath, "utf8"),
-      dependencies.readFile(sourceMatrixPath, "utf8")
+      dependencies.readFile(sourceMatrixPath, "utf8"),
+      dependencies.readFile(sourceManifestPath, "utf8")
     ]);
   const production = parseJson<QaProduction>(productionText, "production manifest");
   const voice = parseJson<QaVoice>(voiceText, "voice manifest");
@@ -357,6 +372,10 @@ const collectSnapshot = async (
   const tellaState = parseJson<unknown>(stateText, "Tella state");
   const postProduction = parseJson<Record<string, unknown>>(postText, "post-production report");
   const prepared = parseJson<Record<string, unknown>>(preparedText, "prepared report");
+  const sourceManifest = parseJson<GptLiveSourceManifest>(
+    sourceManifestText,
+    "source manifest"
+  );
 
   await withValidatedQaArtifactPaths({
     episodeDir: options.episodeDir,
@@ -447,6 +466,7 @@ const collectSnapshot = async (
     generation,
     production,
     sourceMatrix,
+    sourceManifest,
     prepared,
     voice,
     voiceCacheMetadata: Object.fromEntries(voiceCacheEntries),

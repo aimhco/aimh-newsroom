@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   lstat as fsLstat,
   mkdir,
@@ -32,6 +33,7 @@ import {
   buildNarrationSlateArgs,
   prepareGptLiveProduction
 } from "../src/production/gptLive/prepare";
+import * as prepareModule from "../src/production/gptLive/prepare";
 import { validateSerializedQaPaths } from "../src/production/gptLive/qa/paths";
 import type { QaProduction, QaVoice } from "../src/production/gptLive/qa/types";
 import { buildTellaPlan } from "../src/production/gptLive/tellaPlan";
@@ -438,6 +440,33 @@ const EXPECTED_AUDIO = {
   outroDurationSeconds: 7
 } as const;
 
+const unique = <T>(values: readonly T[]): T[] => [...new Set(values)];
+
+const EXPECTED_SOURCE_MANIFEST = {
+  schemaVersion: "0.1.0",
+  productionId: "2026-07-10-gpt-live-tella-ab",
+  sources: EXPECTED_SOURCES.map((source) => {
+    const evidence = EXPECTED_EVIDENCE.filter((item) => item.sourceId === source.id);
+    const mediaUrls = unique(evidence.flatMap((item) => "mediaUrl" in item ? [item.mediaUrl] : []));
+    return {
+      sourceId: source.id,
+      publisher: source.publisher,
+      title: source.title,
+      canonicalUrl: source.url,
+      ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
+      scenes: unique(evidence.map((item) => item.scene)),
+      claims: EXPECTED_CLAIMS.filter((claim) =>
+        claim.sourceIds.some((sourceId) => sourceId === source.id)
+      ).map(
+        (claim) => claim.id
+      ),
+      onScreenAttribution: unique(evidence.map((item) => item.displayUrl)),
+      playbackDecisions: unique(evidence.map((item) => item.playbackDecision)),
+      youtubeDescription: evidence.some((item) => item.youtubeDescription)
+    };
+  })
+} as const;
+
 const cloneProduction = (): GptLiveProduction => structuredClone(GPT_LIVE_CONTENT);
 
 const replaceEvidence = (
@@ -457,6 +486,42 @@ const narrationAssets = GPT_LIVE_CONTENT.narration.map((item, index) => ({
   audioPath: join(EPISODE_DIR, "voice", `${item.id}.mp3`),
   durationSeconds: 10 + index / 10
 }));
+
+describe("GPT-Live source manifest", () => {
+  it("builds exactly one deterministic attribution entry per canonical production source", () => {
+    const buildSourceManifest = (
+      prepareModule as typeof prepareModule & { buildSourceManifest?: () => unknown }
+    ).buildSourceManifest;
+
+    expect(buildSourceManifest).toBeTypeOf("function");
+    expect(buildSourceManifest!()).toEqual(EXPECTED_SOURCE_MANIFEST);
+    expect(EXPECTED_SOURCE_MANIFEST.sources[0]).toEqual({
+      sourceId: "src_openai_article",
+      publisher: "OpenAI",
+      title: "Introducing GPT-Live",
+      canonicalUrl: "https://openai.com/index/introducing-gpt-live/",
+      mediaUrls: [
+        "https://openai.com/index/introducing-gpt-live/?video=1208096618",
+        "https://openai.com/index/introducing-gpt-live/?video=1208152658"
+      ],
+      scenes: ["hook", "full_duplex"],
+      claims: [
+        "claim_full_duplex",
+        "claim_translation",
+        "claim_delegation",
+        "claim_visuals",
+        "claim_benchmark",
+        "claim_api_soon"
+      ],
+      onScreenAttribution: ["OPENAI.COM / GPT-LIVE"],
+      playbackDecisions: ["full_screen_original_audio", "captured_source"],
+      youtubeDescription: true
+    });
+    expect(new Set(EXPECTED_SOURCE_MANIFEST.sources.map(({ sourceId }) => sourceId)).size).toBe(
+      GPT_LIVE_CONTENT.sources.length
+    );
+  });
+});
 
 describe("GPT-Live Tella plan", () => {
   it("preserves the exact nine-item timeline order and kinds", () => {
@@ -986,8 +1051,17 @@ describe("GPT-Live production preparation", () => {
       const voiceText = await readFile(result.voicePath, "utf8");
       const planText = await readFile(result.planPath, "utf8");
       const matrixText = await readFile(result.sourceMatrixPath, "utf8");
+      const sourceManifestPath = join(episodeDir, "reports", "source-manifest.json");
+      const sourceManifestText = await readFile(sourceManifestPath, "utf8");
       const preparedText = await readFile(result.preparedPath, "utf8");
-      const persistedText = [productionText, voiceText, planText, matrixText, preparedText].join("\n");
+      const persistedText = [
+        productionText,
+        voiceText,
+        planText,
+        matrixText,
+        sourceManifestText,
+        preparedText
+      ].join("\n");
 
       expect(JSON.parse(productionText)).toMatchObject({
         id: GPT_LIVE_CONTENT.id,
@@ -1005,11 +1079,24 @@ describe("GPT-Live production preparation", () => {
         expect(matrixText).toContain(source.title);
         expect(matrixText).toContain(source.url);
       }
+      expect(JSON.parse(sourceManifestText)).toEqual(EXPECTED_SOURCE_MANIFEST);
+      expect((result as typeof result & { sourceManifestPath?: string }).sourceManifestPath).toBe(
+        sourceManifestPath
+      );
       expect(persistedText).not.toMatch(/eleven-secret|voice-secret|playlist\.m3u8\?/);
-      expect(JSON.parse(preparedText)).toMatchObject({
+      expect(JSON.parse(preparedText)).toEqual({
+        schemaVersion: "0.1.0",
         status: "prepared",
         productionId: GPT_LIVE_CONTENT.id,
-        manifestFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/)
+        manifestFingerprint: createHash("sha256")
+          .update(JSON.stringify({
+            production: JSON.parse(productionText),
+            voice: JSON.parse(voiceText),
+            plan: JSON.parse(planText),
+            sourceMatrix: matrixText,
+            sourceManifest: EXPECTED_SOURCE_MANIFEST
+          }))
+          .digest("hex")
       });
       expect(() =>
         validateSerializedQaPaths({
@@ -1035,6 +1122,7 @@ describe("GPT-Live production preparation", () => {
         result.voicePath,
         result.planPath,
         result.sourceMatrixPath,
+        sourceManifestPath,
         result.preparedPath
       ]);
       expect(publications.indexOf("plates-complete")).toBeLessThan(

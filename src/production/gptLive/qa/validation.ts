@@ -12,9 +12,10 @@ import {
 } from "../finish";
 import { assertNarrationSlateContract } from "../mediaInspection";
 import { GPT_LIVE_SCENES } from "../motion/sceneStyle";
+import { buildSourceManifest } from "../prepare";
 import { assertPlateContract } from "../renderPlates";
 import { buildTellaPlan } from "../tellaPlan";
-import type { GptLiveProduction } from "../types";
+import type { EvidenceSpec, GptLiveProduction, ProductionClaim } from "../types";
 import { buildSpeechRequestBody, buildVoiceCacheKey } from "../../../voice/elevenLabsAdapter";
 import type {
   GptLiveQaSnapshot,
@@ -30,6 +31,13 @@ const HASH = /^[a-f0-9]{64}$/;
 const FRAME_RATE_TOLERANCE = 0.001;
 const SOURCE_DURATION_TOLERANCE_SECONDS = 0.25;
 const TAIL_SIGNAL_FLOOR_DB = -50;
+const UNSAFE_URL_PARAMETER_SUFFIXES = [
+  "token",
+  "signature",
+  "key",
+  "expires",
+  "credential"
+] as const;
 
 const fail = (detail: string): never => {
   throw new Error(`GPT-Live QA failed: ${detail}`);
@@ -45,6 +53,169 @@ const requireRecord = (value: unknown, label: string): Record<string, unknown> =
 
 const exact = (actual: unknown, expected: unknown, label: string): void => {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) fail(`${label} does not match the approved contract`);
+};
+
+const uniqueStringArray = (value: unknown, label: string): string[] => {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
+    fail(`${label} must be an array of non-empty strings`);
+  }
+  const values = value as string[];
+  if (new Set(values).size !== values.length) fail(`${label} must contain unique values`);
+  return values;
+};
+
+const safeHttpsUrl = (value: unknown, label: string): string => {
+  if (typeof value !== "string" || !value.trim()) fail(`${label} must be a non-empty URL`);
+  const parsed = (() => {
+    try {
+      return new URL(value as string);
+    } catch {
+      return fail(`${label} must be a valid HTTPS URL`);
+    }
+  })();
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+    fail(`${label} must be a safe HTTPS URL without credentials`);
+  }
+  for (const key of parsed.searchParams.keys()) {
+    const normalized = key.toLowerCase().replaceAll(/[^a-z]/g, "");
+    if (UNSAFE_URL_PARAMETER_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) {
+      fail(`${label} contains an unsafe query parameter`);
+    }
+  }
+  return value as string;
+};
+
+const validateSourceManifest = (snapshot: GptLiveQaSnapshot): void => {
+  const manifest = requireRecord(snapshot.sourceManifest, "source manifest");
+  exact(
+    Object.keys(manifest).sort(),
+    ["schemaVersion", "productionId", "sources"].sort(),
+    "source manifest"
+  );
+  if (manifest.schemaVersion !== "0.1.0") fail("source manifest schema version is invalid");
+  if (manifest.productionId !== GPT_LIVE_CONTENT.id) fail("source manifest production ID is invalid");
+  const sourceValues = Array.isArray(manifest.sources)
+    ? manifest.sources
+    : fail("source manifest sources must be an array");
+
+  const entries = sourceValues.map((value, index) => {
+    const entry = requireRecord(value, `source manifest entry ${index + 1}`);
+    const expectedKeys = [
+      "sourceId",
+      "publisher",
+      "title",
+      "canonicalUrl",
+      "scenes",
+      "claims",
+      "onScreenAttribution",
+      "playbackDecisions",
+      "youtubeDescription",
+      ...(Object.hasOwn(entry, "mediaUrls") ? ["mediaUrls"] : [])
+    ];
+    exact(Object.keys(entry).sort(), expectedKeys.sort(), `source manifest entry ${index + 1}`);
+    if (
+      typeof entry.sourceId !== "string" ||
+      typeof entry.publisher !== "string" ||
+      typeof entry.title !== "string" ||
+      typeof entry.youtubeDescription !== "boolean"
+    ) {
+      fail(`source manifest entry ${index + 1} is malformed`);
+    }
+    safeHttpsUrl(entry.canonicalUrl, `source manifest canonical URL for ${entry.sourceId}`);
+    uniqueStringArray(entry.scenes, `source manifest scenes for ${entry.sourceId}`);
+    uniqueStringArray(entry.claims, `source manifest claims for ${entry.sourceId}`);
+    uniqueStringArray(
+      entry.onScreenAttribution,
+      `source manifest on-screen attribution for ${entry.sourceId}`
+    );
+    uniqueStringArray(
+      entry.playbackDecisions,
+      `source manifest playback decisions for ${entry.sourceId}`
+    );
+    if (Object.hasOwn(entry, "mediaUrls")) {
+      for (const mediaUrl of uniqueStringArray(
+        entry.mediaUrls,
+        `source manifest media URLs for ${entry.sourceId}`
+      )) {
+        safeHttpsUrl(mediaUrl, `source manifest media URL for ${entry.sourceId}`);
+      }
+    }
+    return entry;
+  });
+
+  const sourceIds = entries.map((entry) => entry.sourceId as string);
+  if (new Set(sourceIds).size !== sourceIds.length) fail("source manifest source IDs must be unique");
+  exact(
+    sourceIds,
+    GPT_LIVE_CONTENT.sources.map((source) => source.id),
+    "source manifest source coverage and order"
+  );
+
+  const expected = buildSourceManifest();
+  const evidenceItems: readonly EvidenceSpec[] = GPT_LIVE_CONTENT.evidence;
+  const claims: readonly ProductionClaim[] = GPT_LIVE_CONTENT.claims;
+  for (const [index, expectedEntry] of expected.sources.entries()) {
+    const entry = entries[index]!;
+    const sourceEvidence = evidenceItems.filter(
+      (evidence) => evidence.sourceId === expectedEntry.sourceId
+    );
+    const sourceClaims = claims
+      .filter((claim) =>
+        claim.sourceIds.some((sourceId) => sourceId === expectedEntry.sourceId)
+      )
+      .map((claim) => claim.id);
+
+    exact(entry.publisher, expectedEntry.publisher, `source manifest publisher for ${expectedEntry.sourceId}`);
+    exact(entry.title, expectedEntry.title, `source manifest title for ${expectedEntry.sourceId}`);
+    exact(
+      entry.canonicalUrl,
+      expectedEntry.canonicalUrl,
+      `source manifest canonical URL for ${expectedEntry.sourceId}`
+    );
+    exact(
+      Object.hasOwn(entry, "mediaUrls") ? entry.mediaUrls : undefined,
+      expectedEntry.mediaUrls,
+      `source manifest media URLs for ${expectedEntry.sourceId}`
+    );
+    exact(entry.claims, sourceClaims, `source manifest claims for ${expectedEntry.sourceId}`);
+
+    for (const evidence of sourceEvidence) {
+      if (!(entry.scenes as string[]).includes(evidence.scene)) {
+        fail(`source manifest is missing evidence scene ${evidence.scene} for ${evidence.id}`);
+      }
+      if (!(entry.onScreenAttribution as string[]).includes(evidence.displayUrl)) {
+        fail(`source manifest is missing on-screen attribution for ${evidence.id}`);
+      }
+      if (!(entry.playbackDecisions as string[]).includes(evidence.playbackDecision)) {
+        fail(`source manifest is missing playback decision for ${evidence.id}`);
+      }
+      if (
+        evidence.mediaUrl &&
+        !(entry.mediaUrls as string[] | undefined)?.includes(evidence.mediaUrl)
+      ) {
+        fail(`source manifest is missing media URL for ${evidence.id}`);
+      }
+      if (entry.youtubeDescription !== evidence.youtubeDescription) {
+        fail(`source manifest YouTube-description flag does not map ${evidence.id}`);
+      }
+    }
+    exact(entry.scenes, expectedEntry.scenes, `source manifest evidence scenes for ${expectedEntry.sourceId}`);
+    exact(
+      entry.onScreenAttribution,
+      expectedEntry.onScreenAttribution,
+      `source manifest on-screen attribution for ${expectedEntry.sourceId}`
+    );
+    exact(
+      entry.playbackDecisions,
+      expectedEntry.playbackDecisions,
+      `source manifest playback decisions for ${expectedEntry.sourceId}`
+    );
+    exact(
+      entry.youtubeDescription,
+      expectedEntry.youtubeDescription,
+      `source manifest YouTube-description flag for ${expectedEntry.sourceId}`
+    );
+  }
 };
 
 const keysExactly = (
@@ -158,7 +329,8 @@ const validatePreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
       production: snapshot.production,
       voice: snapshot.voice,
       plan: snapshot.plan,
-      sourceMatrix: snapshot.sourceMatrix
+      sourceMatrix: snapshot.sourceMatrix,
+      sourceManifest: snapshot.sourceManifest
     }))
     .digest("hex");
   if (
@@ -560,6 +732,7 @@ export function validateGptLiveQaSnapshot(snapshot: GptLiveQaSnapshot): void {
     fail("YouTube upload must be disabled for QA");
   }
   validateProduction(snapshot.production, snapshot.env);
+  validateSourceManifest(snapshot);
   validateVoice(snapshot);
   validatePlan(snapshot);
   validatePreparedFingerprint(snapshot);

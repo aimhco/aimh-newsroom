@@ -31,7 +31,9 @@ import {
   type RenderGptLivePlatesOptions
 } from "./renderPlates";
 import { validateContainedEpisodePaths } from "./qa/paths";
+import type { GptLiveSourceManifest } from "./qa/types";
 import { buildTellaPlan, type TellaPlan } from "./tellaPlan";
+import type { EvidenceSpec, ProductionClaim } from "./types";
 
 const EPISODE_SUBDIRECTORIES = [
   "source",
@@ -90,6 +92,7 @@ export interface PrepareGptLiveProductionResult {
   readonly voicePath: string;
   readonly planPath: string;
   readonly sourceMatrixPath: string;
+  readonly sourceManifestPath: string;
   readonly preparedPath: string;
   readonly script: ScriptFile;
   readonly voice: VoiceRenderResult;
@@ -283,6 +286,35 @@ const renderSourceMatrix = (): string => {
   ].join("\n");
 };
 
+const unique = <T>(values: readonly T[]): T[] => [...new Set(values)];
+
+export function buildSourceManifest(): GptLiveSourceManifest {
+  const evidenceItems: readonly EvidenceSpec[] = GPT_LIVE_CONTENT.evidence;
+  const claims: readonly ProductionClaim[] = GPT_LIVE_CONTENT.claims;
+  return {
+    schemaVersion: "0.1.0",
+    productionId: GPT_LIVE_CONTENT.id,
+    sources: GPT_LIVE_CONTENT.sources.map((source) => {
+      const evidence = evidenceItems.filter((item) => item.sourceId === source.id);
+      const mediaUrls = unique(evidence.flatMap((item) => item.mediaUrl ? [item.mediaUrl] : []));
+      return {
+        sourceId: source.id,
+        publisher: source.publisher,
+        title: source.title,
+        canonicalUrl: source.url,
+        ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
+        scenes: unique(evidence.map((item) => item.scene)),
+        claims: claims
+          .filter((claim) => claim.sourceIds.some((sourceId) => sourceId === source.id))
+          .map((claim) => claim.id),
+        onScreenAttribution: unique(evidence.map((item) => item.displayUrl)),
+        playbackDecisions: unique(evidence.map((item) => item.playbackDecision)),
+        youtubeDescription: evidence.some((item) => item.youtubeDescription)
+      };
+    })
+  };
+}
+
 export async function prepareGptLiveProduction(
   options: PrepareGptLiveProductionOptions,
   dependencies: PrepareGptLiveProductionDependencies = {}
@@ -302,6 +334,7 @@ export async function prepareGptLiveProduction(
   const stat = dependencies.stat ?? defaultStat;
   const writeJsonAtomic = dependencies.writeJsonAtomic ?? defaultWriteJsonAtomic;
   const writeTextAtomic = dependencies.writeTextAtomic ?? defaultWriteTextAtomic;
+  const sourceManifestPath = join(options.episodeDir, "reports", "source-manifest.json");
   const fixedDescendantPaths = [
     ...EPISODE_SUBDIRECTORIES.map((directory) => join(options.episodeDir, directory)),
     join(options.episodeDir, "production.json"),
@@ -318,6 +351,7 @@ export async function prepareGptLiveProduction(
     join(options.episodeDir, "voice", "narration.json"),
     join(options.episodeDir, "tella", "plan.json"),
     join(options.episodeDir, "reports", "source-matrix.md"),
+    sourceManifestPath,
     join(options.episodeDir, "reports", "prepared.json")
   ];
   const preparedPath = join(options.episodeDir, "reports", "prepared.json");
@@ -403,6 +437,7 @@ export async function prepareGptLiveProduction(
   const voicePath = join(options.episodeDir, "voice", "narration.json");
   const planPath = join(options.episodeDir, "tella", "plan.json");
   const sourceMatrixPath = join(options.episodeDir, "reports", "source-matrix.md");
+  const sourceManifest = buildSourceManifest();
   const production = {
     schemaVersion: "0.1.0",
     ...GPT_LIVE_CONTENT,
@@ -418,7 +453,7 @@ export async function prepareGptLiveProduction(
   };
   const sourceMatrix = renderSourceMatrix();
   const manifestFingerprint = createHash("sha256")
-    .update(JSON.stringify({ production, voice, plan, sourceMatrix }))
+    .update(JSON.stringify({ production, voice, plan, sourceMatrix, sourceManifest }))
     .digest("hex");
   const prepared = {
     schemaVersion: "0.1.0",
@@ -431,6 +466,7 @@ export async function prepareGptLiveProduction(
   await writeJsonAtomic(voicePath, voice);
   await writeJsonAtomic(planPath, plan);
   await writeTextAtomic(sourceMatrixPath, sourceMatrix);
+  await writeJsonAtomic(sourceManifestPath, sourceManifest);
   await writeJsonAtomic(preparedPath, prepared);
 
   return {
@@ -439,6 +475,7 @@ export async function prepareGptLiveProduction(
     voicePath,
     planPath,
     sourceMatrixPath,
+    sourceManifestPath,
     preparedPath,
     script,
     voice,

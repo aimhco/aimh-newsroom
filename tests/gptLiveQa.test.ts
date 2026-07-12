@@ -49,6 +49,33 @@ import { buildVoiceCacheKey } from "../src/voice/elevenLabsAdapter";
 const EPISODE_DIR = "/episode";
 const sha = (character: string): string => character.repeat(64);
 
+const canonicalSourceManifest = () => ({
+  schemaVersion: "0.1.0" as const,
+  productionId: GPT_LIVE_CONTENT.id,
+  sources: GPT_LIVE_CONTENT.sources.map((source) => {
+    const evidence = GPT_LIVE_CONTENT.evidence.filter((item) => item.sourceId === source.id);
+    const mediaUrls = [
+      ...new Set(evidence.flatMap((item) => "mediaUrl" in item ? [item.mediaUrl] : []))
+    ];
+    return {
+      sourceId: source.id,
+      publisher: source.publisher,
+      title: source.title,
+      canonicalUrl: source.url,
+      ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
+      scenes: [...new Set(evidence.map((item) => item.scene))],
+      claims: GPT_LIVE_CONTENT.claims.filter((claim) =>
+        claim.sourceIds.some((sourceId) => sourceId === source.id)
+      ).map(
+        (claim) => claim.id
+      ),
+      onScreenAttribution: [...new Set(evidence.map((item) => item.displayUrl))],
+      playbackDecisions: [...new Set(evidence.map((item) => item.playbackDecision))],
+      youtubeDescription: evidence.some((item) => item.youtubeDescription)
+    };
+  })
+});
+
 interface PreparedMediaInspection extends MediaInspection {
   video: MediaInspection["video"] & { pixelFormat: string };
   audio?: { codecName: string; sampleRate: number; channels: number };
@@ -215,8 +242,9 @@ const validSnapshot = (): GptLiveQaSnapshot => {
     )
   };
   const sourceMatrix = "canonical source matrix";
+  const sourceManifest = canonicalSourceManifest();
   const manifestFingerprint = createHash("sha256")
-    .update(JSON.stringify({ production, voice, plan, sourceMatrix }))
+    .update(JSON.stringify({ production, voice, plan, sourceMatrix, sourceManifest }))
     .digest("hex");
   const masters = Object.fromEntries(
     voice.chunks.map((chunk) => [chunk.id, genericInspection(chunk.durationSeconds)])
@@ -243,6 +271,7 @@ const validSnapshot = (): GptLiveQaSnapshot => {
     },
     production,
     sourceMatrix,
+    sourceManifest,
     prepared: {
       schemaVersion: "0.1.0",
       status: "prepared",
@@ -315,7 +344,8 @@ const refreshPreparedFingerprint = (snapshot: GptLiveQaSnapshot): void => {
         production: snapshot.production,
         voice: snapshot.voice,
         plan: snapshot.plan,
-        sourceMatrix: snapshot.sourceMatrix
+        sourceMatrix: snapshot.sourceMatrix,
+        sourceManifest: snapshot.sourceManifest
       })
     )
     .digest("hex");
@@ -335,7 +365,8 @@ const createQaRunHarness = async () => {
       production: snapshot.production,
       voice: snapshot.voice,
       plan: snapshot.plan,
-      sourceMatrix: snapshot.sourceMatrix
+      sourceMatrix: snapshot.sourceMatrix,
+      sourceManifest: snapshot.sourceManifest
     }))
     .digest("hex");
 
@@ -366,6 +397,7 @@ const createQaRunHarness = async () => {
     [generation.reportPath, JSON.stringify(snapshot.postProduction)],
     [join(episodeDir, "reports", "prepared.json"), JSON.stringify(snapshot.prepared)],
     [join(episodeDir, "reports", "source-matrix.md"), snapshot.sourceMatrix],
+    [join(episodeDir, "reports", "source-manifest.json"), JSON.stringify(snapshot.sourceManifest)],
     ...snapshot.voice.chunks.map((chunk) => [
       `${chunk.file}.json`,
       JSON.stringify(snapshot.voiceCacheMetadata[chunk.id])
@@ -559,6 +591,98 @@ describe("GPT-Live full production QA", () => {
 
   it("accepts a complete editorial, media, Tella, and A/B snapshot", () => {
     expect(() => validateGptLiveQaSnapshot(validSnapshot())).not.toThrow();
+  });
+
+  it("accepts the approved video query parameter in canonical declared media URLs", () => {
+    const snapshot = validSnapshot();
+    expect(snapshot.sourceManifest.sources[0]!.mediaUrls).toContain(
+      "https://openai.com/index/introducing-gpt-live/?video=1208096618"
+    );
+    expect(() => validateGptLiveQaSnapshot(snapshot)).not.toThrow();
+  });
+
+  it.each([
+    ["missing source", (sources: any[]) => sources.slice(1)],
+    ["duplicate source", (sources: any[]) => [...sources, structuredClone(sources[0])]],
+    ["extra source", (sources: any[]) => [...sources, { ...structuredClone(sources[0]), sourceId: "src_extra" }]]
+  ])("rejects a source manifest with a %s", (_name, mutate) => {
+    const snapshot = validSnapshot();
+    snapshot.sourceManifest.sources = mutate(snapshot.sourceManifest.sources);
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/source manifest/i);
+  });
+
+  it.each([
+    ["missing entry field", (entry: any) => { delete entry.publisher; }],
+    ["duplicate scene", (entry: any) => { entry.scenes.push(entry.scenes[0]); }],
+    ["duplicate claim", (entry: any) => { entry.claims.push(entry.claims[0]); }],
+    ["duplicate attribution", (entry: any) => {
+      entry.onScreenAttribution.push(entry.onScreenAttribution[0]);
+    }],
+    ["duplicate playback decision", (entry: any) => {
+      entry.playbackDecisions.push(entry.playbackDecisions[0]);
+    }]
+  ])("rejects a malformed source manifest entry with a %s", (_name, mutate) => {
+    const snapshot = validSnapshot();
+    mutate(snapshot.sourceManifest.sources[0]);
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/source manifest/i);
+  });
+
+  it.each(["token", "signature", "key", "expires", "credential"])(
+    "rejects an unsafe canonical source URL containing %s",
+    (parameter) => {
+      const snapshot = validSnapshot();
+      snapshot.sourceManifest.sources[0]!.canonicalUrl =
+        `https://openai.com/index/introducing-gpt-live/?${parameter}=secret`;
+      expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/source manifest.*URL|unsafe/i);
+    }
+  );
+
+  it.each([
+    "file:///tmp/source.mp4",
+    "/tmp/source.mp4",
+    "https://openai.com/index/introducing-gpt-live/?token=secret",
+    "https://openai.com/index/introducing-gpt-live/?video=9999999999"
+  ])("rejects undeclared or unsafe source-manifest media URL %s", (mediaUrl) => {
+    const snapshot = validSnapshot();
+    snapshot.sourceManifest.sources[0]!.mediaUrls![0] = mediaUrl;
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/source manifest.*media URL|unsafe/i);
+  });
+
+  it.each([
+    ["evidence scene", (entry: any) => { entry.scenes = []; }],
+    ["on-screen attribution", (entry: any) => { entry.onScreenAttribution = []; }],
+    ["playback decision", (entry: any) => { entry.playbackDecisions = []; }],
+    ["full-screen media URL", (entry: any) => { entry.mediaUrls = []; }],
+    ["YouTube-description flag", (entry: any) => { entry.youtubeDescription = false; }]
+  ])("rejects source manifest drift in %s", (_name, mutate) => {
+    const snapshot = validSnapshot();
+    mutate(snapshot.sourceManifest.sources[0]);
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/source manifest/i);
+  });
+
+  it.each([
+    ["missing claim", (claims: string[]) => claims.slice(1)],
+    ["claim from another source", (claims: string[]) => [...claims, "claim_direction"]]
+  ])("rejects source manifest claims with a %s", (_name, mutate) => {
+    const snapshot = validSnapshot();
+    snapshot.sourceManifest.sources[0]!.claims = mutate(
+      snapshot.sourceManifest.sources[0]!.claims
+    );
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/source manifest.*claim/i);
+  });
+
+  it("rejects a prepared fingerprint that omits the source manifest", () => {
+    const snapshot = validSnapshot();
+    snapshot.prepared.manifestFingerprint = createHash("sha256")
+      .update(JSON.stringify({
+        production: snapshot.production,
+        voice: snapshot.voice,
+        plan: snapshot.plan,
+        sourceMatrix: snapshot.sourceMatrix
+      }))
+      .digest("hex");
+
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/prepared generation fingerprint/i);
   });
 
   it("accepts a prepared production using the resolved non-default outro path", () => {
