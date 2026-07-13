@@ -1534,12 +1534,10 @@ describe("GPT-Live full production QA", () => {
     }
   });
 
-  it("uses narration clip duration rather than a shorter layout for QA timing", async () => {
+  it("uses the exact narration clip and layout duration for QA timing", async () => {
     const harness = await createQaRunHarness();
     const statePath = join(harness.episodeDir, "tella", "state.json");
     const state = structuredClone(harness.snapshot.tellaState) as any;
-    state.timelineAudit.narrationLayouts.dynamic_editorial[0].durationMs -= 50;
-    state.timelineAudit.narrationLayouts.aimh_visual_host[0].durationMs -= 25;
     const readSnapshotFile = harness.dependencies.readFile!;
     const verifySourceFullscreen = vi.fn(async (options: any) => {
       const preparedDuration = Math.round(
@@ -1876,26 +1874,13 @@ describe("GPT-Live full production QA", () => {
     expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/timeline audit/i);
   });
 
-  it("accepts a narration layout up to 100ms shorter than its containing clip", () => {
+  it("rejects a narration layout even 1ms shorter than its containing clip", () => {
     const snapshot = validSnapshot();
     const audit = (snapshot.tellaState as Record<string, any>).timelineAudit;
-    audit.narrationLayouts.dynamic_editorial[0].clipDurationMs -= 1;
     audit.narrationLayouts.dynamic_editorial[0].durationMs =
-      audit.narrationLayouts.dynamic_editorial[0].clipDurationMs - 100;
-    audit.sourceClips.dynamic_editorial[0].durationMs += 1;
-    const refreshedFullscreen = deriveSourceFullscreenExpectations(
-      snapshot.plan,
-      buildSourceFullscreenTiming(snapshot.tellaExportReceipt, audit)
-    ).map((sample) => ({
-      ...sample,
-      ssim: 0.93,
-      threshold: SOURCE_FULLSCREEN_SSIM_THRESHOLD
-    }));
-    snapshot.postProduction.sourceFullscreen = structuredClone(refreshedFullscreen);
-    (snapshot.generation as any).sourceFullscreen = structuredClone(refreshedFullscreen);
-    snapshot.observedSourceFullscreen = structuredClone(refreshedFullscreen);
+      audit.narrationLayouts.dynamic_editorial[0].clipDurationMs - 1;
 
-    expect(() => validateGptLiveQaSnapshot(snapshot)).not.toThrow();
+    expect(() => validateGptLiveQaSnapshot(snapshot)).toThrow(/timeline audit/i);
   });
 
   it("rejects a narration layout longer than its containing clip", () => {
@@ -1952,7 +1937,7 @@ describe("GPT-Live full production QA", () => {
       .toEqual(expected);
   });
 
-  it("preserves queried remote narration layout durations in the built audit", () => {
+  it("preserves exact queried remote narration layout durations in the built audit", () => {
     const snapshot = validSnapshot();
     const state = snapshot.tellaState as TellaStateForTimelineAudit;
     const narrationLayoutDurationMs = Object.fromEntries(
@@ -1961,7 +1946,7 @@ describe("GPT-Live full production QA", () => {
         Object.fromEntries(
           snapshot.plan.clips.filter((clip) => clip.kind === "narration").map((clip) => [
             clip.id,
-            Math.round(clip.durationSeconds * 1_000) - 50
+            Math.round(clip.durationSeconds * 1_000)
           ])
         )
       ])
@@ -2035,7 +2020,7 @@ describe("GPT-Live full production QA", () => {
       ))
     };
     const narrationClipValues = [11_145, 22_941, 28_932, 17_925, 24_798, 23_637, 22_894];
-    const narrationLayoutValues = [11_095, 22_891, 28_882, 17_925, 24_748, 23_637, 22_844];
+    const narrationLayoutValues = narrationClipValues;
     const perVariantMap = (values: readonly number[]) => Object.fromEntries(
       GPT_LIVE_CONTENT.variants.map((variant) => [
         variant,

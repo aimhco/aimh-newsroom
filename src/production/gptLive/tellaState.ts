@@ -9,7 +9,6 @@ export interface TellaTimelinePlan {
 }
 
 export const TELLA_TIMELINE_AUDIT_SCHEMA_VERSION = "0.2.0" as const;
-export const TELLA_LAYOUT_DURATION_TOLERANCE_MS = 100;
 export const TELLA_CLIP_DURATION_TOLERANCE_MS = 1;
 export const TELLA_SOURCE_CLIP_DURATION_TOLERANCE_MS = 250;
 export const TELLA_STORY_DURATION_TOLERANCE_MS = 1_000 / 30;
@@ -349,9 +348,7 @@ export function validateTellaTimelineAudit(
         Math.abs((actual.clipDurationMs as number) - expected.clipDurationMs) >
           TELLA_CLIP_DURATION_TOLERANCE_MS ||
         !Number.isSafeInteger(actual.durationMs) ||
-        (actual.durationMs as number) > (actual.clipDurationMs as number) ||
-        (actual.clipDurationMs as number) - (actual.durationMs as number) >
-          TELLA_LAYOUT_DURATION_TOLERANCE_MS
+        actual.durationMs !== actual.clipDurationMs
       ) {
         invalid(`${variant} narration layout ${index + 1} does not match current state`);
       }
