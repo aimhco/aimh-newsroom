@@ -80,6 +80,7 @@ interface VisualSceneBase<TScene extends GptLiveScene> {
   readonly scene: TScene;
   readonly sectionNumber: string;
   readonly header: string;
+  readonly seriesLabel?: string;
   readonly headline: string;
   readonly narrationId: string;
   readonly narrationText: string;
