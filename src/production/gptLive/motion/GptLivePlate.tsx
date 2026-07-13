@@ -11,19 +11,7 @@ import { SceneRenderer } from "./SceneRenderer";
 import { sceneStateIndex } from "./beatState";
 import { resolveEvidenceAssetUrl } from "./evidenceAsset";
 import { MOTION_SANS_FONT } from "./fonts";
-import { sceneStyle, type SceneRect } from "./sceneStyle";
-
-export const evidencePlateLayout = (
-  contentRect: SceneRect
-): {
-  readonly rect: SceneRect;
-  readonly animateEntrance: boolean;
-  readonly maskReservedTopRight: boolean;
-} => ({
-  rect: contentRect,
-  animateEntrance: false,
-  maskReservedTopRight: false
-});
+import { sceneStyle } from "./sceneStyle";
 
 export const plateEntranceStyle = (
   animateEntrance: boolean,
@@ -52,13 +40,11 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
     ...evidence,
     assetUrl: resolveEvidenceAssetUrl(evidence.assetPath)
   }));
-  const plateLayout = evidences && evidences.length > 0
-    ? evidencePlateLayout(contentRegion)
-    : { rect: contentRegion, animateEntrance: true, maskReservedTopRight: false };
-  const entrance = plateLayout.animateEntrance
+  const animateEntrance = !evidences || evidences.length === 0;
+  const entrance = animateEntrance
     ? spring({ frame, fps, config: { damping: 18, stiffness: 130, mass: 0.8 } })
     : 1;
-  const entranceStyle = plateEntranceStyle(plateLayout.animateEntrance, entrance);
+  const entranceStyle = plateEntranceStyle(animateEntrance, entrance);
   const stateIndex = sceneStateIndex(
     content.scene,
     frame,
@@ -81,10 +67,10 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
       <div
         style={{
           position: "absolute",
-          left: plateLayout.rect.x,
-          top: plateLayout.rect.y,
-          width: plateLayout.rect.width,
-          height: plateLayout.rect.height,
+          left: contentRegion.x,
+          top: contentRegion.y,
+          width: contentRegion.width,
+          height: contentRegion.height,
           boxSizing: "border-box",
           ...entranceStyle
         }}
@@ -96,23 +82,10 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
           stateIndex={stateIndex}
           durationInFrames={durationInFrames}
           evidences={evidences}
-          viewportWidth={plateLayout.rect.width}
-          viewportHeight={plateLayout.rect.height}
+          viewportWidth={contentRegion.width}
+          viewportHeight={contentRegion.height}
         />
       </div>
-      {plateLayout.maskReservedTopRight ? (
-        <div
-          style={{
-            position: "absolute",
-            left: style.reservedTopRight.x,
-            top: style.reservedTopRight.y,
-            width: style.reservedTopRight.width,
-            height: style.reservedTopRight.height,
-            zIndex: 3,
-            background: style.palette.background
-          }}
-        />
-      ) : null}
     </AbsoluteFill>
   );
 };

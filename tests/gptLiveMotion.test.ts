@@ -116,17 +116,6 @@ const spotlightMaskRects = (
     ) => readonly SceneRect[];
   }
 ).spotlightMaskRects;
-const evidencePlateLayout = (
-  plateModule as unknown as {
-    evidencePlateLayout?: (
-      contentRect: SceneRect
-    ) => {
-      readonly rect: SceneRect;
-      readonly animateEntrance: boolean;
-      readonly maskReservedTopRight: boolean;
-    };
-  }
-).evidencePlateLayout;
 const plateEntranceStyle = (
   plateModule as unknown as {
     plateEntranceStyle?: (
@@ -512,14 +501,12 @@ describe("GPT-Live evidence-first motion contracts", () => {
     expect(rect?.height).toBeCloseTo(261.648, 5);
   });
 
-  it("keeps captured evidence inside the hybrid content region", () => {
-    expect(evidencePlateLayout).toBeTypeOf("function");
-    const contentRect = { x: 72, y: 90, width: 1580, height: 900 };
-    expect(evidencePlateLayout?.(contentRect)).toEqual({
-      rect: contentRect,
-      animateEntrance: false,
-      maskReservedTopRight: false
-    });
+  it("uses the content region directly without legacy evidence layout or mask branches", () => {
+    const plateSource = readFileSync(join(MOTION_DIR, "GptLivePlate.tsx"), "utf8");
+    expect(plateModule).not.toHaveProperty("evidencePlateLayout");
+    expect(plateSource).not.toMatch(/maskReservedTopRight/);
+    expect(plateSource).toMatch(/left:\s*contentRegion\.x/);
+    expect(plateSource).toMatch(/viewportWidth=\{contentRegion\.width\}/);
   });
 
   it("keeps entrance content opaque from frame zero while translating non-evidence scenes", () => {
