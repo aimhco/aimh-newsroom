@@ -194,7 +194,7 @@ const EXPECTED_NARRATION = [
   {
     id: "narration_availability",
     kind: "narration",
-    text: "You can try it now in ChatGPT Voice on the web and in the ChatGPT app. Free accounts get GPT-Live-1 mini. Go, Plus, and Pro get GPT-Live-1. Look under Settings, then Voice, for Live. It is still a launch product: no Live video or screen sharing yet, no connected apps or plugins, and some ChatGPT workspaces and tools are not supported.",
+    text: "You can try it now in ChatGPT Voice on the web, iPhone, and Android. Free accounts get GPT-Live-1 mini. Go, Plus, and Pro get GPT-Live-1. Look under Settings, then Voice, for Live. It is still a launch product: no Live video or screen sharing yet, no connected apps or plugins, and some ChatGPT workspaces and tools are not supported.",
     claimIds: ["claim_access", "claim_limits"],
     scene: "availability"
   },
