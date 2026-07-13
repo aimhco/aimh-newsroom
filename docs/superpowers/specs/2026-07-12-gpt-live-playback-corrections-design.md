@@ -10,7 +10,7 @@ Revise the approved GPT-Live editorial video so article evidence begins in hybri
 - Captured article and report evidence starts directly in `EvidenceLayout`. The standalone full-screen establish stage is retired. The later spotlight stage remains.
 - Official OpenAI videos remain full-screen with original audio.
 - Every Tella media layout must cover its full containing clip. A shorter layout is a production failure because it exposes Tella's blue base frame.
-- Replace “on consumer web and mobile” with “on the web and in the ChatGPT app.”
+- Use the approved availability phrase “web, iPhone, and Android.”
 - Preserve optional ElevenLabs pronunciation-dictionary locators in newsroom speech requests and cache keys. Record the observed “mobile” pronunciation issue in the shared AIMH video house style.
 - The final frame must remain the `07 THE TAKEAWAY` composition through the end of the output.
 
@@ -26,7 +26,7 @@ Revise the approved GPT-Live editorial video so article evidence begins in hybri
 
 - No captured article appears standalone before its editorial band.
 - Frame-by-frame checks around 1:27 and the final 0.5 seconds contain no blue Tella base frame.
-- “ChatGPT app” is spoken naturally in the availability section.
+- The approved phrase “web, iPhone, and Android” is spoken naturally in the availability section.
 - `final/` contains only `version-a.mp4`.
 - Full tests, lint, build, finish, and QA pass before compatibility artifacts are removed.
 - YouTube upload remains disabled pending human playback.

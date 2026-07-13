@@ -31,7 +31,7 @@
 - Modify: `tests/voice.test.ts`
 - Modify: `/Users/dennywii/Documents/dev/aimh-video-engine/house-style.md`
 
-- [ ] Add failing tests for the approved “web and ChatGPT app” sentence and optional pronunciation dictionary locators.
+- [ ] Add failing tests for the approved “web, iPhone, and Android” sentence and optional pronunciation dictionary locators.
 - [ ] Include dictionary locator IDs only when both environment values exist, and bind them into the voice cache key.
 - [ ] Update the availability sentence and shared house-style lesson.
 - [ ] Delete only the availability voice cache and rerun preparation.

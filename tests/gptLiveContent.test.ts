@@ -635,6 +635,16 @@ describe("GPT-Live Tella plan", () => {
 });
 
 describe("GPT-Live production environment", () => {
+  it("documents both optional ElevenLabs pronunciation dictionary values together", async () => {
+    const envExample = await readFile(resolve(process.cwd(), ".env.example"), "utf8");
+
+    expect(envExample).toContain(
+      "# Optional pronunciation dictionary; both values must be set together.\n" +
+        "ELEVENLABS_PRONUNCIATION_DICTIONARY_ID=\n" +
+        "ELEVENLABS_PRONUNCIATION_DICTIONARY_VERSION_ID="
+    );
+  });
+
   it("defaults logo and music paths from the resolved video-engine path", () => {
     const snapshot = loadEnvSnapshot({
       shellEnv: { AIMH_VIDEO_ENGINE_PATH: "/opt/aimh-video-engine" }
