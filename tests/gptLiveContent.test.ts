@@ -194,7 +194,7 @@ const EXPECTED_NARRATION = [
   {
     id: "narration_availability",
     kind: "narration",
-    text: "You can try it now in ChatGPT Voice on consumer web and mobile. Free accounts get GPT-Live-1 mini. Go, Plus, and Pro get GPT-Live-1. Look under Settings, then Voice, for Live. It is still a launch product: no Live video or screen sharing yet, no connected apps or plugins, and some ChatGPT workspaces and tools are not supported.",
+    text: "You can try it now in ChatGPT Voice on the web and in the ChatGPT app. Free accounts get GPT-Live-1 mini. Go, Plus, and Pro get GPT-Live-1. Look under Settings, then Voice, for Live. It is still a launch product: no Live video or screen sharing yet, no connected apps or plugins, and some ChatGPT workspaces and tools are not supported.",
     claimIds: ["claim_access", "claim_limits"],
     scene: "availability"
   },
@@ -643,6 +643,8 @@ describe("GPT-Live production environment", () => {
     expect(DEFAULT_ENV_KEYS).toContain("AIMH_LOGO_PATH");
     expect(DEFAULT_ENV_KEYS).toContain("AIMH_BODY_MUSIC_PATH");
     expect(DEFAULT_ENV_KEYS).toContain("AIMH_OUTRO_MUSIC_PATH");
+    expect(DEFAULT_ENV_KEYS).toContain("ELEVENLABS_PRONUNCIATION_DICTIONARY_ID");
+    expect(DEFAULT_ENV_KEYS).toContain("ELEVENLABS_PRONUNCIATION_DICTIONARY_VERSION_ID");
     expect(snapshot.values.AIMH_LOGO_PATH).toBe("/opt/aimh-video-engine/assets/logo.png");
     expect(snapshot.values.AIMH_BODY_MUSIC_PATH).toBe(
       "/opt/aimh-video-engine/assets/music/Body_Komorebi_Futuremono.mp3"

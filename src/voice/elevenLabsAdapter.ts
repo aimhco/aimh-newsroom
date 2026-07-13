@@ -54,11 +54,22 @@ export function prepareTextForSpeech(text: string): string {
 }
 
 export function buildSpeechRequestBody(text: string, env: Env): Record<string, unknown> {
-  return {
+  const request: Record<string, unknown> = {
     text: prepareTextForSpeech(text),
     model_id: env.ELEVENLABS_MODEL_ID || DEFAULT_MODEL_ID,
     voice_settings: VOICE_SETTINGS
   };
+  const dictionaryId = env.ELEVENLABS_PRONUNCIATION_DICTIONARY_ID;
+  const versionId = env.ELEVENLABS_PRONUNCIATION_DICTIONARY_VERSION_ID;
+  if (dictionaryId && versionId) {
+    request.pronunciation_dictionary_locators = [
+      {
+        pronunciation_dictionary_id: dictionaryId,
+        version_id: versionId
+      }
+    ];
+  }
+  return request;
 }
 
 export function buildVoiceCacheKey(options: { readonly text: string; readonly env: Env }): string {
@@ -66,10 +77,8 @@ export function buildVoiceCacheKey(options: { readonly text: string; readonly en
   return createHash("sha256")
     .update(
       JSON.stringify({
-        text: request.text,
         voiceId: options.env.ELEVENLABS_VOICE_ID ?? "",
-        modelId: request.model_id,
-        voiceSettings: request.voice_settings
+        request
       })
     )
     .digest("hex");

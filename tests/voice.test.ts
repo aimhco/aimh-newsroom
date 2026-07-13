@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ScriptFile } from "../src/types";
 import {
+  buildSpeechRequestBody,
   buildVoiceCacheKey,
   synthesizeNarration,
   voiceCacheMetadataPath,
@@ -68,6 +69,54 @@ const render = (
     injected
   );
 
+describe("ElevenLabs pronunciation dictionaries", () => {
+  it("includes a pronunciation dictionary locator only when both values are configured", () => {
+    const configured = buildSpeechRequestBody(
+      "Mobile",
+      env({
+        ELEVENLABS_PRONUNCIATION_DICTIONARY_ID: "dictionary-a",
+        ELEVENLABS_PRONUNCIATION_DICTIONARY_VERSION_ID: "version-a"
+      })
+    );
+    const missingVersion = buildSpeechRequestBody(
+      "Mobile",
+      env({ ELEVENLABS_PRONUNCIATION_DICTIONARY_ID: "dictionary-a" })
+    );
+    const missingDictionary = buildSpeechRequestBody(
+      "Mobile",
+      env({ ELEVENLABS_PRONUNCIATION_DICTIONARY_VERSION_ID: "version-a" })
+    );
+
+    expect(configured.pronunciation_dictionary_locators).toEqual([
+      {
+        pronunciation_dictionary_id: "dictionary-a",
+        version_id: "version-a"
+      }
+    ]);
+    expect(missingVersion).not.toHaveProperty("pronunciation_dictionary_locators");
+    expect(missingDictionary).not.toHaveProperty("pronunciation_dictionary_locators");
+  });
+
+  it("changes the voice cache key when a configured locator changes", () => {
+    const base = {
+      ELEVENLABS_PRONUNCIATION_DICTIONARY_ID: "dictionary-a",
+      ELEVENLABS_PRONUNCIATION_DICTIONARY_VERSION_ID: "version-a"
+    };
+    const original = buildVoiceCacheKey({ text: "Mobile", env: env(base) });
+    const changedDictionary = buildVoiceCacheKey({
+      text: "Mobile",
+      env: env({ ...base, ELEVENLABS_PRONUNCIATION_DICTIONARY_ID: "dictionary-b" })
+    });
+    const changedVersion = buildVoiceCacheKey({
+      text: "Mobile",
+      env: env({ ...base, ELEVENLABS_PRONUNCIATION_DICTIONARY_VERSION_ID: "version-b" })
+    });
+
+    expect(changedDictionary).not.toBe(original);
+    expect(changedVersion).not.toBe(original);
+  });
+});
+
 describe("ElevenLabs narration cache provenance", () => {
   it("uses a stable SHA-256 key and caches only with matching metadata and valid audio", async () => {
     const outDir = await mkdtemp(join(tmpdir(), "voice-cache-"));
@@ -116,6 +165,19 @@ describe("ElevenLabs narration cache provenance", () => {
       secondText: "Same text",
       firstEnv: env(),
       secondEnv: env({ ELEVENLABS_MODEL_ID: "model-b" })
+    },
+    {
+      name: "pronunciation dictionary locator",
+      firstText: "Same text",
+      secondText: "Same text",
+      firstEnv: env({
+        ELEVENLABS_PRONUNCIATION_DICTIONARY_ID: "dictionary-a",
+        ELEVENLABS_PRONUNCIATION_DICTIONARY_VERSION_ID: "version-a"
+      }),
+      secondEnv: env({
+        ELEVENLABS_PRONUNCIATION_DICTIONARY_ID: "dictionary-a",
+        ELEVENLABS_PRONUNCIATION_DICTIONARY_VERSION_ID: "version-b"
+      })
     }
   ])("re-synthesizes when $name changes", async ({ firstText, secondText, firstEnv, secondEnv }) => {
     const outDir = await mkdtemp(join(tmpdir(), "voice-provenance-"));
