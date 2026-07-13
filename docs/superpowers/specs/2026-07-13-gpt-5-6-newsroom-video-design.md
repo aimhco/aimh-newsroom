@@ -1,0 +1,94 @@
+# GPT-5.6 AIMH Newsroom Video Design
+
+Date: 2026-07-13
+Status: Approved by the user's request to follow the existing GPT-Live evidence-first format
+
+## Objective
+
+Produce one English AIMH Newsroom video about OpenAI's GPT-5.6 general-availability announcement. Take it through primary-source research, an evidence-mapped script, official visual capture, ElevenLabs narration, local rendering, and QA. Deliver a local review video only. Do not upload it.
+
+## Editorial Angle
+
+The story is not "one smarter model." GPT-5.6 turns model selection into work allocation:
+
+- Luna is the fast, low-cost tier.
+- Terra balances capability and cost.
+- Sol is the flagship for difficult professional work.
+- `max` spends more reasoning time on one run.
+- `ultra` coordinates four agents by default for demanding work.
+
+The practical question is therefore how much intelligence, time, and parallelism a task deserves. Benchmark and efficiency claims remain attributed to OpenAI, and the video explicitly includes OpenAI's cost/latency caveat and the system-card warning about agentic overreach.
+
+## Format
+
+Reuse the approved GPT-Live Version A visual grammar:
+
+- 1920x1080, 30 fps, white evidence-first presentation.
+- Captured source evidence appears from frame zero in a hybrid source/editorial layout.
+- Each evidence scene moves from explanation to a source spotlight.
+- AIMH logo stays at the top right: 150 pixels wide, 24-pixel margins, 85 percent opacity.
+- No intro or body music; the existing seven-second AIMH outro music treatment is retained.
+- Narration comes only from the configured ElevenLabs AIMH voice. Silent or alternate-voice fallback is prohibited.
+
+The story uses eight narration scenes. Seven are paired with captured primary-source evidence. The final takeaway uses the branded AIMH closing card so the video ends on a clear action instead of another article screenshot.
+
+## Script
+
+1. **Launch framing:** OpenAI launched GPT-5.6 as a three-tier work system, not one model.
+2. **Tiers and efficiency:** Luna, Terra, and Sol cover volume, balance, and frontier work; published efficiency results are vendor claims.
+3. **Reasoning controls:** `max` adds reasoning time; `ultra` coordinates four agents; the API exposes multi-agent beta support.
+4. **Practical work:** Programmatic Tool Calling, stronger computer use, design judgment, and knowledge-work artifacts.
+5. **Evidence qualification:** Published benchmark, cost, and latency comparisons require the article's own real-world caveat.
+6. **Safety boundary:** The system card reports more agentic overreach than GPT-5.5 at low absolute rates and describes a conservative safety stack.
+7. **Availability and price:** ChatGPT, Codex, and API availability plus the three API price points.
+8. **AIMH read:** Test the same real task across tiers and compare the finished artifact, not only the answer.
+
+## Evidence Set
+
+- OpenAI GPT-5.6 article hero and launch media.
+- "Efficient by default, maximum performance on demand" article section.
+- `max`, `ultra`, Programmatic Tool Calling, and multi-agent article section.
+- "A leap forward in design" article section.
+- "End-to-end knowledge work" article section.
+- Article footnote explaining simulated cost and latency estimates and real-world variance.
+- GPT-5.6 system-card introduction and agentic-intent caveat.
+- "Availability and pricing" article section.
+
+Every factual narration sentence maps to a claim ID and at least one saved source. Captured screenshots remain unaltered; editorial text and spotlight masks explain what to look at without rewriting source pixels.
+
+## Production Architecture
+
+Create `episodes/2026-07-13-gpt-5-6/` as a self-contained package. Add a narrow GPT-5.6 episode manifest and renderer that reuse the existing `GptLivePlate` Remotion composition with story-specific props. The renderer synthesizes measured narration chunks, stages evidence PNGs into a temporary Remotion public directory, renders one plate per scene, muxes each plate with its narration, concatenates the scenes, overlays the AIMH logo, mixes the outro, and writes the final MP4 and sidecar captions.
+
+The CLI supports only `voice`, `render`, `qa`, and `all`. It has no upload action.
+
+## Failure Handling
+
+- Fail before rendering if ElevenLabs credentials, the configured voice, the logo, or outro music is unavailable.
+- Reject any narration fallback, warning, missing evidence file, unsafe evidence path, duplicate ID, or unmapped claim.
+- Keep completed narration chunks for a targeted rerun if a later chunk fails.
+- Reject malformed or wrong-format final media during QA.
+- Keep the final local even when QA finds a defect, but mark the episode `needs_review` and report the failing checks.
+- Never run `newsroom:upload`, create a YouTube upload receipt, or change remote state.
+
+## Acceptance Criteria
+
+- The final video is H.264, 1920x1080, 30 fps, with stereo AAC at 48 kHz.
+- Every narration chunk is generated by ElevenLabs with no synthesis warnings.
+- All factual claims map to saved sources and selected evidence.
+- Captured evidence is legible, content-bearing, correctly attributed, and spotlighted.
+- Scene boundaries have no blank or base-color flashes.
+- The logo is present throughout without colliding with evidence or editorial text.
+- The outro enters only in the final seven seconds and fades cleanly.
+- A contact sheet, boundary frames, audio report, tail sample, and machine-readable QA report exist.
+- No upload command is executed.
+
+## Deliverables
+
+- `sources.json`, `script.json`, `shotlist.json`, `metadata.json`, and `episode-review.md`.
+- Captured evidence PNGs and source provenance.
+- Eight ElevenLabs MP3 narration chunks and narration manifest.
+- Eight rendered scene plates and muxed segments.
+- `render/final.mp4`, sidecar captions, contact sheet, sampled frames, and tail audio.
+- `qa.json`, `RESULTS.md`, and `REVIEW.md`.
+
