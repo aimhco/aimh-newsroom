@@ -1534,10 +1534,14 @@ describe("GPT-Live full production QA", () => {
     }
   });
 
-  it("uses the exact narration clip and layout duration for QA timing", async () => {
+  it("uses the shifted exact audited narration timing for QA fullscreen checks", async () => {
     const harness = await createQaRunHarness();
     const statePath = join(harness.episodeDir, "tella", "state.json");
     const state = structuredClone(harness.snapshot.tellaState) as any;
+    state.timelineAudit.narrationLayouts.dynamic_editorial[0].clipDurationMs -= 1;
+    state.timelineAudit.narrationLayouts.dynamic_editorial[0].durationMs -= 1;
+    state.timelineAudit.narrationLayouts.aimh_visual_host[0].clipDurationMs -= 1;
+    state.timelineAudit.narrationLayouts.aimh_visual_host[0].durationMs -= 1;
     const readSnapshotFile = harness.dependencies.readFile!;
     const verifySourceFullscreen = vi.fn(async (options: any) => {
       const preparedDuration = Math.round(
@@ -1545,9 +1549,9 @@ describe("GPT-Live full production QA", () => {
           1_000
       );
       expect(options.timing.narrationDurationMs["version-a"][0])
-        .toBe(preparedDuration);
+        .toBe(preparedDuration - 1);
       expect(options.timing.narrationDurationMs["version-b"][0])
-        .toBe(preparedDuration);
+        .toBe(preparedDuration - 1);
       throw new Error("captured audited QA fullscreen timing");
     });
 

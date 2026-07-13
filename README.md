@@ -80,9 +80,9 @@ or above `0.90`. Post-production report schema `0.4.0` and QA report schema
 must contain the queried source-clip duration plus both the narration clip and
 its media-layout duration for each compatibility variant. Source and narration
 clip durations must reconstruct the queried story duration; the separately
-audited layout duration may be slightly shorter at a hard-cut boundary. Export
-sample times use the remote clip clock, while source sample times use the
-prepared source clip duration.
+audited layout duration must exactly equal its containing narration clip
+duration, including at hard-cut boundaries. Export sample times use the remote
+clip clock, while source sample times use the prepared source clip duration.
 
 Legacy timeline audit and export receipt files must be regenerated before
 finishing: query the current per-variant clip durations into timeline audit
