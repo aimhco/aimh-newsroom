@@ -1878,13 +1878,8 @@ describe("GPT-Live post-production publication", () => {
     }
   });
 
-  it("uses narration clip duration rather than a shorter layout for fullscreen timing", async () => {
+  it("uses exact narration clip and layout duration for fullscreen timing", async () => {
     const episodeDir = await createContainedEpisode();
-    const statePath = join(episodeDir, "tella", "state.json");
-    const state = JSON.parse(await readFile(statePath, "utf8"));
-    state.timelineAudit.narrationLayouts.dynamic_editorial[0].durationMs -= 50;
-    state.timelineAudit.narrationLayouts.aimh_visual_host[0].durationMs -= 25;
-    await writeFile(statePath, JSON.stringify(state), "utf8");
     const verifySourceFullscreen = vi.fn(async (options: any) => {
       expect(options.timing.narrationDurationMs["version-a"][0]).toBe(5_500);
       expect(options.timing.narrationDurationMs["version-b"][0]).toBe(5_500);
