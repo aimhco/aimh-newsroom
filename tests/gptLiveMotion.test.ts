@@ -42,11 +42,14 @@ import {
   type SceneRect
 } from "../src/production/gptLive/motion/sceneStyle";
 import {
+  EvidenceLayout,
+  EvidenceViewport,
   evidencePlacementGeometry
 } from "../src/production/gptLive/motion/scenePrimitives";
 import * as plateModule from "../src/production/gptLive/motion/GptLivePlate";
 import * as primitiveModule from "../src/production/gptLive/motion/scenePrimitives";
 import {
+  EvidenceSequence,
   evidenceSequenceState,
   evidenceStage
 } from "../src/production/gptLive/motion/SceneRenderer";
@@ -379,6 +382,27 @@ describe("GPT-Live Remotion composition metadata", () => {
 });
 
 describe("GPT-Live evidence-first motion contracts", () => {
+  it("renders captured evidence in the hybrid layout from frame zero", () => {
+    const evidence = GPT_LIVE_CONTENT.evidence.find(
+      (item) => item.playbackDecision === "captured_source"
+    )!;
+    const rendered = EvidenceSequence({
+      evidence: {
+        ...evidence,
+        assetUrl: "/evidence/capture.png",
+        assetWidth: 1920,
+        assetHeight: 1080
+      },
+      frame: 0,
+      durationInFrames: 300,
+      viewportWidth: 1580,
+      viewportHeight: 900
+    });
+
+    expect(rendered.type).toBe(EvidenceLayout);
+    expect(rendered.type).not.toBe(EvidenceViewport);
+  });
+
   it("builds a bounded four-panel spotlight mask around the focal rectangle", () => {
     expect(spotlightMaskRects).toBeTypeOf("function");
     expect(spotlightMaskRects?.(640, 1080, { x: 100, y: 200, width: 300, height: 400 }))
@@ -490,20 +514,17 @@ describe("GPT-Live evidence-first motion contracts", () => {
     expect(rect?.height).toBeCloseTo(261.648, 5);
   });
 
-  it("uses a genuine full-frame wrapper only during evidence establish", () => {
+  it("keeps every active evidence stage inside the hybrid content region", () => {
     expect(evidencePlateLayout).toBeTypeOf("function");
     const frameRect = { x: 0, y: 0, width: 1920, height: 1080 };
     const contentRect = { x: 72, y: 90, width: 1580, height: 900 };
-    expect(evidencePlateLayout?.("establish", frameRect, contentRect)).toEqual({
-      rect: frameRect,
-      animateEntrance: false,
-      maskReservedTopRight: true
-    });
-    expect(evidencePlateLayout?.("explain", frameRect, contentRect)).toEqual({
-      rect: contentRect,
-      animateEntrance: false,
-      maskReservedTopRight: false
-    });
+    for (const frame of [0, 173, 174, 299]) {
+      expect(evidencePlateLayout?.(evidenceStage(frame, 300), frameRect, contentRect)).toEqual({
+        rect: contentRect,
+        animateEntrance: false,
+        maskReservedTopRight: false
+      });
+    }
   });
 
   it("keeps entrance content opaque from frame zero while translating non-evidence scenes", () => {
@@ -522,18 +543,18 @@ describe("GPT-Live evidence-first motion contracts", () => {
     });
   });
 
-  it("uses deterministic establish, explain, and spotlight stages", () => {
+  it("uses deterministic explain and spotlight stages", () => {
     expect([0, 59, 60, 173, 174, 299].map((frame) => evidenceStage(frame, 300))).toEqual([
-      "establish",
-      "establish",
+      "explain",
+      "explain",
       "explain",
       "explain",
       "spotlight",
       "spotlight"
     ]);
     expect([0, 47, 48, 138, 139, 239].map((frame) => evidenceStage(frame, 240))).toEqual([
-      "establish",
-      "establish",
+      "explain",
+      "explain",
       "explain",
       "explain",
       "spotlight",
@@ -637,7 +658,7 @@ describe("GPT-Live rendered smoke planning", () => {
     }
   });
 
-  it("samples establish, explain, and spotlight for every captured evidence item", () => {
+  it("maps legacy smoke samples onto explain and spotlight runtime stages", () => {
     const plan = buildSmokeFramePlan(8 * 30);
     const captures = GPT_LIVE_CONTENT.evidence.filter(
       (evidence) => evidence.playbackDecision === "captured_source"
@@ -655,7 +676,7 @@ describe("GPT-Live rendered smoke planning", () => {
         expect(items.map(({ frame }) =>
           evidenceSequenceState(frame, 240, evidenceForScene(evidence.scene).length).stage
         )).toEqual([
-          "establish",
+          "explain",
           "explain",
           "spotlight"
         ]);

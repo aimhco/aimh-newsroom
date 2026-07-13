@@ -1,7 +1,6 @@
 import type { SceneContent } from "../types";
 import {
   EvidenceLayout,
-  EvidenceViewport,
   type RenderableEvidence
 } from "./scenePrimitives";
 import type { ScenePalette } from "./sceneStyle";
@@ -31,16 +30,6 @@ export const EvidenceSequence = ({
   readonly viewportHeight: number;
 }) => {
   const stage = evidenceStage(frame, durationInFrames);
-  if (stage === "establish") {
-    return (
-      <EvidenceViewport
-        evidence={evidence}
-        spotlight={false}
-        viewportWidth={viewportWidth}
-        viewportHeight={viewportHeight}
-      />
-    );
-  }
   return (
     <EvidenceLayout
       evidence={evidence}
