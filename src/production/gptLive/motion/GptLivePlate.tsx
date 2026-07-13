@@ -10,22 +10,19 @@ import type { GptLivePlateProps } from "./Root";
 import { SceneRenderer } from "./SceneRenderer";
 import { sceneStateIndex } from "./beatState";
 import { resolveEvidenceAssetUrl } from "./evidenceAsset";
-import { evidenceSequenceState, type EvidenceStage } from "./evidenceStages";
 import { MOTION_SANS_FONT } from "./fonts";
 import { sceneStyle, type SceneRect } from "./sceneStyle";
 
 export const evidencePlateLayout = (
-  stage: EvidenceStage,
-  frameRect: SceneRect,
   contentRect: SceneRect
 ): {
   readonly rect: SceneRect;
   readonly animateEntrance: boolean;
   readonly maskReservedTopRight: boolean;
 } => ({
-  rect: stage === "establish" ? frameRect : contentRect,
+  rect: contentRect,
   animateEntrance: false,
-  maskReservedTopRight: stage === "establish"
+  maskReservedTopRight: false
 });
 
 export const plateEntranceStyle = (
@@ -55,13 +52,8 @@ export const GptLivePlate = (props: GptLivePlateProps) => {
     ...evidence,
     assetUrl: resolveEvidenceAssetUrl(evidence.assetPath)
   }));
-  const frameRect = { x: 0, y: 0, width, height };
   const plateLayout = evidences && evidences.length > 0
-    ? evidencePlateLayout(
-        evidenceSequenceState(frame, durationInFrames, evidences.length).stage,
-        frameRect,
-        contentRegion
-      )
+    ? evidencePlateLayout(contentRegion)
     : { rect: contentRegion, animateEntrance: true, maskReservedTopRight: false };
   const entrance = plateLayout.animateEntrance
     ? spring({ frame, fps, config: { damping: 18, stiffness: 130, mass: 0.8 } })

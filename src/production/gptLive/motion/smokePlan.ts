@@ -53,7 +53,7 @@ export function buildSmokeFramePlan(durationInFrames: number): readonly SmokeFra
             evidences.length
           );
           const stageFrames = evidenceStageFrames(sequence.durationInFrames);
-          return (["establish", "explain", "spotlight"] as const).map((stage) => ({
+          return (["explain", "spotlight"] as const).map((stage) => ({
             variant,
             sceneContent,
             evidence,

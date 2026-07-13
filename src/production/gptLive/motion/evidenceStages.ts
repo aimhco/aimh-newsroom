@@ -1,4 +1,4 @@
-export type EvidenceStage = "establish" | "explain" | "spotlight";
+export type EvidenceStage = "explain" | "spotlight";
 
 const evidenceStageBoundaries = (durationInFrames: number) => {
   const spotlightFrom = Math.min(
@@ -18,7 +18,6 @@ export const evidenceStageFrames = (
 ): Readonly<Record<EvidenceStage, number>> => {
   const { spotlightFrom } = evidenceStageBoundaries(durationInFrames);
   return {
-    establish: 0,
     explain: 0,
     spotlight: spotlightFrom
   };

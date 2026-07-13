@@ -119,8 +119,6 @@ const spotlightMaskRects = (
 const evidencePlateLayout = (
   plateModule as unknown as {
     evidencePlateLayout?: (
-      stage: "establish" | "explain" | "spotlight",
-      frameRect: SceneRect,
       contentRect: SceneRect
     ) => {
       readonly rect: SceneRect;
@@ -514,17 +512,14 @@ describe("GPT-Live evidence-first motion contracts", () => {
     expect(rect?.height).toBeCloseTo(261.648, 5);
   });
 
-  it("keeps every active evidence stage inside the hybrid content region", () => {
+  it("keeps captured evidence inside the hybrid content region", () => {
     expect(evidencePlateLayout).toBeTypeOf("function");
-    const frameRect = { x: 0, y: 0, width: 1920, height: 1080 };
     const contentRect = { x: 72, y: 90, width: 1580, height: 900 };
-    for (const frame of [0, 173, 174, 299]) {
-      expect(evidencePlateLayout?.(evidenceStage(frame, 300), frameRect, contentRect)).toEqual({
-        rect: contentRect,
-        animateEntrance: false,
-        maskReservedTopRight: false
-      });
-    }
+    expect(evidencePlateLayout?.(contentRect)).toEqual({
+      rect: contentRect,
+      animateEntrance: false,
+      maskReservedTopRight: false
+    });
   });
 
   it("keeps entrance content opaque from frame zero while translating non-evidence scenes", () => {
@@ -637,10 +632,10 @@ describe("GPT-Live rendered smoke planning", () => {
     ).toEqual({ width: 1280, height: 720 });
   });
 
-  it("plans every evidence item and stage plus stills for non-evidence scenes", () => {
+  it("plans every evidence item and active stage plus stills for non-evidence scenes", () => {
     const plan = buildSmokeFramePlan(8 * 30);
-    expect(plan).toHaveLength(48);
-    expect(new Set(plan.map(({ outputName }) => outputName)).size).toBe(48);
+    expect(plan).toHaveLength(36);
+    expect(new Set(plan.map(({ outputName }) => outputName)).size).toBe(36);
     expect(new Set(plan.map(({ sceneContent }) => sceneContent.scene))).toEqual(
       new Set(GPT_LIVE_SCENES)
     );
@@ -658,7 +653,7 @@ describe("GPT-Live rendered smoke planning", () => {
     }
   });
 
-  it("maps legacy smoke samples onto explain and spotlight runtime stages", () => {
+  it("samples only explain and spotlight runtime stages", () => {
     const plan = buildSmokeFramePlan(8 * 30);
     const captures = GPT_LIVE_CONTENT.evidence.filter(
       (evidence) => evidence.playbackDecision === "captured_source"
@@ -668,18 +663,10 @@ describe("GPT-Live rendered smoke planning", () => {
         const items = plan.filter(
           (item) => item.variant === variant && item.evidence?.id === evidence.id
         ) as readonly (typeof plan[number] & { readonly stage?: string })[];
-        expect(items.map(({ stage }) => stage)).toEqual([
-          "establish",
-          "explain",
-          "spotlight"
-        ]);
+        expect(items.map(({ stage }) => stage)).toEqual(["explain", "spotlight"]);
         expect(items.map(({ frame }) =>
           evidenceSequenceState(frame, 240, evidenceForScene(evidence.scene).length).stage
-        )).toEqual([
-          "explain",
-          "explain",
-          "spotlight"
-        ]);
+        )).toEqual(["explain", "spotlight"]);
         expect(items.every((item) => item.evidence?.id === evidence.id)).toBe(true);
       }
     }
