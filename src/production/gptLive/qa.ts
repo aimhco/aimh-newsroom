@@ -1,0 +1,840 @@
+import { createHash } from "node:crypto";
+import {
+  lstat as defaultLstat,
+  mkdir as defaultMkdir,
+  mkdtemp as defaultMkdtemp,
+  readFile as defaultReadFile,
+  realpath as defaultRealpath,
+  rm as defaultRm,
+  stat as defaultStat
+} from "node:fs/promises";
+import { join, relative, sep } from "node:path";
+import { runCommand as defaultRunCommand } from "../../render/process";
+import { writeJsonAtomic as defaultWriteJsonAtomic, writeTextAtomic as defaultWriteTextAtomic } from "./atomicFiles";
+import { GPT_LIVE_CONTENT } from "./content";
+import { inspectEvidenceAssets as defaultInspectEvidenceAssets } from "./evidence";
+import {
+  inspectFinalMediaFile as defaultInspectFinalMediaFile,
+  validatePublishedGeneration as defaultValidatePublishedGeneration,
+  type FinalMediaInspection,
+  type PublishedGenerationValidation
+} from "./finish";
+import { GPT_LIVE_SCENES, sceneStyle } from "./motion/sceneStyle";
+import { withEpisodeProductionLock } from "./productionLock";
+import type { TellaPlan } from "./tellaPlan";
+import { assertTellaProgramDuration, validateTellaTimelineAudit } from "./tellaState";
+import {
+  buildSourceFullscreenTiming,
+  verifySourceFullscreen as defaultVerifySourceFullscreen
+} from "./sourceFullscreen";
+import {
+  parseTellaExportReceipt,
+  tellaExportReceiptPath,
+  validateSealedTellaExports as defaultValidateSealedTellaExports,
+  type TellaExportReceipt
+} from "./tellaExportReceipt";
+import type {
+  GptLiveQaResult,
+  GptLiveQaSnapshot,
+  GptLiveSourceManifest,
+  QaProduction,
+  QaPreparedMediaInspection,
+  QaTailAudioCheck,
+  QaVariantName,
+  QaVoice,
+  QaVoiceCacheMetadata,
+  HumanPlayback,
+  VisualArtifacts
+} from "./qa/types";
+import { validateGptLiveQaSnapshot, validateVisualArtifacts } from "./qa/validation";
+import { generateVisualArtifacts, renderComparisonMarkdown } from "./qa/visual";
+import { publishQaReportSet, withQaStagingDirectory } from "./qa/publication";
+import { validateNoSymlinkPaths, withValidatedQaArtifactPaths } from "./qa/paths";
+
+export { validateGptLiveQaSnapshot } from "./qa/validation";
+export type {
+  GptLiveQaResult,
+  GptLiveQaSnapshot,
+  GptLiveSourceManifest,
+  GptLiveSourceManifestEntry,
+  GptLiveSourceManifestSource,
+  QaProduction,
+  QaPreparedMediaInspection,
+  QaSafeArea,
+  QaTailAudioCheck,
+  QaVariantName,
+  QaVoice,
+  QaVoiceCacheMetadata,
+  VisualArtifacts
+} from "./qa/types";
+
+const VARIANTS = ["version-a", "version-b"] as const;
+const PLATE_VARIANTS = ["dynamic_editorial", "aimh_visual_host"] as const;
+
+export const qaReportPaths = (episodeDir: string) => {
+  const reportsDirectory = join(episodeDir, "reports");
+  const visualDirectory = join(reportsDirectory, "visual");
+  return {
+    reportPath: join(reportsDirectory, "qa.json"),
+    comparisonPath: join(reportsDirectory, "comparison.md"),
+    staleComparisonPath: join(visualDirectory, "comparison.md"),
+    visualDirectory
+  };
+};
+
+export async function clearStaleQaOutputs(
+  episodeDir: string,
+  remove: (path: string, options: { force: true }) => Promise<void> =
+    (path, options) => defaultRm(path, options)
+): Promise<void> {
+  const paths = qaReportPaths(episodeDir);
+  for (const path of [paths.reportPath, paths.comparisonPath, paths.staleComparisonPath]) {
+    await remove(path, { force: true });
+  }
+}
+
+export interface RunGptLiveQaOptions {
+  episodeDir: string;
+  env: Record<string, string | undefined>;
+  ffmpegPath: string;
+  ffprobePath: string;
+}
+
+type ReadText = (path: string, encoding: "utf8") => Promise<string>;
+type ReadBytes = (path: string) => Promise<Uint8Array>;
+type StatFile = (path: string) => Promise<{ isFile(): boolean; size: number }>;
+
+export interface RunGptLiveQaDependencies {
+  validatePublishedGeneration?: (episodeDir: string) => Promise<PublishedGenerationValidation>;
+  validateSealedTellaExports?: (
+    options: Parameters<typeof defaultValidateSealedTellaExports>[0]
+  ) => Promise<TellaExportReceipt>;
+  verifySourceFullscreen?: typeof defaultVerifySourceFullscreen;
+  readFile?: ReadText;
+  readFileBytes?: ReadBytes;
+  stat?: StatFile;
+  mkdir?: typeof defaultMkdir;
+  mkdtemp?: typeof defaultMkdtemp;
+  lstat?: typeof defaultLstat;
+  realpath?: typeof defaultRealpath;
+  rm?: typeof defaultRm;
+  runCommand?: typeof defaultRunCommand;
+  inspectMediaFile?: (ffprobePath: string, path: string) => Promise<QaPreparedMediaInspection>;
+  inspectEvidenceAssets?: typeof defaultInspectEvidenceAssets;
+  inspectFinalMediaFile?: (ffprobePath: string, path: string) => Promise<FinalMediaInspection>;
+  generateVisualArtifacts?: typeof generateVisualArtifacts;
+  writeJsonAtomic?: typeof defaultWriteJsonAtomic;
+  writeTextAtomic?: typeof defaultWriteTextAtomic;
+  withProductionLock?: typeof withEpisodeProductionLock;
+}
+
+const parseJson = <T>(text: string, label: string): T => {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`GPT-Live QA failed: invalid ${label} JSON`);
+  }
+};
+
+const relativePath = (episodeDir: string, path: string): string =>
+  relative(episodeDir, path).split(sep).join("/");
+
+const assertSafeReportText = (text: string, label: string): void => {
+  if (
+    text.includes("/Users/") ||
+    /(?:uploadUrl|signedUrl|X-Amz-|[?&](?:signature|token|expires)=)/i.test(text)
+  ) {
+    throw new Error(`GPT-Live QA failed: ${label} contains an unsafe path or signed URL`);
+  }
+};
+
+const PENDING_PLAYBACK_NOTE = "Full real-time listening and viewing is required before upload.";
+
+interface HumanPlaybackReviewTarget {
+  generationId: string;
+  versionASha256: string;
+  versionBSha256: string;
+}
+
+const humanPlaybackReviewTarget = (
+  postProduction: Record<string, unknown>
+): HumanPlaybackReviewTarget => {
+  const variants = postProduction.variants as Array<{ name: string; sha256: string }>;
+  const versionA = variants?.find(({ name }) => name === "version-a")?.sha256;
+  const versionB = variants?.find(({ name }) => name === "version-b")?.sha256;
+  if (
+    typeof postProduction.generationId !== "string" ||
+    !/^[a-f0-9-]{36}$/i.test(postProduction.generationId) ||
+    !/^[a-f0-9]{64}$/.test(versionA ?? "") ||
+    !/^[a-f0-9]{64}$/.test(versionB ?? "")
+  ) {
+    throw new Error("GPT-Live QA failed: invalid human playback review target");
+  }
+  return {
+    generationId: postProduction.generationId,
+    versionASha256: versionA!,
+    versionBSha256: versionB!
+  };
+};
+
+export function buildHumanPlaybackReviewTemplate(
+  postProduction: Record<string, unknown>,
+  reviewedAt = new Date().toISOString()
+) {
+  return {
+    schemaVersion: "0.2.0" as const,
+    ...humanPlaybackReviewTarget(postProduction),
+    status: "pending" as const,
+    note: PENDING_PLAYBACK_NOTE,
+    reviewedAt
+  };
+}
+
+export function parseHumanPlaybackReview(
+  text: string | undefined,
+  postProduction: Record<string, unknown>
+): HumanPlayback {
+  if (text === undefined) return { status: "pending", note: PENDING_PLAYBACK_NOTE };
+  const parsed = parseJson<Record<string, unknown>>(text, "human playback review");
+  if (
+    parsed.schemaVersion !== "0.2.0" ||
+    typeof parsed.generationId !== "string" ||
+    typeof parsed.versionASha256 !== "string" ||
+    typeof parsed.versionBSha256 !== "string" ||
+    (parsed.status !== "pending" && parsed.status !== "passed" && parsed.status !== "failed") ||
+    typeof parsed.note !== "string" ||
+    !parsed.note.trim() ||
+    parsed.note.length > 500 ||
+    typeof parsed.reviewedAt !== "string" ||
+    !Number.isFinite(Date.parse(parsed.reviewedAt))
+  ) {
+    throw new Error("GPT-Live QA failed: invalid human playback review");
+  }
+  assertSafeReportText(parsed.note, "human playback review");
+  const target = humanPlaybackReviewTarget(postProduction);
+  if (
+    parsed.generationId !== target.generationId ||
+    parsed.versionASha256 !== target.versionASha256 ||
+    parsed.versionBSha256 !== target.versionBSha256
+  ) {
+    return {
+      status: "pending",
+      note: "Stored human playback review does not match the current published generation."
+    };
+  }
+  return { status: parsed.status, note: parsed.note } as HumanPlayback;
+}
+
+export function deriveQaStatus(humanPlayback: HumanPlayback) {
+  const readyForUpload = humanPlayback.status === "passed";
+  return { machineOk: true as const, humanPlayback, readyForUpload, ok: readyForUpload };
+}
+
+const parsePeakDb = (text: string): number => {
+  const value = text.match(/max_volume:\s*(-?(?:\d+(?:\.\d+)?|inf))\s*dB/i)?.[1];
+  if (!value || value.toLowerCase() === "-inf") return Number.NEGATIVE_INFINITY;
+  return Number(value);
+};
+
+const inspectPreparedMediaFile = async (
+  ffprobePath: string,
+  path: string,
+  runCommand: typeof defaultRunCommand
+): Promise<QaPreparedMediaInspection> => {
+  const result = await runCommand(ffprobePath, [
+    "-v", "error",
+    "-show_entries",
+    "stream=codec_type,codec_name,width,height,r_frame_rate,pix_fmt,sample_rate,channels:format=duration",
+    "-of", "json",
+    path
+  ]);
+  const parsed = parseJson<{
+    streams: Array<Record<string, unknown>>;
+    format: { duration: string };
+  }>(result.stdout, "prepared media inspection");
+  const video = parsed.streams.find((stream) => stream.codec_type === "video");
+  const audio = parsed.streams.find((stream) => stream.codec_type === "audio");
+  const [numerator, denominator = "1"] = String(video?.r_frame_rate).split("/");
+  if (!video) throw new Error("GPT-Live QA failed: prepared media video stream is missing");
+  return {
+    durationSeconds: Number(parsed.format.duration),
+    video: {
+      codecName: String(video.codec_name ?? ""),
+      width: Number(video.width),
+      height: Number(video.height),
+      framesPerSecond: Number(numerator) / Number(denominator),
+      pixelFormat: String(video.pix_fmt ?? "")
+    },
+    ...(audio ? {
+      audio: {
+        codecName: String(audio.codec_name ?? ""),
+        sampleRate: Number(audio.sample_rate),
+        channels: Number(audio.channels)
+      }
+    } : {})
+  };
+};
+
+const inspectTailAudio = async (
+  ffmpegPath: string,
+  finalPath: string,
+  runCommand: typeof defaultRunCommand
+): Promise<QaTailAudioCheck> => {
+  const measure = async (secondsFromEnd: number): Promise<number> => {
+    const result = await runCommand(ffmpegPath, [
+      "-hide_banner",
+      "-nostats",
+      "-sseof",
+      `-${secondsFromEnd}`,
+      "-i",
+      finalPath,
+      "-vn",
+      "-af",
+      "volumedetect",
+      "-f",
+      "null",
+      "-"
+    ]);
+    return parsePeakDb(`${result.stdout}\n${result.stderr}`);
+  };
+  return {
+    tailPeakDb: await measure(10),
+    endPeakDb: await measure(0.5),
+    tailSignalPresent: true
+  };
+};
+
+const readOptionalJson = async <T>(
+  path: string,
+  label: string,
+  readFile: ReadText
+): Promise<T | null> => {
+  try {
+    return parseJson<T>(await readFile(path, "utf8"), label);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+};
+
+const collectFilePresence = async (
+  paths: readonly string[],
+  stat: StatFile
+): Promise<Record<string, boolean>> => {
+  const entries = await Promise.all(
+    [...new Set(paths)].map(async (path) => {
+      try {
+        const file = await stat(path);
+        return [path, file.isFile() && file.size > 0] as const;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return [path, false] as const;
+        throw error;
+      }
+    })
+  );
+  return Object.fromEntries(entries);
+};
+
+const collectSnapshot = async (
+  options: RunGptLiveQaOptions,
+  generation: PublishedGenerationValidation,
+  dependencies: Required<Pick<
+    RunGptLiveQaDependencies,
+    "readFile" | "readFileBytes" | "stat" | "runCommand" | "inspectMediaFile" | "inspectEvidenceAssets" | "inspectFinalMediaFile" | "lstat" | "realpath" | "validateSealedTellaExports" | "verifySourceFullscreen"
+  >>
+): Promise<GptLiveQaSnapshot> => {
+  const productionPath = join(options.episodeDir, "production.json");
+  const voicePath = join(options.episodeDir, "voice", "narration.json");
+  const planPath = join(options.episodeDir, "tella", "plan.json");
+  const statePath = join(options.episodeDir, "tella", "state.json");
+  const preparedPath = join(options.episodeDir, "reports", "prepared.json");
+  const sourceMatrixPath = join(options.episodeDir, "reports", "source-matrix.md");
+  const sourceManifestPath = join(options.episodeDir, "reports", "source-manifest.json");
+  const exportReceiptPath = tellaExportReceiptPath(options.episodeDir);
+  const humanPlaybackPath = join(options.episodeDir, "reports", "human-playback.json");
+
+  await validateNoSymlinkPaths(options.episodeDir, [
+    productionPath,
+    voicePath,
+    planPath,
+    statePath,
+    generation.reportPath,
+    preparedPath,
+    sourceMatrixPath,
+    sourceManifestPath,
+    exportReceiptPath,
+    humanPlaybackPath
+  ], dependencies);
+
+  const [
+    productionText,
+    voiceText,
+    planText,
+    stateText,
+    postText,
+    preparedText,
+    sourceMatrix,
+    sourceManifestText,
+    exportReceiptText
+  ] =
+    await Promise.all([
+      dependencies.readFile(productionPath, "utf8"),
+      dependencies.readFile(voicePath, "utf8"),
+      dependencies.readFile(planPath, "utf8"),
+      dependencies.readFile(statePath, "utf8"),
+      dependencies.readFile(generation.reportPath, "utf8"),
+      dependencies.readFile(preparedPath, "utf8"),
+      dependencies.readFile(sourceMatrixPath, "utf8"),
+      dependencies.readFile(sourceManifestPath, "utf8"),
+      dependencies.readFile(exportReceiptPath, "utf8")
+    ]);
+  const production = parseJson<QaProduction>(productionText, "production manifest");
+  const voice = parseJson<QaVoice>(voiceText, "voice manifest");
+  const plan = parseJson<TellaPlan>(planText, "Tella plan");
+  const tellaState = parseJson<unknown>(stateText, "Tella state");
+  const postProduction = parseJson<Record<string, unknown>>(postText, "post-production report");
+  const prepared = parseJson<Record<string, unknown>>(preparedText, "prepared report");
+  const sourceManifest = parseJson<GptLiveSourceManifest>(
+    sourceManifestText,
+    "source manifest"
+  );
+  const timelineAudit = validateTellaTimelineAudit(plan, tellaState);
+  const parsedTellaExportReceipt = parseTellaExportReceipt(
+    parseJson<unknown>(exportReceiptText, "Tella export receipt"),
+    tellaState
+  );
+  const exportPaths = [
+    join(options.episodeDir, "exports", "tella-a.mp4"),
+    join(options.episodeDir, "exports", "tella-b.mp4")
+  ] as const;
+
+  await withValidatedQaArtifactPaths({
+    episodeDir: options.episodeDir,
+    env: options.env,
+    production,
+    voice,
+    plan,
+    generation,
+    tellaState,
+    postProduction
+  }, dependencies, async () => undefined);
+  const tellaExportReceipt = await dependencies.validateSealedTellaExports({
+    episodeDir: options.episodeDir,
+    receipt: parsedTellaExportReceipt,
+    tellaState
+  });
+  const sourceFullscreenTiming = buildSourceFullscreenTiming(
+    tellaExportReceipt,
+    timelineAudit
+  );
+  const observedSourceFullscreen = await dependencies.verifySourceFullscreen({
+    ffmpegPath: options.ffmpegPath,
+    plan,
+    exportPaths: {
+      "version-a": exportPaths[0],
+      "version-b": exportPaths[1]
+    },
+    timing: sourceFullscreenTiming
+  });
+  const logoStat = await dependencies.lstat(production.branding.logoPath);
+  if (logoStat.isSymbolicLink()) throw new Error("GPT-Live QA path contains a symlink: logo");
+
+  const voiceCacheEntries = await Promise.all(
+    voice.chunks.map(async (chunk) => [
+      chunk.id,
+      await readOptionalJson<QaVoiceCacheMetadata>(
+        `${chunk.file}.json`,
+        `voice cache provenance ${chunk.id}`,
+        dependencies.readFile
+      )
+    ] as const)
+  );
+  const expectedPaths = [
+    ...voice.chunks.flatMap((chunk) => [chunk.file, `${chunk.file}.json`]),
+    ...plan.clips.flatMap((clip) =>
+      clip.kind === "source_clip"
+        ? [clip.mediaPath]
+        : [
+            clip.masterPath,
+            ...Object.values(clip.variants).flatMap((variant) => [
+              variant.platePath,
+              variant.narrationAudioPath
+            ])
+          ]
+    ),
+    ...generation.finalPaths
+  ];
+  const filePresence = await collectFilePresence(expectedPaths, dependencies.stat);
+
+  const exportInspections = await Promise.all(
+    exportPaths.map((path) => dependencies.inspectFinalMediaFile(options.ffprobePath, path))
+  );
+  exportInspections.forEach((inspection, index) =>
+    assertTellaProgramDuration(
+      plan,
+      inspection.durationSeconds,
+      `${index === 0 ? "version-a" : "version-b"} Tella export`
+    )
+  );
+  const sourceClips = GPT_LIVE_CONTENT.timeline.filter((item) => item.kind === "source_clip");
+  const sourceInspections = await Promise.all(
+    sourceClips.map(async (clip) => [
+      clip.id,
+      await dependencies.inspectMediaFile(
+        options.ffprobePath,
+        join(options.episodeDir, "source", `${clip.id}.mp4`)
+      )
+    ] as const)
+  );
+  const narrationClips = plan.clips.filter((clip) => clip.kind === "narration");
+  const masterInspections = await Promise.all(
+    narrationClips.map(async (clip) => [
+      clip.id,
+      await dependencies.inspectMediaFile(options.ffprobePath, clip.masterPath)
+    ] as const)
+  );
+  const plateInspections = await Promise.all(
+    narrationClips.flatMap((clip) =>
+      PLATE_VARIANTS.map(async (variant) => [
+        `${variant}:${clip.id}`,
+        await dependencies.inspectMediaFile(options.ffprobePath, clip.variants[variant].platePath)
+      ] as const)
+    )
+  );
+  const finals = await Promise.all(
+    generation.finalPaths.map((path) => dependencies.inspectFinalMediaFile(options.ffprobePath, path))
+  );
+  const tailAudio = await Promise.all(
+    generation.finalPaths.map((path) => inspectTailAudio(options.ffmpegPath, path, dependencies.runCommand))
+  );
+  const logoBytes = await dependencies.readFileBytes(production.branding.logoPath);
+  const sourceHashEntries = await Promise.all(sourceClips.map(async (clip) => [
+    clip.id,
+    createHash("sha256").update(
+      await dependencies.readFileBytes(join(options.episodeDir, "source", `${clip.id}.mp4`))
+    ).digest("hex")
+  ] as const));
+  const voiceHashEntries = await Promise.all(voice.chunks.map(async (chunk) => [
+    chunk.id,
+    createHash("sha256").update(await dependencies.readFileBytes(chunk.file)).digest("hex")
+  ] as const));
+  const observedEvidenceInspections = await dependencies.inspectEvidenceAssets(
+    options.episodeDir,
+    GPT_LIVE_CONTENT.evidence,
+    {
+      ffmpegPath: options.ffmpegPath,
+      runCommand: dependencies.runCommand,
+      lstat: dependencies.lstat,
+      realpath: dependencies.realpath
+    }
+  );
+
+  return {
+    episodeDir: options.episodeDir,
+    env: options.env,
+    generation,
+    production,
+    sourceMatrix,
+    sourceManifest,
+    prepared,
+    voice,
+    voiceCacheMetadata: Object.fromEntries(voiceCacheEntries),
+    plan,
+    tellaExportReceipt,
+    tellaState,
+    postProduction,
+    observedSourceFullscreen,
+    logo: {
+      path: production.branding.logoPath,
+      sha256: createHash("sha256").update(logoBytes).digest("hex")
+    },
+    filePresence,
+    media: {
+      exports: {
+        "version-a": exportInspections[0]!,
+        "version-b": exportInspections[1]!
+      },
+      sources: Object.fromEntries(sourceInspections),
+      masters: Object.fromEntries(masterInspections),
+      plates: Object.fromEntries(plateInspections),
+      finals: {
+        "version-a": finals[0]!,
+        "version-b": finals[1]!
+      }
+    },
+    safeAreas: PLATE_VARIANTS.flatMap((variant) =>
+      GPT_LIVE_SCENES.map((scene) => ({
+        variant,
+        scene,
+        ...sceneStyle(variant, scene).reservedTopRight
+      }))
+    ),
+    tailAudio: {
+      "version-a": tailAudio[0]!,
+      "version-b": tailAudio[1]!
+    },
+    observedIntegrityHashes: {
+      sources: Object.fromEntries(sourceHashEntries),
+      voice: Object.fromEntries(voiceHashEntries)
+    },
+    observedEvidenceInspections
+  };
+};
+
+const postSourceIntervals = (snapshot: GptLiveQaSnapshot) => {
+  const sourceDialogue = snapshot.postProduction.sourceDialogue as {
+    intervals: Array<{
+      startSeconds: number;
+      endSeconds: number;
+      outputLufsA: number;
+      outputLufsB: number;
+    }>;
+  };
+  return sourceDialogue.intervals;
+};
+
+const buildSafeQaReport = (
+  snapshot: GptLiveQaSnapshot,
+  artifacts: VisualArtifacts,
+  humanPlayback: HumanPlayback
+) => {
+  const variants = snapshot.postProduction.variants as Array<{
+    name: QaVariantName;
+    outputPath: string;
+    sha256: string;
+  }>;
+  const status = deriveQaStatus(humanPlayback);
+  return {
+    schemaVersion: "0.2.0",
+    ...status,
+    productionId: GPT_LIVE_CONTENT.id,
+    generationId: snapshot.generation.generationId,
+    generation: {
+      generationId: snapshot.generation.generationId,
+      preparationFingerprint: snapshot.generation.preparationFingerprint,
+      variants: snapshot.generation.variants,
+      programAudio: snapshot.generation.programAudio,
+      tellaExports: snapshot.generation.tellaExports,
+      sourceFullscreen: snapshot.observedSourceFullscreen
+    },
+    youtubeUploadEnabled: false,
+    checks: {
+      editorialAndSourceCoverage: true,
+      clipAndVoiceProvenance: true,
+      mediaStreamContracts: true,
+      tellaPlanAndState: true,
+      tellaExportProvenance: true,
+      sourceClipsFullscreen: true,
+      finalGenerationIntegrity: true,
+      preparedEvidenceIntegrity: true,
+      brandingAndSafeArea: true,
+      audioTreatmentAndTailSignal: true,
+      sampledFramesNonblank: true
+    },
+    finals: VARIANTS.map((name) => {
+      const variant = variants.find((item) => item.name === name)!;
+      return {
+        name,
+        path: variant.outputPath,
+        sha256: variant.sha256,
+        durationSeconds: snapshot.media.finals[name].durationSeconds
+      };
+    }),
+    visual: artifacts,
+    comparisonPath: "reports/comparison.md",
+    tailSignalPresent: true,
+    tailSignalLimitation: "The outro-only tail signal does not prove CTA completion or exclude speech truncation.",
+    observedIntegrityHashes: {
+      label: "Observed SHA-256 hashes from this QA run; these are integrity evidence, not cryptographic origin proof.",
+      sources: Object.entries(snapshot.observedIntegrityHashes.sources).map(([id, sha256]) => ({
+        id,
+        path: `source/${id}.mp4`,
+        sha256
+      })),
+      voice: Object.entries(snapshot.observedIntegrityHashes.voice).map(([id, sha256]) => ({
+        id,
+        path: `voice/${id}.mp3`,
+        sha256
+      }))
+    },
+    evidenceInspections: snapshot.observedEvidenceInspections,
+    evidenceOriginLimitation:
+      "Decoded pixels and file hashes prove inspected-byte integrity, not cryptographic URL origin; browser capture and human review remain trust boundaries."
+  };
+};
+
+const assertUnchangedPublishedGeneration = (
+  initial: PublishedGenerationValidation,
+  current: PublishedGenerationValidation
+): void => {
+  const sameIdentity =
+    initial.generationId === current.generationId &&
+    initial.preparationFingerprint === current.preparationFingerprint &&
+    initial.reportSha256 === current.reportSha256 &&
+    initial.preparedArtifacts.length === current.preparedArtifacts.length &&
+    initial.preparedArtifacts.every((artifact, index) => {
+      const currentArtifact = current.preparedArtifacts[index];
+      return currentArtifact?.logicalId === artifact.logicalId &&
+        currentArtifact.path === artifact.path &&
+        currentArtifact.sha256 === artifact.sha256 &&
+        currentArtifact.byteSize === artifact.byteSize;
+    }) &&
+    initial.programAudio.length === current.programAudio.length &&
+    initial.programAudio.every((input, index) => {
+      const currentInput = current.programAudio[index];
+      return currentInput?.clipId === input.clipId &&
+        currentInput.kind === input.kind &&
+        currentInput.path === input.path &&
+        currentInput.sha256 === input.sha256 &&
+        currentInput.byteSize === input.byteSize &&
+        currentInput.durationSeconds === input.durationSeconds;
+    }) &&
+    JSON.stringify(initial.tellaExports) === JSON.stringify(current.tellaExports) &&
+    JSON.stringify(initial.sourceFullscreen) === JSON.stringify(current.sourceFullscreen) &&
+    initial.variants.length === current.variants.length &&
+    initial.variants.every((variant, index) => {
+      const currentVariant = current.variants[index];
+      return currentVariant?.name === variant.name &&
+        currentVariant.inputSha256 === variant.inputSha256 &&
+        currentVariant.inputByteSize === variant.inputByteSize &&
+        currentVariant.sha256 === variant.sha256 &&
+        currentVariant.byteSize === variant.byteSize;
+    });
+  if (!sameIdentity) {
+    throw new Error("GPT-Live QA aborted: published generation changed during QA");
+  }
+};
+
+async function runGptLiveQaUnlocked(
+  options: RunGptLiveQaOptions,
+  dependencies: RunGptLiveQaDependencies = {}
+): Promise<GptLiveQaResult> {
+  const validatePublishedGeneration = dependencies.validatePublishedGeneration ??
+    defaultValidatePublishedGeneration;
+  const readFile = dependencies.readFile ?? (defaultReadFile as ReadText);
+  const readFileBytes = dependencies.readFileBytes ??
+    ((path: string) => defaultReadFile(path) as Promise<Uint8Array>);
+  const stat = dependencies.stat ?? defaultStat;
+  const mkdir = dependencies.mkdir ?? defaultMkdir;
+  const mkdtemp = dependencies.mkdtemp ?? defaultMkdtemp;
+  const lstat = dependencies.lstat ?? defaultLstat;
+  const realpath = dependencies.realpath ?? defaultRealpath;
+  const rm = dependencies.rm ?? defaultRm;
+  const runCommand = dependencies.runCommand ?? defaultRunCommand;
+  const validateSealedTellaExports = dependencies.validateSealedTellaExports ??
+    ((input: Parameters<typeof defaultValidateSealedTellaExports>[0]) =>
+      defaultValidateSealedTellaExports(input, { readFileBytes }));
+  const verifySourceFullscreen = dependencies.verifySourceFullscreen ??
+    ((input: Parameters<typeof defaultVerifySourceFullscreen>[0]) =>
+      defaultVerifySourceFullscreen(input, { runCommand }));
+  const inspectMediaFile = dependencies.inspectMediaFile ??
+    ((ffprobePath: string, path: string) => inspectPreparedMediaFile(ffprobePath, path, runCommand));
+  const inspectEvidenceAssets = dependencies.inspectEvidenceAssets ?? defaultInspectEvidenceAssets;
+  const inspectFinalMediaFile = dependencies.inspectFinalMediaFile ??
+    ((ffprobePath: string, path: string) => defaultInspectFinalMediaFile(ffprobePath, path, runCommand));
+  const generateArtifacts = dependencies.generateVisualArtifacts ?? generateVisualArtifacts;
+  const writeJsonAtomic = dependencies.writeJsonAtomic ?? defaultWriteJsonAtomic;
+  const writeTextAtomic = dependencies.writeTextAtomic ?? defaultWriteTextAtomic;
+  const paths = qaReportPaths(options.episodeDir);
+
+  let generation: PublishedGenerationValidation;
+  generation = await validatePublishedGeneration(options.episodeDir);
+
+  const snapshot = await collectSnapshot(options, generation, {
+    readFile,
+    readFileBytes,
+    stat,
+    runCommand,
+    inspectMediaFile,
+    inspectEvidenceAssets,
+    inspectFinalMediaFile,
+    lstat,
+    realpath,
+    validateSealedTellaExports,
+    verifySourceFullscreen
+  });
+  validateGptLiveQaSnapshot(snapshot);
+
+  let humanPlaybackText: string | undefined;
+  try {
+    humanPlaybackText = await readFile(join(options.episodeDir, "reports", "human-playback.json"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const humanPlayback = parseHumanPlaybackReview(humanPlaybackText, snapshot.postProduction);
+  const status = deriveQaStatus(humanPlayback);
+
+  const visualArtifacts = await withQaStagingDirectory(
+    join(options.episodeDir, "reports"),
+    { mkdtemp, rm },
+    async (stagingDirectory) => {
+      const stagingVisualDirectory = join(stagingDirectory, "visual");
+      await mkdir(stagingVisualDirectory, { recursive: true });
+      const artifacts = await generateArtifacts({
+        episodeDir: options.episodeDir,
+        finalPaths: {
+          "version-a": generation.finalPaths[0],
+          "version-b": generation.finalPaths[1]
+        },
+        durations: {
+          "version-a": snapshot.media.finals["version-a"].durationSeconds,
+          "version-b": snapshot.media.finals["version-b"].durationSeconds
+        },
+        plan: snapshot.plan,
+        ffmpegPath: options.ffmpegPath,
+        outputDirectory: stagingVisualDirectory,
+        artifactRelativeRoot: "reports/visual"
+      }, { runCommand });
+      validateVisualArtifacts(artifacts, snapshot.plan);
+      if (artifacts.checkedFrameCount !== 58) {
+        throw new Error(`GPT-Live QA failed: expected 58 checked frames, received ${artifacts.checkedFrameCount}`);
+      }
+
+      const sourceIntervals = postSourceIntervals(snapshot).map(
+        ({ startSeconds, endSeconds }) => ({ startSeconds, endSeconds })
+      );
+      const comparison = renderComparisonMarkdown({
+        artifacts,
+        durations: {
+          "version-a": snapshot.media.finals["version-a"].durationSeconds,
+          "version-b": snapshot.media.finals["version-b"].durationSeconds
+        },
+        durationDeltaSeconds: Math.abs(
+          snapshot.media.finals["version-a"].durationSeconds -
+          snapshot.media.finals["version-b"].durationSeconds
+        ),
+        sourceIntervals,
+        sourceOutputLufs: postSourceIntervals(snapshot)
+      });
+      assertSafeReportText(comparison, "visual comparison");
+      await writeTextAtomic(join(stagingDirectory, "comparison.md"), comparison);
+
+      const report = buildSafeQaReport(snapshot, artifacts, humanPlayback);
+      const reportText = `${JSON.stringify(report, null, 2)}\n`;
+      assertSafeReportText(reportText, "QA report");
+      await writeJsonAtomic(join(stagingDirectory, "qa.json"), report);
+      const currentGeneration = await validatePublishedGeneration(options.episodeDir);
+      assertUnchangedPublishedGeneration(generation, currentGeneration);
+      await publishQaReportSet({ stagingDirectory, paths });
+      return artifacts;
+    }
+  );
+
+  return {
+    episodeDir: options.episodeDir,
+    ...status,
+    reportPath: paths.reportPath,
+    comparisonPath: paths.comparisonPath,
+    visualDirectory: paths.visualDirectory,
+    visualArtifacts
+  };
+}
+
+export async function runGptLiveQa(
+  options: RunGptLiveQaOptions,
+  dependencies: RunGptLiveQaDependencies = {}
+): Promise<GptLiveQaResult> {
+  const withProductionLock = dependencies.withProductionLock ?? withEpisodeProductionLock;
+  return withProductionLock(options.episodeDir, "qa", () =>
+    runGptLiveQaUnlocked(options, dependencies));
+}

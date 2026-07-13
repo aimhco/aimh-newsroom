@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.state/
+episodes/**
+!episodes/.gitkeep
+reports/**
+!reports/.gitkeep
+!reports/*.md
+*.log
+.DS_Store
+.worktrees/
+.superpowers/
