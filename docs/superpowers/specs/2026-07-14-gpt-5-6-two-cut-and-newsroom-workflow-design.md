@@ -31,7 +31,7 @@ Sources that only paraphrase the primary announcement are excluded. The research
 For this episode, the recommended additions are:
 
 - CodeRabbit's hands-on long-horizon coding comparison, because it tests a real implementation task and changes how nominal token price should be interpreted.
-- Axios's model-selection report, because its concrete comparison of identical prompts shows how effort settings can materially change cost.
+- Simon Willison's same-prompt SVG comparison, because it makes the model-and-effort cost swing directly inspectable without relying on a secondhand summary.
 
 Other reviewed sources remain out unless later verification finds a direct contribution to the central work-allocation story.
 
@@ -41,7 +41,8 @@ The original workflow captured screenshots and the obvious hero asset but did no
 
 The GPT-5.6 media inventory includes:
 
-- the 15-second, square, 60 fps OpenAI launch film at the top of the article;
+- the actual top-of-article greenhouse film;
+- the separate 15-second square ChatGPT Work launch clip;
 - the playable Saltwind sailing demo;
 - the other tabbed generated experiences;
 - the embedded spirograph, wave-interference, and tokenizer build videos;
@@ -87,7 +88,7 @@ Visual rhythm:
 4. Saltwind gameplay as proof of the rendered artifact.
 5. CodeRabbit hands-on task and result.
 6. Spirograph or tokenizer build footage as another concrete official example.
-7. Axios's concrete cost/effort comparison.
+7. Simon Willison's concrete same-prompt cost/effort comparison.
 8. OpenAI caveat, availability, pricing, and AIMH verdict.
 
 No single static evidence state should dominate for more than roughly 10–12 seconds. Source cards are used only when the words or numbers are the evidence.

@@ -515,7 +515,7 @@ Copy `render/final.mp4` to `render/final-baseline.mp4` only if the baseline path
 
 - [ ] **Step 2: Seal related-source research**
 
-Record the OpenAI primary source; CodeRabbit and Axios as selected candidates; and all reviewed but excluded candidates with materiality reasons. Add each selected external claim to `sources.json` with explicit attribution and access date.
+Record the OpenAI primary source; CodeRabbit and Simon Willison as selected candidates; and all reviewed but excluded candidates with materiality reasons. Add each selected external claim to `sources.json` with explicit attribution and access date.
 
 - [ ] **Step 3: Seal the primary media inventory**
 
@@ -531,7 +531,7 @@ Resolve the official Vimeo config to HLS using the existing safe resolver, then 
 
 - [ ] **Step 6: Capture related-source evidence**
 
-Capture legible CodeRabbit and Axios evidence at 1440 pixels or greater, with the relevant result visible. Do not reproduce long article text; use the screenshot as evidence under summarized narration.
+Capture legible CodeRabbit and Simon Willison evidence at 1440 pixels or greater, with the relevant result visible. Do not reproduce long article text; use the screenshot as evidence under summarized narration.
 
 - [ ] **Step 7: Create variant scripts and validate manifests**
 

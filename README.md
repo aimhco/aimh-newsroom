@@ -23,6 +23,23 @@ Capture source screenshots, attach them to `shotlist.json`, then render without 
 pnpm newsroom:render --fixtures --capture --no-upload
 ```
 
+## Article-driven evidence workflow
+
+Article episodes use two sealing gates before narration or rendering:
+
+- `research-manifest.json` records the independent-source search, including a hands-on or real-world test when one can be found. Related sources are included only when they materially add evidence, consequence, limitation, or a clarifying example; there is no inclusion quota.
+- `media-manifest.json` inventories the primary page's videos, embeds, interactive demos, galleries, and text evidence. Selected motion must have a captured episode-relative asset before it can enter the edit.
+
+The reusable newsroom compositor supports `source_video`, `interactive_capture`, and animated `source_zoom` beats. Paragraph evidence must move from page context into a readable focal crop. Critical narration terms can keep official display text while using `speech_text` for ElevenLabs prosody. At render time, an outro is chosen from `Outro_*.mp3`, persisted for reproducible rerenders, and rotated by episode seed instead of using one global hard-coded track.
+
+The GPT-5.6 two-cut workflow is local-only and deliberately exposes no upload command:
+
+```bash
+pnpm gpt56:revision:voice -- --variant both
+pnpm gpt56:revision:render -- --variant both
+pnpm gpt56:revision:qa -- --variant both
+```
+
 ## GPT-Live Tella Exports
 
 After both Tella exports have been downloaded to `exports/tella-a.mp4` and

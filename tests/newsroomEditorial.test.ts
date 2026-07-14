@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { validateMediaManifest } from "../src/capture/mediaManifest";
+import { validateArticleEditorialGate } from "../src/editorial/articleEditorialGate";
 import { validateResearchManifest } from "../src/editorial/researchManifest";
 
 describe("newsroom related-source research", () => {
+  const candidateMetadata = {
+    title: "Independent test",
+    publisher: "Example Lab",
+    url: "https://example.com/test",
+    accessed_at: "2026-07-14"
+  };
+
   it("allows fewer than two selected sources when rejected candidates have materiality reasons", () => {
     expect(() =>
       validateResearchManifest({
@@ -13,6 +21,7 @@ describe("newsroom related-source research", () => {
         search_notes: "Reviewed hands-on tests and independent reporting.",
         candidates: [
           {
+            ...candidateMetadata,
             id: "hands-on",
             independent: true,
             evidence_type: "hands_on",
@@ -22,6 +31,7 @@ describe("newsroom related-source research", () => {
             rationale: "Tests a real task."
           },
           {
+            ...candidateMetadata,
             id: "repeat",
             independent: true,
             evidence_type: "reporting",
@@ -71,6 +81,7 @@ describe("newsroom related-source research", () => {
         search_notes: "Reviewed two candidates.",
         candidates: [
           {
+            ...candidateMetadata,
             id: "repeat",
             independent: true,
             evidence_type: "reporting",
@@ -94,6 +105,7 @@ describe("newsroom related-source research", () => {
         search_notes: "Reviewed one candidate.",
         candidates: [
           {
+            ...candidateMetadata,
             id: "candidate",
             independent: true,
             evidence_type: "analysis",
@@ -105,6 +117,31 @@ describe("newsroom related-source research", () => {
         ]
       })
     ).toThrow(/rationale/);
+  });
+
+  it("rejects a candidate without source provenance", () => {
+    expect(() =>
+      validateResearchManifest({
+        schema_version: "0.1.0",
+        primary_source_id: "primary",
+        search_complete: true,
+        hands_on_sought: true,
+        search_notes: "Reviewed one candidate.",
+        candidates: [
+          {
+            ...candidateMetadata,
+            publisher: "",
+            id: "candidate",
+            independent: true,
+            evidence_type: "analysis",
+            novelty: 1,
+            story_impact: 1,
+            decision: "rejected",
+            rationale: "Does not change the story."
+          }
+        ]
+      })
+    ).toThrow(/publisher/);
   });
 });
 
@@ -196,5 +233,75 @@ describe("primary-page media inventory", () => {
         ]
       })
     ).toThrow(/Duplicate media item/);
+  });
+});
+
+describe("article editorial sealing gate", () => {
+  const research = {
+    schema_version: "0.1.0" as const,
+    primary_source_id: "primary",
+    search_complete: true,
+    hands_on_sought: true,
+    search_notes: "Reviewed independent coverage and one hands-on test.",
+    candidates: []
+  };
+
+  it("accepts used motion only when the completed media audit selected and captured it", () => {
+    expect(() => validateArticleEditorialGate({
+      researchManifest: research,
+      mediaManifest: {
+        schema_version: "0.1.0",
+        primary_url: "https://example.com/article",
+        audit_complete: true,
+        items: [{
+          id: "hero",
+          kind: "video",
+          source_url: "https://example.com/hero.mp4",
+          local_asset: "source/hero.mp4",
+          decision: "selected",
+          rationale: "Moving opening evidence."
+        }]
+      },
+      usedPrimaryMotionAssets: ["source/hero.mp4"]
+    })).not.toThrow();
+  });
+
+  it("rejects selected motion without a captured asset", () => {
+    expect(() => validateArticleEditorialGate({
+      researchManifest: research,
+      mediaManifest: {
+        schema_version: "0.1.0",
+        primary_url: "https://example.com/article",
+        audit_complete: true,
+        items: [{
+          id: "hero",
+          kind: "video",
+          source_url: "https://example.com/hero.mp4",
+          decision: "selected",
+          rationale: "Moving opening evidence."
+        }]
+      },
+      usedPrimaryMotionAssets: []
+    })).toThrow(/captured local_asset/);
+  });
+
+  it("rejects motion used by the edit when it was not selected in the audit", () => {
+    expect(() => validateArticleEditorialGate({
+      researchManifest: research,
+      mediaManifest: {
+        schema_version: "0.1.0",
+        primary_url: "https://example.com/article",
+        audit_complete: true,
+        items: [{
+          id: "hero",
+          kind: "video",
+          source_url: "https://example.com/hero.mp4",
+          local_asset: "source/hero.mp4",
+          decision: "selected",
+          rationale: "Moving opening evidence."
+        }]
+      },
+      usedPrimaryMotionAssets: ["source/unreviewed.mp4"]
+    })).toThrow(/Used primary motion/);
   });
 });

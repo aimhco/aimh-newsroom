@@ -1,5 +1,34 @@
+import { createHash } from "node:crypto";
+import { access, readFile, readdir, rm } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { bundle } from "@remotion/bundler";
+import { renderMedia, selectComposition } from "@remotion/renderer";
+import { loadEnvSnapshotFromFiles } from "../config/env";
+import { validateArticleEditorialGate } from "../editorial/articleEditorialGate";
+import type { ResearchManifest } from "../editorial/researchManifest";
+import type { MediaManifest } from "../capture/mediaManifest";
+import { buildCaptionsSrt } from "../render/captions";
+import { selectEpisodeOutroPath } from "../render/outroMusic";
+import { ffprobeDurationSeconds, runCommand } from "../render/process";
 import type { ScriptFile } from "../types";
-import type { FocalRect } from "./newsroom/motion/types";
+import { ensureDir, writeJson, writeText } from "../utils/fs";
+import {
+  synthesizeNarration,
+  type VoiceChunkResult,
+  type VoiceRenderResult
+} from "../voice/elevenLabsAdapter";
+import {
+  buildGpt56FinalRenderArgs,
+  buildGpt56SegmentMuxArgs
+} from "./gpt56Episode";
+import type {
+  EvidenceBeat,
+  FocalRect,
+  NewsroomEvidencePlateProps
+} from "./newsroom/motion/types";
+import { findLongStaticHolds } from "./newsroom/motion/timing";
+import { inspectMediaFile } from "./gptLive/mediaInspection";
 
 export const SUPPORTED_GPT56_REVISION_COMMANDS = ["voice", "render", "qa", "all"] as const;
 export type Gpt56RevisionCommand = (typeof SUPPORTED_GPT56_REVISION_COMMANDS)[number];
@@ -72,60 +101,60 @@ const scriptA: ScriptFile = {
   narration: [
     paragraph(
       "a_launch",
-      "OpenAI's GPT-5.6 page opens with work in the physical world: a grower walking through a greenhouse, a laptop in the field, and handwritten labels pointing to the task. That framing matters. The launch is not one model. It is a family called Luna, Terra, and Sol, built around a new question: how much intelligence, time, and parallelism does this job deserve?",
+      "OpenAI's GPT-5.6 page opens with work in the physical world: a grower in a greenhouse, a laptop in the field, and handwritten labels pointing to the task. That framing matters. This is a family called Luna, Terra, and Sol, built around one question: how much intelligence, time, and parallelism does this job deserve?",
       27,
       ["claim_launch_family", "claim_tiers"]
     ),
     paragraph(
       "a_tiers",
-      "Luna is the fast, low-cost lane. Terra is the everyday balance. Sol is the flagship for hard professional work. OpenAI says the family delivers more useful work per dollar, often with fewer output tokens or less time. But those are launch comparisons, not a guarantee for your workload. The practical shift is that choosing a model now looks more like routing work than picking a single default.",
+      "Luna is the fast, low-cost lane. Terra is the everyday balance. Sol is the flagship for hard professional work. OpenAI claims more useful work per dollar, often with fewer tokens or less time. Those are launch comparisons, not a guarantee for your workload. Choosing a model now looks more like routing work than picking one default.",
       28,
       ["claim_tiers", "claim_efficiency", "claim_benchmark_caveat"]
     ),
     paragraph(
       "a_controls",
-      "The second control is effort. Max lets one model spend longer exploring, checking, and revising. Ultra coordinates four agents in parallel by default. Developers also get a multi-agent beta in the Responses API. So the stack now has three levers: model tier, reasoning effort, and whether a difficult task deserves a small team working at once.",
+      "The second control is effort. Max spends longer exploring, checking, and revising. Ultra coordinates four agents in parallel by default. The Responses API also gets a multi-agent beta. So there are three levers: model tier, reasoning effort, and whether a difficult task deserves a small team.",
       23,
       ["claim_max", "claim_ultra"]
     ),
     paragraph(
       "a_practical",
-      "The interesting part is what that extra capability produces. Programmatic Tool Calling lets GPT-5.6 run small programs that coordinate tools and filter intermediate results. Stronger computer use lets it inspect and refine what it built. OpenAI's own examples include this playable sailing game and an interactive spirograph. These are not benchmark bars; they are rendered artifacts you can actually operate and evaluate.",
+      "The interesting part is what that capability produces. Programmatic Tool Calling runs small programs that coordinate tools and filter intermediate results. Stronger computer use lets GPT-5.6 inspect what it built. OpenAI's examples include this playable sailing game and an interactive spirograph. These are rendered artifacts you can operate and evaluate.",
       25,
       ["claim_programmatic_tools", "claim_design", "claim_knowledge_work"],
       {
         speechText:
-          "The interesting part is what that extra capability produces. Programmatic tool-calling lets GPT-5.6 run small programs that coordinate tools and filter intermediate results. Stronger computer use lets it inspect and refine what it built. OpenAI's own examples include this playable sailing game and an interactive spirograph. These are not benchmark bars; they are rendered artifacts you can actually operate and evaluate.",
+          "The interesting part is what that capability produces. Programmatic tool-calling runs small programs that coordinate tools and filter intermediate results. Stronger computer use lets GPT-5.6 inspect what it built. OpenAI's examples include this playable sailing game and an interactive spirograph. These are rendered artifacts you can operate and evaluate.",
         criticalPhrases: ["Programmatic Tool Calling"]
       }
     ),
     paragraph(
       "a_hands_on",
-      "Independent testing adds a useful reality check. CodeRabbit gave the models more than one hundred repository tasks across five programming languages. Sol passed 63.7 percent; Terra passed 40.7 percent. Terra also averaged far more output tokens per task. Their conclusion was not that Terra is bad. It was that cheaper tokens do not automatically mean a cheaper solved task. For long agent runs, follow-through can dominate list price.",
+      "Independent testing adds a reality check. CodeRabbit gave the models more than one hundred repository tasks across five languages. Sol passed 63.7 percent; Terra passed 40.7 percent, while averaging far more output tokens. Their point is not that Terra is bad. It is that cheaper tokens do not guarantee a cheaper solved task. On long runs, follow-through can dominate list price.",
       28,
       ["claim_coderabbit_hands_on"]
     ),
     paragraph(
       "a_cost",
-      "Axios highlighted the same problem from another angle. In Simon Willison's pelican test, an identical prompt cost anywhere from 0.71 cents to 48.55 cents depending on the model and effort setting. That is nearly a seventy-fold swing before you judge the result. The headline price table is only the starting point; your settings and the number of retries determine the bill.",
+      "Developer Simon Willison tested one pelican prompt across GPT-5.6 models and effort settings. The least expensive run cost 0.71 cents; the most expensive cost 48.55 cents. That is nearly a seventy-fold swing before judging the result. The price table is only a starting point. Settings and retries determine the bill.",
       25,
-      ["claim_axios_cost_example"]
+      ["claim_simon_cost_example"]
     ),
     paragraph(
       "a_caveat",
-      "There are two boundaries to keep visible. First, OpenAI says its cost and latency comparisons are simulated estimates and real-world results may vary substantially. Second, the system card reports more cases of going beyond user intent than GPT-5.5 in agentic coding evaluations, although the absolute rates remained low. More capable agents make explicit permissions, checkpoints, and review more important, not less.",
+      "Keep two boundaries visible. OpenAI says its cost and latency comparisons are simulated and real-world results may vary substantially. The system card also reports more cases of going beyond user intent than GPT-5.5 in agentic coding tests, although absolute rates stayed low. More capable agents make permissions, checkpoints, and review more important.",
       27,
       ["claim_benchmark_caveat", "claim_safety_overreach"]
     ),
     paragraph(
       "a_availability",
-      "GPT-5.6 is available across ChatGPT, Codex, and the API. Per million API tokens, Luna is one dollar in and six out. Terra is two-fifty and fifteen. Sol is five and thirty. Those numbers are useful, but they do not choose the workflow for you. A short classification job and a multi-file implementation should not receive the same model, effort level, or supervision.",
+      "GPT-5.6 is available across ChatGPT, Codex, and the API. Per million API tokens, Luna is one dollar in and six out. Terra is two-fifty and fifteen. Sol is five and thirty. The prices do not choose the workflow for you. A short classification job and a multi-file implementation should not get the same model, effort, or supervision.",
       26,
       ["claim_availability", "claim_pricing", "claim_aimh_read"]
     ),
     paragraph(
       "a_takeaway",
-      "The AIMH test is simple: give the same real task to Luna, Terra, and Sol. Track total cost, elapsed time, retries, and cleanup. Then compare the finished artifact, not just the first answer. GPT-5.6's real value will be decided by which tier reliably earns each kind of work.",
+      "The AIMH test is simple: give one real task to Luna, Terra, and Sol. Track total cost, time, retries, and cleanup. Compare the finished artifact, not just the first answer. GPT-5.6's value will be decided by which tier reliably earns each kind of work.",
       19,
       ["claim_tiers", "claim_aimh_read"]
     )
@@ -173,9 +202,9 @@ const scriptB: ScriptFile = {
     ),
     paragraph(
       "b_reality",
-      "Outside tests keep the demo reel honest. CodeRabbit reports that Sol completed 63.7 percent of more than one hundred coding tasks, versus 40.7 percent for Terra, while Terra used more output tokens. Axios points to identical prompts costing from 0.71 cents to 48.55 cents as model and effort changed. Cheap tokens and cheap completed work are not the same thing.",
+      "Outside tests keep the demo reel honest. CodeRabbit reports that Sol completed 63.7 percent of more than one hundred coding tasks, versus 40.7 percent for Terra, while Terra used more output tokens. Simon Willison's identical pelican prompt cost from 0.71 cents to 48.55 cents as model and effort changed. Cheap tokens and cheap completed work are not the same thing.",
       25,
-      ["claim_coderabbit_hands_on", "claim_axios_cost_example"]
+      ["claim_coderabbit_hands_on", "claim_simon_cost_example"]
     ),
     paragraph(
       "b_caveat",
@@ -226,14 +255,14 @@ const motion = (
   fit: "cover" | "contain" = "cover"
 ): WeightedMotionBeat => ({ id, kind, assetPath, weight, sourceLabel, headline, fit });
 
-const hero = () =>
+const hero = (weight = 2) =>
   motion(
     "openai-top-hero",
     "video",
     "source/openai-hero-excerpt.mp4",
     "OpenAI · GPT-5.6 launch page hero",
     "OpenAI opens with work in the world",
-    2
+    weight
   );
 
 const saltwind = (weight = 2) =>
@@ -258,7 +287,20 @@ const spirograph = (weight = 2) =>
   );
 
 const scenesA: readonly Gpt56RevisionScene[] = [
-  { narrationId: "a_launch", beats: [hero()] },
+  {
+    narrationId: "a_launch",
+    beats: [
+      hero(1),
+      zoom(
+        "launch-context",
+        "evidence/01-openai-hero.png",
+        "OpenAI · GPT-5.6 launch",
+        "A three-tier family for work",
+        { x: 0.27, y: 0.04, width: 0.48, height: 0.16 },
+        3
+      )
+    ]
+  },
   {
     narrationId: "a_tiers",
     beats: [
@@ -300,11 +342,18 @@ const scenesA: readonly Gpt56RevisionScene[] = [
     narrationId: "a_cost",
     beats: [
       zoom(
-        "axios-cost",
-        "evidence/10-axios-cost-example.png",
-        "Axios · Simon Willison comparison",
-        "The same prompt, a radically different bill",
-        { x: 0.07, y: 0.48, width: 0.86, height: 0.35 }
+        "simon-low-cost",
+        "evidence/10-simon-willison-cost-example.png",
+        "Simon Willison · GPT-5.6 pelican test",
+        "Luna at no effort: 0.71 cents",
+        { x: 0.05, y: 0.02, width: 0.35, height: 0.21 }
+      ),
+      zoom(
+        "simon-high-cost",
+        "evidence/10-simon-willison-cost-example.png",
+        "Simon Willison · GPT-5.6 pelican test",
+        "Sol at max effort: 48.55 cents",
+        { x: 0.59, y: 0.79, width: 0.4, height: 0.2 }
       )
     ]
   },
@@ -346,14 +395,14 @@ const scenesB: readonly Gpt56RevisionScene[] = [
   {
     narrationId: "b_launch",
     beats: [
-      hero(),
+      hero(8),
       motion(
         "chatgpt-work-launch",
         "video",
         "source/openai-launch.mp4",
         "OpenAI · ChatGPT Work launch clip",
         "From model picker to work system",
-        2,
+        15,
         "contain"
       )
     ]
@@ -398,11 +447,18 @@ const scenesB: readonly Gpt56RevisionScene[] = [
         { x: 0.08, y: 0.42, width: 0.84, height: 0.42 }
       ),
       zoom(
-        "axios-compact",
-        "evidence/10-axios-cost-example.png",
-        "Axios · Simon Willison comparison",
-        "Settings determine the bill",
-        { x: 0.07, y: 0.48, width: 0.86, height: 0.35 }
+        "simon-low-compact",
+        "evidence/10-simon-willison-cost-example.png",
+        "Simon Willison · GPT-5.6 pelican test",
+        "The same prompt starts at 0.71 cents",
+        { x: 0.05, y: 0.02, width: 0.35, height: 0.21 }
+      ),
+      zoom(
+        "simon-high-compact",
+        "evidence/10-simon-willison-cost-example.png",
+        "Simon Willison · GPT-5.6 pelican test",
+        "At max effort it reaches 48.55 cents",
+        { x: 0.59, y: 0.79, width: 0.4, height: 0.2 }
       )
     ]
   },
@@ -482,6 +538,150 @@ export function allocateBeatFrames(
   return allocated;
 }
 
+export interface Gpt56RevisionPaths {
+  readonly baselineVideo: string;
+  readonly finalVideo: string;
+  readonly variantRoot: string;
+  readonly platesDir: string;
+  readonly segmentsDir: string;
+  readonly workDir: string;
+  readonly captions: string;
+  readonly renderStatus: string;
+  readonly script: string;
+  readonly voiceRoot: string;
+  readonly voiceResult: string;
+  readonly qaRoot: string;
+}
+
+export function revisionPaths(
+  episodeDir: string,
+  variantId: Gpt56RevisionVariantId
+): Gpt56RevisionPaths {
+  const suffix = variantId === "a-evidence" ? "a" : "b";
+  const variantRoot = join(episodeDir, "render", "revision", variantId);
+  const voiceRoot = join(episodeDir, "voice", "revision", variantId);
+  return {
+    baselineVideo: join(episodeDir, "render", "final-baseline.mp4"),
+    finalVideo: join(episodeDir, "render", `final-${variantId}.mp4`),
+    variantRoot,
+    platesDir: join(variantRoot, "plates"),
+    segmentsDir: join(variantRoot, "segments"),
+    workDir: join(variantRoot, "work"),
+    captions: join(episodeDir, "render", `captions-${variantId}.srt`),
+    renderStatus: join(variantRoot, "render-status.json"),
+    script: join(episodeDir, `script-${suffix}.json`),
+    voiceRoot,
+    voiceResult: join(voiceRoot, "narration.json"),
+    qaRoot: join(episodeDir, "qa", variantId)
+  };
+}
+
+export interface Gpt56RevisionPlateJob {
+  readonly narrationId: string;
+  readonly narrationPath: string;
+  readonly outputPath: string;
+  readonly durationSeconds: number;
+  readonly inputProps: NewsroomEvidencePlateProps;
+}
+
+export function buildRevisionPlateJobs(
+  variant: Gpt56RevisionVariant,
+  voiceRecords: readonly VoiceChunkResult[],
+  episodeDir: string
+): readonly Gpt56RevisionPlateJob[] {
+  if (voiceRecords.length !== variant.script.narration.length) {
+    throw new Error(
+      `Variant ${variant.id} expected ${variant.script.narration.length} voice records, found ${voiceRecords.length}`
+    );
+  }
+  const voiceById = new Map(voiceRecords.map((record) => [record.id, record]));
+  const paths = revisionPaths(episodeDir, variant.id);
+
+  return variant.scenes.map((scene, index) => {
+    const record = voiceById.get(scene.narrationId);
+    if (
+      !record ||
+      !record.file ||
+      record.provider !== "elevenlabs" ||
+      !Number.isFinite(record.durationSeconds) ||
+      record.durationSeconds <= 0
+    ) {
+      throw new Error(`Missing measured ElevenLabs voice record: ${scene.narrationId}`);
+    }
+    const totalFrames = Math.ceil(record.durationSeconds * 30);
+    const frames = allocateBeatFrames(totalFrames, scene.beats);
+    const beats: EvidenceBeat[] = scene.beats.map((weightedBeat, beatIndex) => {
+      const { weight: _weight, ...beat } = weightedBeat;
+      return { ...beat, durationFrames: frames[beatIndex]! } as EvidenceBeat;
+    });
+    return {
+      narrationId: scene.narrationId,
+      narrationPath: record.file,
+      outputPath: join(
+        paths.platesDir,
+        `${String(index + 1).padStart(2, "0")}-${scene.narrationId}.mp4`
+      ),
+      durationSeconds: record.durationSeconds,
+      inputProps: {
+        durationSeconds: record.durationSeconds,
+        seriesLabel: "AIMH NEWSROOM · GPT-5.6",
+        beats
+      }
+    };
+  });
+}
+
+export interface Gpt56RevisionBeatWindow {
+  readonly id: string;
+  readonly kind: WeightedEvidenceBeat["kind"];
+  readonly assetPath: string;
+  readonly startSeconds: number;
+  readonly endSeconds: number;
+}
+
+export interface Gpt56RevisionSceneWindow {
+  readonly narrationId: string;
+  readonly startSeconds: number;
+  readonly endSeconds: number;
+  readonly beats: readonly Gpt56RevisionBeatWindow[];
+}
+
+export function buildRevisionSceneWindows(
+  variant: Gpt56RevisionVariant,
+  voiceRecords: readonly VoiceChunkResult[]
+): readonly Gpt56RevisionSceneWindow[] {
+  const voiceById = new Map(voiceRecords.map((record) => [record.id, record]));
+  let sceneCursor = 0;
+  return variant.scenes.map((scene) => {
+    const record = voiceById.get(scene.narrationId);
+    if (!record || !Number.isFinite(record.durationSeconds) || record.durationSeconds <= 0) {
+      throw new Error(`Missing measured voice duration: ${scene.narrationId}`);
+    }
+    const totalFrames = Math.ceil(record.durationSeconds * 30);
+    const frames = allocateBeatFrames(totalFrames, scene.beats);
+    const startSeconds = sceneCursor;
+    let beatCursor = startSeconds;
+    const beats = scene.beats.map((beat, index) => {
+      const durationSeconds = (frames[index]! / totalFrames) * record.durationSeconds;
+      const window = {
+        id: beat.id,
+        kind: beat.kind,
+        assetPath: beat.assetPath,
+        startSeconds: beatCursor,
+        endSeconds: beatCursor + durationSeconds
+      };
+      beatCursor = window.endSeconds;
+      return window;
+    });
+    const endSeconds = startSeconds + record.durationSeconds;
+    if (beats.length > 0) {
+      beats[beats.length - 1] = { ...beats[beats.length - 1]!, endSeconds };
+    }
+    sceneCursor = endSeconds;
+    return { narrationId: scene.narrationId, startSeconds, endSeconds, beats };
+  });
+}
+
 const safeAssetPath = (path: string): boolean =>
   Boolean(path) && !path.startsWith("/") && !path.split("/").includes("..");
 
@@ -540,4 +740,822 @@ export function parseGpt56RevisionCommand(command: string | undefined): Gpt56Rev
     );
   }
   return command as Gpt56RevisionCommand;
+}
+
+const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+const DEFAULT_VIDEO_ENGINE_DIR = "/Users/dennywii/Documents/dev/aimh-video-engine";
+const DEFAULT_NEWSROOM_ENV_DIR = "/Users/dennywii/Documents/dev/aimh-newsroom-pipeline";
+const DEFAULT_MUSIC_DIR = join(DEFAULT_VIDEO_ENGINE_DIR, "assets", "music");
+export const GPT56_REVISION_EPISODE_DIR = join(PROJECT_ROOT, "episodes", GPT56_REVISION.id);
+
+const ffmpegPath = (env: Record<string, string>): string =>
+  env.FFMPEG_PATH ?? env.FFMPEG ?? "ffmpeg";
+const ffprobePath = (env: Record<string, string>): string =>
+  env.FFPROBE_PATH ?? env.FFPROBE ?? "ffprobe";
+
+const readJson = async <T>(path: string): Promise<T> =>
+  JSON.parse(await readFile(path, "utf8")) as T;
+
+const requireFile = async (path: string, label: string): Promise<void> => {
+  try {
+    await access(path);
+  } catch {
+    throw new Error(`${label} is unavailable: ${path}`);
+  }
+};
+
+const sha256File = async (path: string): Promise<string> =>
+  createHash("sha256").update(await readFile(path)).digest("hex");
+
+const validateRevisionEditorialInputs = async (episodeDir: string): Promise<void> => {
+  const [researchManifest, mediaManifest] = await Promise.all([
+    readJson<ResearchManifest>(join(episodeDir, "research-manifest.json")),
+    readJson<MediaManifest>(join(episodeDir, "media-manifest.json"))
+  ]);
+  const usedPrimaryMotionAssets = [
+    ...new Set(
+      GPT56_REVISION.variants.flatMap((variant) =>
+        variant.scenes.flatMap((scene) =>
+          scene.beats.flatMap((beat) =>
+            beat.kind === "video" || beat.kind === "interactive_capture"
+              ? [beat.assetPath]
+              : []
+          )
+        )
+      )
+    )
+  ];
+  validateArticleEditorialGate({
+    researchManifest,
+    mediaManifest,
+    usedPrimaryMotionAssets
+  });
+};
+
+const safeConcatLine = (path: string): string => `file '${path.replaceAll("'", "'\\''")}'`;
+
+const assertRevisionVoiceResult = (
+  variant: Gpt56RevisionVariant,
+  voiceResult: VoiceRenderResult
+): void => {
+  if (
+    voiceResult.provider !== "elevenlabs" ||
+    voiceResult.warnings.length > 0 ||
+    voiceResult.chunks.length !== variant.script.narration.length
+  ) {
+    throw new Error(
+      `Variant ${variant.id} requires complete ElevenLabs narration; provider=${voiceResult.provider} warnings=${voiceResult.warnings.length}`
+    );
+  }
+  variant.script.narration.forEach((paragraph, index) => {
+    const chunk = voiceResult.chunks[index];
+    if (
+      chunk?.id !== paragraph.id ||
+      chunk.text !== paragraph.text ||
+      !chunk.file ||
+      !Number.isFinite(chunk.durationSeconds) ||
+      chunk.durationSeconds <= 0
+    ) {
+      throw new Error(`Invalid ElevenLabs narration chunk: ${paragraph.id}`);
+    }
+  });
+};
+
+const loadRuntimeEnv = async (): Promise<Record<string, string>> => {
+  const videoEngineDir = process.env.AIMH_VIDEO_ENGINE_PATH ?? DEFAULT_VIDEO_ENGINE_DIR;
+  const localEnvRoot = process.env.AIMH_NEWSROOM_ROOT ??
+    (PROJECT_ROOT.includes(`${join("", ".worktrees")}/`) ? DEFAULT_NEWSROOM_ENV_DIR : PROJECT_ROOT);
+  return (await loadEnvSnapshotFromFiles(localEnvRoot, videoEngineDir)).values;
+};
+
+const selectedVariants = (
+  requested: Gpt56RevisionVariantId | "both"
+): readonly Gpt56RevisionVariant[] => {
+  if (requested === "both") return GPT56_REVISION.variants;
+  const variant = GPT56_REVISION.variants.find((candidate) => candidate.id === requested);
+  if (!variant) throw new Error(`Unknown GPT-5.6 revision variant: ${requested}`);
+  return [variant];
+};
+
+export function parseGpt56RevisionVariant(
+  args: readonly string[]
+): Gpt56RevisionVariantId | "both" {
+  const optionIndex = args.indexOf("--variant");
+  const value = optionIndex >= 0 ? args[optionIndex + 1] : "both";
+  if (value !== "a-evidence" && value !== "b-demo" && value !== "both") {
+    throw new Error('GPT-5.6 revision --variant must be "a-evidence", "b-demo", or "both"');
+  }
+  return value;
+}
+
+interface RevisionAudioSelection {
+  readonly schema_version: "0.1.0";
+  readonly episode_id: string;
+  readonly seed: string;
+  readonly selected_outro: string;
+}
+
+const loadOrSelectRevisionOutro = async (
+  episodeDir: string,
+  env: Record<string, string>
+): Promise<RevisionAudioSelection> => {
+  const manifestPath = join(episodeDir, "revision-audio.json");
+  try {
+    const persisted = await readJson<RevisionAudioSelection>(manifestPath);
+    await requireFile(persisted.selected_outro, "Persisted revision outro");
+    return persisted;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      const message = (error as Error).message;
+      if (!message.includes("unavailable")) throw error;
+    }
+  }
+  const musicDirectory = env.AIMH_MUSIC_PATH ?? DEFAULT_MUSIC_DIR;
+  const seed = `${GPT56_REVISION.id}:two-cut-revision`;
+  const selectedOutro = selectEpisodeOutroPath(
+    seed,
+    musicDirectory,
+    await readdir(musicDirectory),
+    env.AIMH_OUTRO_MUSIC_PATH
+  );
+  const selection: RevisionAudioSelection = {
+    schema_version: "0.1.0",
+    episode_id: GPT56_REVISION.id,
+    seed,
+    selected_outro: selectedOutro
+  };
+  await requireFile(selectedOutro, "Selected revision outro");
+  await writeJson(manifestPath, selection);
+  return selection;
+};
+
+export async function runGpt56RevisionVoice(
+  requested: Gpt56RevisionVariantId | "both" = "both",
+  episodeDir = GPT56_REVISION_EPISODE_DIR
+): Promise<readonly VoiceRenderResult[]> {
+  validateGpt56Revision(GPT56_REVISION);
+  await validateRevisionEditorialInputs(episodeDir);
+  const env = await loadRuntimeEnv();
+  if (!env.ELEVENLABS_API_KEY || !env.ELEVENLABS_VOICE_ID) {
+    throw new Error(
+      "ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID are required; no narration fallback is allowed"
+    );
+  }
+  const results: VoiceRenderResult[] = [];
+  for (const variant of selectedVariants(requested)) {
+    const paths = revisionPaths(episodeDir, variant.id);
+    await writeJson(paths.script, variant.script);
+    const voiceResult = await synthesizeNarration({
+      script: variant.script,
+      outDir: paths.voiceRoot,
+      env,
+      ffprobePath: ffprobePath(env),
+      allowElevenLabs: true
+    });
+    assertRevisionVoiceResult(variant, voiceResult);
+    await writeJson(paths.voiceResult, voiceResult);
+    process.stdout.write(`Narration ready: ${variant.label}\n`);
+    results.push(voiceResult);
+  }
+  return results;
+}
+
+export interface Gpt56RevisionRenderResult {
+  readonly status: "rendered";
+  readonly variantId: Gpt56RevisionVariantId;
+  readonly finalVideoPath: string;
+  readonly captionsPath: string;
+  readonly durationSeconds: number;
+  readonly selectedOutro: string;
+  readonly baselineSha256: string;
+  readonly segments: readonly string[];
+}
+
+const loadRevisionVoice = async (
+  episodeDir: string,
+  variant: Gpt56RevisionVariant
+): Promise<VoiceRenderResult> => {
+  const voiceResult = await readJson<VoiceRenderResult>(
+    revisionPaths(episodeDir, variant.id).voiceResult
+  );
+  assertRevisionVoiceResult(variant, voiceResult);
+  return voiceResult;
+};
+
+export async function runGpt56RevisionRender(
+  requested: Gpt56RevisionVariantId | "both" = "both",
+  episodeDir = GPT56_REVISION_EPISODE_DIR
+): Promise<readonly Gpt56RevisionRenderResult[]> {
+  validateGpt56Revision(GPT56_REVISION);
+  await validateRevisionEditorialInputs(episodeDir);
+  const env = await loadRuntimeEnv();
+  const logoPath = env.AIMH_LOGO_PATH ?? join(DEFAULT_VIDEO_ENGINE_DIR, "assets", "logo.png");
+  const audioSelection = await loadOrSelectRevisionOutro(episodeDir, env);
+  await Promise.all([
+    requireFile(logoPath, "AIMH logo"),
+    requireFile(audioSelection.selected_outro, "Revision outro")
+  ]);
+
+  const results: Gpt56RevisionRenderResult[] = [];
+  let bundleOutput: string | undefined;
+  try {
+    const serveUrl = await bundle({
+      entryPoint: fileURLToPath(new URL("./newsroom/motion/Root.tsx", import.meta.url)),
+      publicDir: episodeDir,
+      onDirectoryCreated: (path) => {
+        bundleOutput = path;
+      }
+    });
+
+    for (const variant of selectedVariants(requested)) {
+      const paths = revisionPaths(episodeDir, variant.id);
+      await requireFile(paths.baselineVideo, "Approved baseline video");
+      const baselineSha256 = await sha256File(paths.baselineVideo);
+      const voiceResult = await loadRevisionVoice(episodeDir, variant);
+      const uniqueAssets = [...new Set(variant.scenes.flatMap((scene) =>
+        scene.beats.map((beat) => beat.assetPath)
+      ))];
+      await Promise.all(
+        uniqueAssets.map((assetPath) => requireFile(join(episodeDir, assetPath), "Revision evidence"))
+      );
+
+      await rm(paths.variantRoot, { recursive: true, force: true });
+      await Promise.all([
+        ensureDir(paths.platesDir),
+        ensureDir(paths.segmentsDir),
+        ensureDir(paths.workDir)
+      ]);
+      const jobs = buildRevisionPlateJobs(variant, voiceResult.chunks, episodeDir);
+      for (const [index, job] of jobs.entries()) {
+        const composition = await selectComposition({
+          serveUrl,
+          id: "NewsroomEvidencePlate",
+          inputProps: job.inputProps
+        });
+        await renderMedia({
+          composition,
+          serveUrl,
+          codec: "h264",
+          outputLocation: job.outputPath,
+          inputProps: job.inputProps,
+          muted: true,
+          enforceAudioTrack: false,
+          overwrite: true,
+          pixelFormat: "yuv420p"
+        });
+        const segmentPath = join(
+          paths.segmentsDir,
+          `${String(index + 1).padStart(2, "0")}-${job.narrationId}.mp4`
+        );
+        await runCommand(
+          ffmpegPath(env),
+          buildGpt56SegmentMuxArgs({
+            platePath: job.outputPath,
+            narrationPath: job.narrationPath,
+            outputPath: segmentPath,
+            durationSeconds: job.durationSeconds
+          })
+        );
+        process.stdout.write(
+          `Rendered ${variant.id} scene ${index + 1}/${jobs.length}: ${job.narrationId}\n`
+        );
+      }
+
+      const segmentPaths = jobs.map((job, index) =>
+        join(
+          paths.segmentsDir,
+          `${String(index + 1).padStart(2, "0")}-${job.narrationId}.mp4`
+        )
+      );
+      const concatPath = join(paths.workDir, "segments.txt");
+      const assembledPath = join(paths.workDir, "assembled.mp4");
+      await writeText(concatPath, `${segmentPaths.map(safeConcatLine).join("\n")}\n`);
+      await runCommand(ffmpegPath(env), [
+        "-y",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        concatPath,
+        "-c",
+        "copy",
+        assembledPath
+      ]);
+
+      const durationSeconds = voiceResult.chunks.reduce(
+        (sum, chunk) => sum + chunk.durationSeconds,
+        0
+      );
+      await writeText(
+        paths.captions,
+        buildCaptionsSrt(
+          variant.script.narration,
+          voiceResult.chunks.map((chunk) => chunk.durationSeconds)
+        )
+      );
+      await runCommand(
+        ffmpegPath(env),
+        buildGpt56FinalRenderArgs({
+          assembledPath,
+          logoPath,
+          outroPath: audioSelection.selected_outro,
+          outputPath: paths.finalVideo,
+          durationSeconds
+        })
+      );
+
+      const baselineAfter = await sha256File(paths.baselineVideo);
+      if (baselineAfter !== baselineSha256) {
+        throw new Error(`Protected baseline changed while rendering ${variant.id}`);
+      }
+      const result: Gpt56RevisionRenderResult = {
+        status: "rendered",
+        variantId: variant.id,
+        finalVideoPath: paths.finalVideo,
+        captionsPath: paths.captions,
+        durationSeconds,
+        selectedOutro: audioSelection.selected_outro,
+        baselineSha256,
+        segments: segmentPaths
+      };
+      await writeJson(paths.renderStatus, {
+        ...result,
+        renderedAt: new Date().toISOString(),
+        voiceProvider: voiceResult.provider,
+        evidence: await Promise.all(
+          uniqueAssets.map(async (assetPath) => ({
+            path: assetPath,
+            sha256: await sha256File(join(episodeDir, assetPath))
+          }))
+        ),
+        uploadAttempted: false
+      });
+      results.push(result);
+    }
+    return results;
+  } finally {
+    if (bundleOutput && basename(bundleOutput).startsWith("remotion-webpack-bundle-")) {
+      await rm(bundleOutput, { recursive: true, force: true });
+    }
+  }
+}
+
+interface RevisionSampledFrame {
+  readonly narrationId: string;
+  readonly position: "start" | "middle" | "end";
+  readonly atSeconds: number;
+  readonly path: string;
+  readonly lumaRange: number;
+}
+
+const frameLumaRange = async (
+  ffmpeg: string,
+  framePath: string
+): Promise<number> => {
+  const signal = await runCommand(ffmpeg, [
+    "-hide_banner",
+    "-nostats",
+    "-i",
+    framePath,
+    "-vf",
+    "signalstats,metadata=print",
+    "-frames:v",
+    "1",
+    "-f",
+    "null",
+    "-"
+  ]);
+  const diagnostic = `${signal.stdout}\n${signal.stderr}`;
+  const minimum = Number(diagnostic.match(/lavfi\.signalstats\.YMIN=(\d+(?:\.\d+)?)/)?.[1]);
+  const maximum = Number(diagnostic.match(/lavfi\.signalstats\.YMAX=(\d+(?:\.\d+)?)/)?.[1]);
+  return maximum - minimum;
+};
+
+const sampleRevisionFrames = async (options: {
+  readonly ffmpeg: string;
+  readonly finalVideoPath: string;
+  readonly qaRoot: string;
+  readonly windows: readonly Gpt56RevisionSceneWindow[];
+}): Promise<readonly RevisionSampledFrame[]> => {
+  const framesDir = join(options.qaRoot, "frames");
+  await ensureDir(framesDir);
+  const frames: RevisionSampledFrame[] = [];
+  let sequence = 1;
+  for (const window of options.windows) {
+    const duration = window.endSeconds - window.startSeconds;
+    const sampleTimes = [
+      { position: "start" as const, atSeconds: window.startSeconds + Math.min(0.35, duration / 4) },
+      { position: "middle" as const, atSeconds: window.startSeconds + duration / 2 },
+      { position: "end" as const, atSeconds: window.endSeconds - Math.min(0.35, duration / 4) }
+    ];
+    for (const sample of sampleTimes) {
+      const path = join(framesDir, `frame-${String(sequence).padStart(2, "0")}.png`);
+      await runCommand(options.ffmpeg, [
+        "-y",
+        "-loglevel",
+        "error",
+        "-ss",
+        sample.atSeconds.toFixed(3),
+        "-i",
+        options.finalVideoPath,
+        "-frames:v",
+        "1",
+        path
+      ]);
+      frames.push({
+        narrationId: window.narrationId,
+        position: sample.position,
+        atSeconds: sample.atSeconds,
+        path,
+        lumaRange: await frameLumaRange(options.ffmpeg, path)
+      });
+      sequence += 1;
+    }
+  }
+  return frames;
+};
+
+const createRevisionContactSheet = async (options: {
+  readonly ffmpeg: string;
+  readonly qaRoot: string;
+  readonly frameCount: number;
+}): Promise<string> => {
+  const outputPath = join(options.qaRoot, "contact-sheet.png");
+  await runCommand(options.ffmpeg, [
+    "-y",
+    "-loglevel",
+    "error",
+    "-framerate",
+    "1",
+    "-start_number",
+    "1",
+    "-i",
+    join(options.qaRoot, "frames", "frame-%02d.png"),
+    "-vf",
+    `scale=352:198,tile=5x6:nb_frames=${options.frameCount}:padding=8:margin=8:color=0x242424`,
+    "-frames:v",
+    "1",
+    outputPath
+  ]);
+  return outputPath;
+};
+
+interface MotionProof {
+  readonly beatId: string;
+  readonly firstAtSeconds: number;
+  readonly secondAtSeconds: number;
+  readonly ssim: number;
+  readonly pass: boolean;
+  readonly firstFrame: string;
+  readonly secondFrame: string;
+}
+
+const motionProofForBeat = async (options: {
+  readonly ffmpeg: string;
+  readonly finalVideoPath: string;
+  readonly qaRoot: string;
+  readonly beat: Gpt56RevisionBeatWindow;
+}): Promise<MotionProof> => {
+  const duration = options.beat.endSeconds - options.beat.startSeconds;
+  const firstAtSeconds = options.beat.startSeconds + Math.min(1, duration * 0.2);
+  const secondAtSeconds = Math.min(
+    options.beat.endSeconds - 0.35,
+    firstAtSeconds + Math.min(2.5, duration * 0.4)
+  );
+  const proofDir = join(options.qaRoot, "motion-proof");
+  await ensureDir(proofDir);
+  const firstFrame = join(proofDir, `${options.beat.id}-1.png`);
+  const secondFrame = join(proofDir, `${options.beat.id}-2.png`);
+  for (const [atSeconds, path] of [
+    [firstAtSeconds, firstFrame],
+    [secondAtSeconds, secondFrame]
+  ] as const) {
+    await runCommand(options.ffmpeg, [
+      "-y",
+      "-loglevel",
+      "error",
+      "-ss",
+      atSeconds.toFixed(3),
+      "-i",
+      options.finalVideoPath,
+      "-frames:v",
+      "1",
+      path
+    ]);
+  }
+  const comparison = await runCommand(options.ffmpeg, [
+    "-hide_banner",
+    "-nostats",
+    "-i",
+    firstFrame,
+    "-i",
+    secondFrame,
+    "-filter_complex",
+    "[0:v][1:v]ssim",
+    "-frames:v",
+    "1",
+    "-f",
+    "null",
+    "-"
+  ]);
+  const diagnostic = `${comparison.stdout}\n${comparison.stderr}`;
+  const ssim = Number(diagnostic.match(/All:([0-9.]+)/)?.[1]);
+  return {
+    beatId: options.beat.id,
+    firstAtSeconds,
+    secondAtSeconds,
+    ssim,
+    pass: Number.isFinite(ssim) && ssim < 0.995,
+    firstFrame,
+    secondFrame
+  };
+};
+
+const captureReadableZoomProof = async (options: {
+  readonly ffmpeg: string;
+  readonly finalVideoPath: string;
+  readonly qaRoot: string;
+  readonly beat: Gpt56RevisionBeatWindow;
+}): Promise<string> => {
+  const atSeconds = Math.max(options.beat.startSeconds, options.beat.endSeconds - 0.7);
+  const outputPath = join(options.qaRoot, "readable-source-zoom.png");
+  await runCommand(options.ffmpeg, [
+    "-y",
+    "-loglevel",
+    "error",
+    "-ss",
+    atSeconds.toFixed(3),
+    "-i",
+    options.finalVideoPath,
+    "-frames:v",
+    "1",
+    outputPath
+  ]);
+  return outputPath;
+};
+
+export interface Gpt56RevisionQaResult {
+  readonly ok: boolean;
+  readonly variantId: Gpt56RevisionVariantId;
+  readonly finalVideoPath: string;
+  readonly contactSheetPath: string;
+  readonly readableZoomPath: string;
+  readonly checks: readonly {
+    readonly name: string;
+    readonly pass: boolean;
+    readonly detail: string;
+  }[];
+}
+
+export async function runGpt56RevisionQa(
+  requested: Gpt56RevisionVariantId | "both" = "both",
+  episodeDir = GPT56_REVISION_EPISODE_DIR
+): Promise<readonly Gpt56RevisionQaResult[]> {
+  validateGpt56Revision(GPT56_REVISION);
+  await validateRevisionEditorialInputs(episodeDir);
+  const env = await loadRuntimeEnv();
+  const ffmpeg = ffmpegPath(env);
+  const ffprobe = ffprobePath(env);
+  const results: Gpt56RevisionQaResult[] = [];
+  for (const variant of selectedVariants(requested)) {
+    const paths = revisionPaths(episodeDir, variant.id);
+    const voiceResult = await loadRevisionVoice(episodeDir, variant);
+    const renderStatus = await readJson<Gpt56RevisionRenderResult & { uploadAttempted?: boolean }>(
+      paths.renderStatus
+    );
+    await rm(paths.qaRoot, { recursive: true, force: true });
+    await ensureDir(paths.qaRoot);
+    const windows = buildRevisionSceneWindows(variant, voiceResult.chunks);
+    const inspection = await inspectMediaFile(ffprobe, paths.finalVideo);
+    const measuredDuration = await ffprobeDurationSeconds(ffprobe, paths.finalVideo);
+    const expectedDuration = voiceResult.chunks.reduce(
+      (sum, chunk) => sum + chunk.durationSeconds,
+      0
+    );
+    const streamProbe = await runCommand(ffprobe, [
+      "-v",
+      "error",
+      "-select_streams",
+      "a:0",
+      "-show_entries",
+      "stream=sample_rate,channels,channel_layout",
+      "-of",
+      "json",
+      paths.finalVideo
+    ]);
+    const audioStream = (
+      JSON.parse(streamProbe.stdout) as {
+        readonly streams?: readonly {
+          readonly sample_rate?: string;
+          readonly channels?: number;
+          readonly channel_layout?: string;
+        }[];
+      }
+    ).streams?.[0];
+    const frames = await sampleRevisionFrames({
+      ffmpeg,
+      finalVideoPath: paths.finalVideo,
+      qaRoot: paths.qaRoot,
+      windows
+    });
+    const contactSheetPath = await createRevisionContactSheet({
+      ffmpeg,
+      qaRoot: paths.qaRoot,
+      frameCount: frames.length
+    });
+    const allBeats = windows.flatMap((window) => window.beats);
+    const requiredMotion = ["openai-top-hero", "saltwind-gameplay", "spirograph-build"];
+    const motionProofs = await Promise.all(
+      requiredMotion.map(async (beatId) => {
+        const beat = allBeats.find((candidate) => candidate.id === beatId);
+        if (!beat) throw new Error(`QA motion beat is missing: ${beatId}`);
+        return motionProofForBeat({
+          ffmpeg,
+          finalVideoPath: paths.finalVideo,
+          qaRoot: paths.qaRoot,
+          beat
+        });
+      })
+    );
+    const readableBeat = allBeats.find((beat) => beat.kind === "source_zoom");
+    if (!readableBeat) throw new Error(`Variant ${variant.id} has no readable source zoom`);
+    const readableZoomPath = await captureReadableZoomProof({
+      ffmpeg,
+      finalVideoPath: paths.finalVideo,
+      qaRoot: paths.qaRoot,
+      beat: readableBeat
+    });
+    const volumeResult = await runCommand(ffmpeg, [
+      "-hide_banner",
+      "-nostats",
+      "-i",
+      paths.finalVideo,
+      "-af",
+      "volumedetect",
+      "-f",
+      "null",
+      "-"
+    ]);
+    const volumeDiagnostic = `${volumeResult.stdout}\n${volumeResult.stderr}`;
+    const meanVolume = Number(volumeDiagnostic.match(/mean_volume:\s*(-?\d+(?:\.\d+)?) dB/)?.[1]);
+    const maxVolume = Number(volumeDiagnostic.match(/max_volume:\s*(-?\d+(?:\.\d+)?) dB/)?.[1]);
+    const tailAudioPath = join(paths.qaRoot, "tail-10s.wav");
+    await runCommand(ffmpeg, [
+      "-y",
+      "-loglevel",
+      "error",
+      "-sseof",
+      "-10",
+      "-i",
+      paths.finalVideo,
+      "-vn",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      tailAudioPath
+    ]);
+    const longStaticHolds = buildRevisionPlateJobs(variant, voiceResult.chunks, episodeDir)
+      .flatMap((job) => findLongStaticHolds(job.inputProps.beats, 30, 12));
+    const baselineSha256 = await sha256File(paths.baselineVideo);
+    const practical = variant.script.narration.find((paragraph) =>
+      paragraph.critical_phrases?.includes("Programmatic Tool Calling")
+    );
+    const checks = [
+      {
+        name: "final_video_contract",
+        pass:
+          inspection.video.codecName === "h264" &&
+          inspection.video.width === 1920 &&
+          inspection.video.height === 1080 &&
+          Math.abs(inspection.video.framesPerSecond - 30) < 0.001 &&
+          inspection.audio?.codecName === "aac",
+        detail: `${inspection.video.codecName} ${inspection.video.width}x${inspection.video.height} ${inspection.video.framesPerSecond}fps; audio=${inspection.audio?.codecName ?? "none"}`
+      },
+      {
+        name: "duration",
+        pass: Math.abs(measuredDuration - expectedDuration) <= 0.12,
+        detail: `expected=${expectedDuration.toFixed(3)}s measured=${measuredDuration.toFixed(3)}s`
+      },
+      {
+        name: "audio_format",
+        pass: audioStream?.sample_rate === "48000" && audioStream.channels === 2,
+        detail: `${audioStream?.sample_rate ?? "unknown"}Hz ${audioStream?.channels ?? "unknown"}ch ${audioStream?.channel_layout ?? "unknown"}`
+      },
+      {
+        name: "audio_levels",
+        pass:
+          Number.isFinite(meanVolume) &&
+          meanVolume > -35 &&
+          Number.isFinite(maxVolume) &&
+          maxVolume <= 0 &&
+          maxVolume > -12,
+        detail: `mean=${meanVolume.toFixed(1)}dB max=${maxVolume.toFixed(1)}dB`
+      },
+      {
+        name: "sampled_frames",
+        pass:
+          frames.length === variant.scenes.length * 3 &&
+          frames.every((frame) => Number.isFinite(frame.lumaRange) && frame.lumaRange >= 8),
+        detail: `${frames.length} scene frames; minimum luma range=${Math.min(...frames.map((frame) => frame.lumaRange)).toFixed(1)}`
+      },
+      {
+        name: "required_motion",
+        pass: motionProofs.every((proof) => proof.pass),
+        detail: motionProofs.map((proof) => `${proof.beatId} ssim=${proof.ssim.toFixed(4)}`).join(", ")
+      },
+      {
+        name: "pacing",
+        pass: longStaticHolds.length === 0,
+        detail: longStaticHolds.length === 0 ? "no unacknowledged static hold exceeds 12s" : JSON.stringify(longStaticHolds)
+      },
+      {
+        name: "phrase_lock",
+        pass:
+          practical?.speech_text?.includes("tool-calling") === true &&
+          practical.critical_phrases?.includes("Programmatic Tool Calling") === true,
+        detail: "Programmatic Tool Calling uses the hyphenated synthesis override"
+      },
+      {
+        name: "protected_baseline",
+        pass: baselineSha256 === renderStatus.baselineSha256,
+        detail: baselineSha256
+      },
+      {
+        name: "single_persisted_outro",
+        pass: Boolean(renderStatus.selectedOutro) && renderStatus.selectedOutro === (
+          await readJson<RevisionAudioSelection>(join(episodeDir, "revision-audio.json"))
+        ).selected_outro,
+        detail: renderStatus.selectedOutro
+      },
+      {
+        name: "no_upload",
+        pass: renderStatus.uploadAttempted !== true,
+        detail: `uploadAttempted=${renderStatus.uploadAttempted === true}`
+      }
+    ];
+    const result: Gpt56RevisionQaResult = {
+      ok: checks.every((check) => check.pass),
+      variantId: variant.id,
+      finalVideoPath: paths.finalVideo,
+      contactSheetPath,
+      readableZoomPath,
+      checks
+    };
+    await writeJson(join(paths.qaRoot, "qa.json"), {
+      ...result,
+      checkedAt: new Date().toISOString(),
+      media: inspection,
+      frames,
+      motionProofs,
+      audio: { meanVolume, maxVolume, stream: audioStream, tailAudioPath },
+      longStaticHolds
+    });
+    if (!result.ok) {
+      throw new Error(
+        `GPT-5.6 revision QA failed for ${variant.id}: ${checks
+          .filter((check) => !check.pass)
+          .map((check) => check.name)
+          .join(", ")}`
+      );
+    }
+    process.stdout.write(`QA passed: ${variant.label}\n`);
+    results.push(result);
+  }
+  return results;
+}
+
+export async function runGpt56RevisionCommand(
+  command: Gpt56RevisionCommand,
+  requested: Gpt56RevisionVariantId | "both" = "both",
+  episodeDir = GPT56_REVISION_EPISODE_DIR
+): Promise<unknown> {
+  switch (command) {
+    case "voice":
+      return runGpt56RevisionVoice(requested, episodeDir);
+    case "render":
+      return runGpt56RevisionRender(requested, episodeDir);
+    case "qa":
+      return runGpt56RevisionQa(requested, episodeDir);
+    case "all":
+      await runGpt56RevisionVoice(requested, episodeDir);
+      await runGpt56RevisionRender(requested, episodeDir);
+      return runGpt56RevisionQa(requested, episodeDir);
+  }
+}
+
+const isDirectExecution =
+  process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1];
+
+if (isDirectExecution) {
+  runGpt56RevisionCommand(
+    parseGpt56RevisionCommand(process.argv[2]),
+    parseGpt56RevisionVariant(process.argv.slice(3))
+  ).catch((error: unknown) => {
+    process.stderr.write(`${(error as Error).message}\n`);
+    process.exitCode = 1;
+  });
 }
