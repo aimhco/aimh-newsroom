@@ -27,7 +27,11 @@
     "gpt56:voice": "tsx src/production/gpt56Episode.ts voice",
     "gpt56:render": "tsx src/production/gpt56Episode.ts render",
     "gpt56:qa": "tsx src/production/gpt56Episode.ts qa",
-    "gpt56:all": "tsx src/production/gpt56Episode.ts all"
+    "gpt56:all": "tsx src/production/gpt56Episode.ts all",
+    "gpt56:revision:voice": "tsx src/production/gpt56Revision.ts voice",
+    "gpt56:revision:render": "tsx src/production/gpt56Revision.ts render",
+    "gpt56:revision:qa": "tsx src/production/gpt56Revision.ts qa",
+    "gpt56:revision:all": "tsx src/production/gpt56Revision.ts all"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "5.2.7",
