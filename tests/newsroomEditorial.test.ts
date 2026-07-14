@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { validateMediaManifest } from "../src/capture/mediaManifest";
 import { validateResearchManifest } from "../src/editorial/researchManifest";
 
 describe("newsroom related-source research", () => {
@@ -104,5 +105,96 @@ describe("newsroom related-source research", () => {
         ]
       })
     ).toThrow(/rationale/);
+  });
+});
+
+describe("primary-page media inventory", () => {
+  it("accepts selected and explicitly rejected media with editorial reasons", () => {
+    expect(() =>
+      validateMediaManifest({
+        schema_version: "0.1.0",
+        primary_url: "https://example.com/story",
+        audit_complete: true,
+        items: [
+          {
+            id: "hero",
+            kind: "video",
+            source_url: "https://example.com/hero.mp4",
+            decision: "selected",
+            rationale: "Opening motion evidence."
+          },
+          {
+            id: "demo",
+            kind: "interactive",
+            source_url: "https://example.com/demo",
+            decision: "selected",
+            rationale: "Shows the built result."
+          },
+          {
+            id: "repeat",
+            kind: "iframe",
+            source_url: "https://example.com/repeat",
+            decision: "rejected",
+            rationale: "Duplicates the selected demo."
+          }
+        ]
+      })
+    ).not.toThrow();
+  });
+
+  it("rejects an incomplete media audit", () => {
+    expect(() =>
+      validateMediaManifest({
+        schema_version: "0.1.0",
+        primary_url: "https://example.com/story",
+        audit_complete: false,
+        items: []
+      })
+    ).toThrow(/incomplete/);
+  });
+
+  it("rejects discovered media without a decision rationale", () => {
+    expect(() =>
+      validateMediaManifest({
+        schema_version: "0.1.0",
+        primary_url: "https://example.com/story",
+        audit_complete: true,
+        items: [
+          {
+            id: "hero",
+            kind: "video",
+            source_url: "https://example.com/hero.mp4",
+            decision: "rejected",
+            rationale: ""
+          }
+        ]
+      })
+    ).toThrow(/rationale/);
+  });
+
+  it("rejects duplicate item ids and malformed URLs", () => {
+    expect(() =>
+      validateMediaManifest({
+        schema_version: "0.1.0",
+        primary_url: "https://example.com/story",
+        audit_complete: true,
+        items: [
+          {
+            id: "same",
+            kind: "video",
+            source_url: "https://example.com/one.mp4",
+            decision: "selected",
+            rationale: "Useful."
+          },
+          {
+            id: "same",
+            kind: "iframe",
+            source_url: "not a URL",
+            decision: "rejected",
+            rationale: "Duplicate."
+          }
+        ]
+      })
+    ).toThrow(/Duplicate media item/);
   });
 });
