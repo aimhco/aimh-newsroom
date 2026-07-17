@@ -1,7 +1,7 @@
 # GPT-5.6 Two-Cut Revision and Newsroom Workflow Design
 
 Date: 2026-07-14  
-Status: Proposed for final user review  
+Status: Approved; Version A selected for final correction
 Scope: Revise the GPT-5.6 episode and make the reusable improvements part of the AIMH newsroom pipeline. No upload.
 
 ## Objective
@@ -215,3 +215,16 @@ Both cuts must pass the existing format, audio, duration, and boundary checks pl
 ## Review Deliverable
 
 The user receives both local MP4s and a compact comparison table covering runtime, percentage of moving footage, independent-source beats, source-zoom count, selected outro, and QA status. The workflow stops there until the user chooses a cut or requests another revision.
+
+## Version A Selection and Correction Addendum — 2026-07-17
+
+The user selected Version A and rejected Version B. The retained master receives a narrow correction pass:
+
+- replace the low-cadence Saltwind capture with a hardware-rendered capture whose meaningful-frame cadence passes QA;
+- speak “48.55 cents” as “forty-eight point five five cents” while keeping the numeric display text;
+- replace the Pelican full-page zooms with 16:9 evidence crops that point to Luna/none at 0.71 cents and Sol/max at 48.55 cents;
+- show the system-card evidence without an aggressive crop and use a mild pricing move that keeps the $1 input / $6 output Luna line visible;
+- remove the repeated Saltwind shot from the closing beat;
+- preserve the pre-correction Version A as a rollback copy and remove Version B review artifacts only after corrected Version A passes QA.
+
+The reusable newsroom rule is clarified: every discovered primary-article video must be watched, and every interactive must be operated, before it can be selected or rejected. Editorial inclusion remains materiality-based; reviewed media that does not add evidence, consequence, limitation, or an explanatory example is left out with a reason.
