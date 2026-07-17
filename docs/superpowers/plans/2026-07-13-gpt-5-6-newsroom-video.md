@@ -104,4 +104,3 @@
 - [ ] Write `RESULTS.md` with what works, brittle areas, known gaps, and assumptions.
 - [ ] Review every changed file and generated report as a critic; write severity-tagged findings and a verdict in `REVIEW.md` without changing code.
 - [ ] Hand off the local final MP4 and QA artifacts for user approval. Do not upload.
-

@@ -1,6 +1,6 @@
 # GPT-5.6 Two-Cut Revision and Newsroom Workflow Design
 
-Date: 2026-07-14  
+Date: 2026-07-14
 Status: Approved; Version A selected for final correction
 Scope: Revise the GPT-5.6 episode and make the reusable improvements part of the AIMH newsroom pipeline. No upload.
 

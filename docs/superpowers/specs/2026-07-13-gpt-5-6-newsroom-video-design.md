@@ -91,4 +91,3 @@ The CLI supports only `voice`, `render`, `qa`, and `all`. It has no upload actio
 - Eight rendered scene plates and muxed segments.
 - `render/final.mp4`, sidecar captions, contact sheet, sampled frames, and tail audio.
 - `qa.json`, `RESULTS.md`, and `REVIEW.md`.
-
