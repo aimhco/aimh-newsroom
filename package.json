@@ -19,11 +19,20 @@
     "newsroom:overnight": "tsx src/cli/index.ts overnight",
     "newsroom:resume": "tsx src/cli/index.ts resume",
     "newsroom:dry-run": "tsx src/cli/index.ts overnight --dry-run --fixtures --date 2026-07-09 --no-upload",
+    "newsroom:article:validate": "tsx src/cli/articlePreflight.ts",
     "gpt-live:prepare": "tsx src/production/gptLive/cli.ts prepare",
     "gpt-live:seal-exports": "tsx src/production/gptLive/cli.ts seal-exports",
     "gpt-live:motion-smoke": "tsx src/production/gptLive/motion/renderSmoke.ts",
     "gpt-live:finish": "tsx src/production/gptLive/cli.ts finish",
-    "gpt-live:qa": "tsx src/production/gptLive/cli.ts qa"
+    "gpt-live:qa": "tsx src/production/gptLive/cli.ts qa",
+    "gpt56:voice": "tsx src/production/gpt56Episode.ts voice",
+    "gpt56:render": "tsx src/production/gpt56Episode.ts render",
+    "gpt56:qa": "tsx src/production/gpt56Episode.ts qa",
+    "gpt56:all": "tsx src/production/gpt56Episode.ts all",
+    "gpt56:revision:voice": "tsx src/production/gpt56Revision.ts voice",
+    "gpt56:revision:render": "tsx src/production/gpt56Revision.ts render",
+    "gpt56:revision:qa": "tsx src/production/gpt56Revision.ts qa",
+    "gpt56:revision:all": "tsx src/production/gpt56Revision.ts all"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "5.2.7",

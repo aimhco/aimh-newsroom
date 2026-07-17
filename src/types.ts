@@ -107,6 +107,8 @@ export interface ScriptFile {
     id: string;
     segment_id: string;
     text: string;
+    speech_text?: string;
+    critical_phrases?: string[];
     estimated_seconds: number;
     claim_ids: string[];
     shot_ids: string[];
@@ -117,6 +119,9 @@ export type ShotType =
   | "headline_card"
   | "source_screenshot"
   | "source_highlight_clip"
+  | "source_video"
+  | "interactive_capture"
+  | "source_zoom"
   | "browser_demo_clip"
   | "social_card"
   | "repo_card"

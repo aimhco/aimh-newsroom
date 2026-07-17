@@ -84,6 +84,23 @@ export function buildVoiceCacheKey(options: { readonly text: string; readonly en
     .digest("hex");
 }
 
+export function buildSpeechRequestBodyForParagraph(
+  paragraph: ScriptFile["narration"][number],
+  env: Env
+): Record<string, unknown> {
+  return buildSpeechRequestBody(paragraph.speech_text ?? paragraph.text, env);
+}
+
+export function buildVoiceCacheKeyForParagraph(options: {
+  readonly paragraph: ScriptFile["narration"][number];
+  readonly env: Env;
+}): string {
+  return buildVoiceCacheKey({
+    text: options.paragraph.speech_text ?? options.paragraph.text,
+    env: options.env
+  });
+}
+
 export const voiceCacheMetadataPath = (audioPath: string): string => `${audioPath}.json`;
 
 const readMatchingCacheDuration = async (options: {
@@ -125,8 +142,11 @@ async function synthesizeElevenLabsChunk(options: {
   const voiceId = options.env.ELEVENLABS_VOICE_ID;
   if (!apiKey || !voiceId) throw new Error("ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID must be set");
 
-  const requestBody = buildSpeechRequestBody(options.paragraph.text, options.env);
-  const cacheKey = buildVoiceCacheKey({ text: options.paragraph.text, env: options.env });
+  const requestBody = buildSpeechRequestBodyForParagraph(options.paragraph, options.env);
+  const cacheKey = buildVoiceCacheKeyForParagraph({
+    paragraph: options.paragraph,
+    env: options.env
+  });
   const cachedDuration = await readMatchingCacheDuration({
     outFile: options.outFile,
     cacheKey,

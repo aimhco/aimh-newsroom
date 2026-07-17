@@ -5,7 +5,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { ScriptFile } from "../src/types";
 import {
   buildSpeechRequestBody,
+  buildSpeechRequestBodyForParagraph,
   buildVoiceCacheKey,
+  buildVoiceCacheKeyForParagraph,
   synthesizeNarration,
   voiceCacheMetadataPath,
   type SynthesizeNarrationDependencies
@@ -70,6 +72,21 @@ const render = (
   );
 
 describe("ElevenLabs pronunciation dictionaries", () => {
+  it("uses speech_text for synthesis and cache identity while preserving display text", () => {
+    const paragraph = {
+      ...scriptWithText("Programmatic Tool Calling").narration[0]!,
+      speech_text: "Programmatic tool-calling",
+      critical_phrases: ["Programmatic Tool Calling"]
+    };
+    const request = buildSpeechRequestBodyForParagraph(paragraph, env());
+
+    expect(request.text).toBe("Programmatic tool-calling");
+    expect(buildVoiceCacheKeyForParagraph({ paragraph, env: env() })).not.toBe(
+      buildVoiceCacheKey({ text: paragraph.text, env: env() })
+    );
+    expect(paragraph.text).toBe("Programmatic Tool Calling");
+  });
+
   it("includes a pronunciation dictionary locator only when both values are configured", () => {
     const configured = buildSpeechRequestBody(
       "Mobile",

@@ -365,7 +365,7 @@ export const Header = ({
     <span style={{ color: palette.signal }}>{content.sectionNumber}</span>
     <span>{content.header}</span>
     <span style={{ width: 110, height: 2, background: palette.muted }} />
-    <span>GPT-LIVE</span>
+    <span>{content.seriesLabel ?? "GPT-LIVE"}</span>
   </div>
 );
 
