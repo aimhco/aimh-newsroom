@@ -28,9 +28,15 @@ pnpm newsroom:render --fixtures --capture --no-upload
 Article episodes use two sealing gates before narration or rendering:
 
 - `research-manifest.json` records the independent-source search, including a hands-on or real-world test when one can be found. Related sources are included only when they materially add evidence, consequence, limitation, or a clarifying example; there is no inclusion quota.
-- `media-manifest.json` inventories the primary page's videos, embeds, interactive demos, galleries, and text evidence. Selected motion must have a captured episode-relative asset before it can enter the edit.
+- `media-manifest.json` inventories the primary page's videos, embeds, interactive demos, galleries, and text evidence. Every discovered video must be watched and every interactive must be operated before either can be selected or rejected. Inclusion is still based on material value. Selected motion must have a captured episode-relative asset before it can enter the edit.
 
-The reusable newsroom compositor supports `source_video`, `interactive_capture`, and animated `source_zoom` beats. Paragraph evidence must move from page context into a readable focal crop. Critical narration terms can keep official display text while using `speech_text` for ElevenLabs prosody. At render time, an outro is chosen from `Outro_*.mp3`, persisted for reproducible rerenders, and rotated by episode seed instead of using one global hard-coded track.
+Validate those article gates and the captured motion files before narration or rendering:
+
+```bash
+pnpm newsroom:article:validate -- --episode-dir episodes/<episode-id>
+```
+
+The reusable newsroom compositor supports `source_video`, `interactive_capture`, and animated `source_zoom` beats. Paragraph evidence must move from page context into a readable focal crop. Zoom geometry accounts for contained-image letterboxing and supports conservative per-shot scale caps. Interactive captures must also pass a meaningful-motion cadence check; a nominal 30 fps file with repeated frozen frames is not accepted as smooth. Critical narration terms can keep official display text while using `speech_text` for ElevenLabs prosody. At render time, an outro is chosen from `Outro_*.mp3`, persisted for reproducible rerenders, and rotated by episode seed instead of using one global hard-coded track.
 
 The GPT-5.6 two-cut workflow is local-only and deliberately exposes no upload command:
 

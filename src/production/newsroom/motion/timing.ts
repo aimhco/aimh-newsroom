@@ -47,27 +47,62 @@ export function zoomTransformAtFrame(options: {
   readonly frame: number;
   readonly durationFrames: number;
   readonly focalRect: FocalRect;
+  readonly viewportWidth: number;
+  readonly viewportHeight: number;
+  readonly sourceAspectRatio: number;
+  readonly maxScale?: number;
 }): {
   readonly scale: number;
-  readonly translateXPercent: number;
-  readonly translateYPercent: number;
+  readonly translateXPixels: number;
+  readonly translateYPixels: number;
+  readonly displayWidth: number;
+  readonly displayHeight: number;
 } {
   assertFocalRect(options.focalRect);
   if (!Number.isInteger(options.durationFrames) || options.durationFrames <= 1) {
     throw new Error("Evidence zoom durationFrames must be an integer greater than one");
   }
+  if (
+    !Number.isFinite(options.viewportWidth) ||
+    options.viewportWidth <= 0 ||
+    !Number.isFinite(options.viewportHeight) ||
+    options.viewportHeight <= 0
+  ) {
+    throw new Error("Evidence zoom viewport dimensions must be finite and positive");
+  }
+  if (!Number.isFinite(options.sourceAspectRatio) || options.sourceAspectRatio <= 0) {
+    throw new Error("Evidence zoom sourceAspectRatio must be finite and positive");
+  }
+  if (options.maxScale !== undefined && (!Number.isFinite(options.maxScale) || options.maxScale < 1)) {
+    throw new Error("Evidence zoom maxScale must be finite and at least one");
+  }
+
+  const viewportAspectRatio = options.viewportWidth / options.viewportHeight;
+  const displayWidth = options.sourceAspectRatio >= viewportAspectRatio
+    ? options.viewportWidth
+    : options.viewportHeight * options.sourceAspectRatio;
+  const displayHeight = options.sourceAspectRatio >= viewportAspectRatio
+    ? options.viewportWidth / options.sourceAspectRatio
+    : options.viewportHeight;
   const normalizedFrame = clamp01(options.frame / (options.durationFrames - 1));
   const zoomProgress = smoothstep(clamp01((normalizedFrame - 0.18) / 0.72));
   const targetScale = Math.max(
-    1.6,
-    Math.min(3.2, 1 / options.focalRect.width, 1 / options.focalRect.height)
+    1,
+    Math.min(
+      options.maxScale ?? 2,
+      (options.viewportWidth * 0.88) / (options.focalRect.width * displayWidth),
+      (options.viewportHeight * 0.82) / (options.focalRect.height * displayHeight)
+    )
   );
   const centerX = options.focalRect.x + options.focalRect.width / 2;
   const centerY = options.focalRect.y + options.focalRect.height / 2;
+  const scale = 1 + (targetScale - 1) * zoomProgress;
   return {
-    scale: 1 + (targetScale - 1) * zoomProgress,
-    translateXPercent: (0.5 - centerX) * 100 * zoomProgress,
-    translateYPercent: (0.5 - centerY) * 100 * zoomProgress
+    scale,
+    translateXPixels: -(centerX - 0.5) * displayWidth * scale * zoomProgress,
+    translateYPixels: -(centerY - 0.5) * displayHeight * scale * zoomProgress,
+    displayWidth,
+    displayHeight
   };
 }
 

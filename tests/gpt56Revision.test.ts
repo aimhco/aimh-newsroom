@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { evaluateMotionCadence } from "../src/qa/motionCadence";
 import {
   allocateBeatFrames,
   buildRevisionPlateJobs,
@@ -43,7 +44,7 @@ describe("GPT-5.6 two-cut revision", () => {
 
     expect(beats.some((beat) => beat.kind === "source_zoom")).toBe(true);
     expect(beats.some((beat) => beat.assetPath.includes("coderabbit"))).toBe(true);
-    expect(beats.some((beat) => beat.assetPath.includes("simon-willison"))).toBe(true);
+    expect(beats.some((beat) => beat.assetPath.includes("simon"))).toBe(true);
   });
 
   it("phrase-locks Programmatic Tool Calling in both scripts", () => {
@@ -54,6 +55,52 @@ describe("GPT-5.6 two-cut revision", () => {
       expect(practical?.speech_text).toContain("tool-calling");
       expect(practical?.critical_phrases).toContain("Programmatic Tool Calling");
     }
+  });
+
+  it("uses the selected Version A cost pronunciation and corrected evidence targets", () => {
+    const evidenceVariant = GPT56_REVISION.variants[0]!;
+    const cost = evidenceVariant.script.narration.find((paragraph) => paragraph.id === "a_cost");
+    const costScene = evidenceVariant.scenes.find((scene) => scene.narrationId === "a_cost");
+    const caveatScene = evidenceVariant.scenes.find((scene) => scene.narrationId === "a_caveat");
+    const pricingScene = evidenceVariant.scenes.find((scene) => scene.narrationId === "a_availability");
+    const takeawayScene = evidenceVariant.scenes.find((scene) => scene.narrationId === "a_takeaway");
+
+    expect(cost?.speech_text).toContain("forty-eight point five five cents");
+    expect(costScene?.beats.map((beat) => beat.assetPath)).toEqual([
+      "evidence/10-simon-low-none.png",
+      "evidence/10-simon-high-max.png"
+    ]);
+    for (const beat of costScene?.beats ?? []) {
+      expect(beat.kind).toBe("source_zoom");
+      if (beat.kind === "source_zoom") {
+        expect(beat.sourceAspectRatio).toBeCloseTo(16 / 9);
+        expect(beat.maxScale).toBeLessThanOrEqual(1.4);
+      }
+    }
+    const systemCard = caveatScene?.beats.find((beat) => beat.id === "system-card");
+    expect(systemCard?.kind).toBe("source_zoom");
+    if (systemCard?.kind === "source_zoom") {
+      expect(systemCard.maxScale).toBeLessThanOrEqual(1.1);
+      expect(systemCard.focalRect).toEqual({ x: 0, y: 0, width: 1, height: 1 });
+    }
+    const pricing = pricingScene?.beats.find((beat) => beat.id === "pricing");
+    expect(pricing?.kind).toBe("source_zoom");
+    if (pricing?.kind === "source_zoom") {
+      expect(pricing.maxScale).toBeLessThanOrEqual(1.4);
+      expect(pricing.focalRect.y).toBeGreaterThan(0.7);
+    }
+    expect(takeawayScene?.beats.some((beat) => beat.assetPath.includes("saltwind"))).toBe(false);
+  });
+
+  it("rejects nominal 30 fps interactive footage with a low meaningful-frame cadence", () => {
+    expect(evaluateMotionCadence({ meaningfulFrames: 61, durationSeconds: 17.5, minimumFps: 8 }))
+      .toMatchObject({ pass: false, meaningfulFramesPerSecond: 61 / 17.5 });
+    expect(evaluateMotionCadence({ meaningfulFrames: 181, durationSeconds: 16.5, minimumFps: 8 }))
+      .toMatchObject({ pass: true, meaningfulFramesPerSecond: 181 / 16.5 });
+    expect(evaluateMotionCadence({ meaningfulFrames: 80, durationSeconds: 10, minimumFps: 8 }).pass)
+      .toBe(true);
+    expect(() => evaluateMotionCadence({ meaningfulFrames: 0, durationSeconds: 10, minimumFps: 8 }))
+      .toThrow(/meaningfulFrames/);
   });
 
   it("allocates exact integer beat frames from editorial weights", () => {

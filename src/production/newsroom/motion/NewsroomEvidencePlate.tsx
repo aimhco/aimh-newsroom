@@ -112,22 +112,34 @@ const isMotionBeat = (beat: EvidenceBeat): beat is MotionEvidenceBeat =>
 
 const StillBeat = ({ beat }: { readonly beat: StillEvidenceBeat }) => {
   const frame = useCurrentFrame();
-  const zoom =
-    beat.kind === "source_zoom"
-      ? zoomTransformAtFrame({ frame, durationFrames: beat.durationFrames, focalRect: beat.focalRect })
-      : { scale: 1, translateXPercent: 0, translateYPercent: 0 };
+  const { width, height } = useVideoConfig();
+  const zoom = zoomTransformAtFrame({
+    frame: beat.kind === "source_zoom" ? frame : 0,
+    durationFrames: Math.max(2, beat.durationFrames),
+    focalRect: beat.focalRect,
+    viewportWidth: width,
+    viewportHeight: height,
+    sourceAspectRatio: beat.sourceAspectRatio,
+    maxScale: beat.kind === "source_zoom" ? beat.maxScale : 1
+  });
   return (
     <AbsoluteFill style={{ background: "#F2F3F1", overflow: "hidden" }}>
-      <Img
-        src={staticFile(beat.assetPath)}
+      <div
         style={{
-          width: "100%",
-          height: "100%",
-          objectFit: beat.fit ?? "contain",
+          position: "absolute",
+          left: (width - zoom.displayWidth) / 2,
+          top: (height - zoom.displayHeight) / 2,
+          width: zoom.displayWidth,
+          height: zoom.displayHeight,
           transformOrigin: "center center",
-          transform: `translate(${zoom.translateXPercent}%, ${zoom.translateYPercent}%) scale(${zoom.scale})`
+          transform: `translate(${zoom.translateXPixels}px, ${zoom.translateYPixels}px) scale(${zoom.scale})`
         }}
-      />
+      >
+        <Img
+          src={staticFile(beat.assetPath)}
+          style={{ width: "100%", height: "100%", objectFit: beat.fit ?? "contain" }}
+        />
+      </div>
     </AbsoluteFill>
   );
 };

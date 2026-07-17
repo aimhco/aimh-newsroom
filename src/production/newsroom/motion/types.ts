@@ -22,6 +22,8 @@ export interface MotionEvidenceBeat extends EvidenceBeatBase {
 export interface StillEvidenceBeat extends EvidenceBeatBase {
   readonly kind: "source_zoom" | "image";
   readonly focalRect: FocalRect;
+  readonly sourceAspectRatio: number;
+  readonly maxScale?: number;
   readonly fit?: "cover" | "contain";
 }
 

@@ -13,7 +13,8 @@ const DEFAULT_PROPS: NewsroomEvidencePlateProps = {
       durationFrames: 90,
       sourceLabel: "AIMH",
       headline: "Evidence-first",
-      focalRect: { x: 0, y: 0, width: 1, height: 1 }
+      focalRect: { x: 0, y: 0, width: 1, height: 1 },
+      sourceAspectRatio: 16 / 9
     }
   ]
 };

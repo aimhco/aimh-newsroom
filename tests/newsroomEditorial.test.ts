@@ -1,6 +1,10 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { validateMediaManifest } from "../src/capture/mediaManifest";
 import { validateArticleEditorialGate } from "../src/editorial/articleEditorialGate";
+import { validateArticleEpisodePreflight } from "../src/editorial/articleEpisodePreflight";
 import { validateResearchManifest } from "../src/editorial/researchManifest";
 
 describe("newsroom related-source research", () => {
@@ -157,6 +161,8 @@ describe("primary-page media inventory", () => {
             id: "hero",
             kind: "video",
             source_url: "https://example.com/hero.mp4",
+            review_status: "watched",
+            review_notes: "Watched the full launch clip and recorded its opening motion.",
             decision: "selected",
             rationale: "Opening motion evidence."
           },
@@ -164,6 +170,8 @@ describe("primary-page media inventory", () => {
             id: "demo",
             kind: "interactive",
             source_url: "https://example.com/demo",
+            review_status: "operated",
+            review_notes: "Started the demo and tested its visible controls.",
             decision: "selected",
             rationale: "Shows the built result."
           },
@@ -171,6 +179,8 @@ describe("primary-page media inventory", () => {
             id: "repeat",
             kind: "iframe",
             source_url: "https://example.com/repeat",
+            review_status: "watched",
+            review_notes: "Watched the embedded sequence and found it duplicative.",
             decision: "rejected",
             rationale: "Duplicates the selected demo."
           }
@@ -201,6 +211,8 @@ describe("primary-page media inventory", () => {
             id: "hero",
             kind: "video",
             source_url: "https://example.com/hero.mp4",
+            review_status: "watched",
+            review_notes: "Watched the complete clip.",
             decision: "rejected",
             rationale: ""
           }
@@ -220,6 +232,8 @@ describe("primary-page media inventory", () => {
             id: "same",
             kind: "video",
             source_url: "https://example.com/one.mp4",
+            review_status: "watched",
+            review_notes: "Watched the clip.",
             decision: "selected",
             rationale: "Useful."
           },
@@ -227,12 +241,69 @@ describe("primary-page media inventory", () => {
             id: "same",
             kind: "iframe",
             source_url: "not a URL",
+            review_status: "watched",
+            review_notes: "Watched the embed.",
             decision: "rejected",
             rationale: "Duplicate."
           }
         ]
       })
     ).toThrow(/Duplicate media item/);
+  });
+
+  it("rejects video and interactive decisions made without the required review", () => {
+    expect(() =>
+      validateMediaManifest({
+        schema_version: "0.1.0",
+        primary_url: "https://example.com/story",
+        audit_complete: true,
+        items: [{
+          id: "unwatched-video",
+          kind: "video",
+          source_url: "https://example.com/video.mp4",
+          review_status: "inspected",
+          review_notes: "Only inspected the poster frame.",
+          decision: "rejected",
+          rationale: "Appeared duplicative."
+        }]
+      })
+    ).toThrow(/must be watched/);
+
+    expect(() =>
+      validateMediaManifest({
+        schema_version: "0.1.0",
+        primary_url: "https://example.com/story",
+        audit_complete: true,
+        items: [{
+          id: "unoperated-demo",
+          kind: "interactive",
+          source_url: "https://example.com/demo",
+          review_status: "watched",
+          review_notes: "Observed the idle state only.",
+          decision: "rejected",
+          rationale: "Appeared duplicative."
+        }]
+      })
+    ).toThrow(/must be operated/);
+  });
+
+  it("rejects a media decision without review notes", () => {
+    expect(() =>
+      validateMediaManifest({
+        schema_version: "0.1.0",
+        primary_url: "https://example.com/story",
+        audit_complete: true,
+        items: [{
+          id: "hero",
+          kind: "video",
+          source_url: "https://example.com/hero.mp4",
+          review_status: "watched",
+          review_notes: "",
+          decision: "selected",
+          rationale: "Useful opening evidence."
+        }]
+      })
+    ).toThrow(/review notes/);
   });
 });
 
@@ -258,6 +329,8 @@ describe("article editorial sealing gate", () => {
           kind: "video",
           source_url: "https://example.com/hero.mp4",
           local_asset: "source/hero.mp4",
+          review_status: "watched",
+          review_notes: "Watched the clip and verified visible motion.",
           decision: "selected",
           rationale: "Moving opening evidence."
         }]
@@ -277,6 +350,8 @@ describe("article editorial sealing gate", () => {
           id: "hero",
           kind: "video",
           source_url: "https://example.com/hero.mp4",
+          review_status: "watched",
+          review_notes: "Watched the clip and verified visible motion.",
           decision: "selected",
           rationale: "Moving opening evidence."
         }]
@@ -297,11 +372,65 @@ describe("article editorial sealing gate", () => {
           kind: "video",
           source_url: "https://example.com/hero.mp4",
           local_asset: "source/hero.mp4",
+          review_status: "watched",
+          review_notes: "Watched the clip and verified visible motion.",
           decision: "selected",
           rationale: "Moving opening evidence."
         }]
       },
       usedPrimaryMotionAssets: ["source/unreviewed.mp4"]
     })).toThrow(/Used primary motion/);
+  });
+
+  it("provides a reusable episode preflight that verifies reviewed motion exists before rendering", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "article-preflight-"));
+    await mkdir(join(episodeDir, "source"));
+    await writeFile(join(episodeDir, "source", "hero.mp4"), "captured motion");
+    await writeFile(join(episodeDir, "research-manifest.json"), JSON.stringify(research));
+    await writeFile(join(episodeDir, "media-manifest.json"), JSON.stringify({
+      schema_version: "0.1.0",
+      primary_url: "https://example.com/article",
+      audit_complete: true,
+      items: [{
+        id: "hero",
+        kind: "video",
+        source_url: "https://example.com/hero.mp4",
+        local_asset: "source/hero.mp4",
+        review_status: "watched",
+        review_notes: "Watched the full clip and chose its opening motion.",
+        decision: "selected",
+        rationale: "Moving opening evidence."
+      }]
+    }));
+
+    await expect(validateArticleEpisodePreflight({
+      episodeDir,
+      usedPrimaryMotionAssets: ["source/hero.mp4"]
+    })).resolves.toMatchObject({ selectedMotionAssets: ["source/hero.mp4"] });
+  });
+
+  it("rejects a reviewed and selected motion asset that is not present on disk", async () => {
+    const episodeDir = await mkdtemp(join(tmpdir(), "article-preflight-missing-"));
+    await writeFile(join(episodeDir, "research-manifest.json"), JSON.stringify(research));
+    await writeFile(join(episodeDir, "media-manifest.json"), JSON.stringify({
+      schema_version: "0.1.0",
+      primary_url: "https://example.com/article",
+      audit_complete: true,
+      items: [{
+        id: "hero",
+        kind: "video",
+        source_url: "https://example.com/hero.mp4",
+        local_asset: "source/missing.mp4",
+        review_status: "watched",
+        review_notes: "Watched the full clip.",
+        decision: "selected",
+        rationale: "Moving opening evidence."
+      }]
+    }));
+
+    await expect(validateArticleEpisodePreflight({
+      episodeDir,
+      usedPrimaryMotionAssets: ["source/missing.mp4"]
+    })).rejects.toThrow(/unavailable/);
   });
 });

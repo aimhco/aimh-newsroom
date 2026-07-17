@@ -55,14 +55,66 @@ describe("newsroom evidence motion", () => {
 
   it("moves from page context to a readable focal crop", () => {
     const focalRect = { x: 0.35, y: 0.2, width: 0.4, height: 0.25 };
-    const start = zoomTransformAtFrame({ frame: 0, durationFrames: 90, focalRect });
-    const end = zoomTransformAtFrame({ frame: 89, durationFrames: 90, focalRect });
+    const options = {
+      durationFrames: 90,
+      focalRect,
+      viewportWidth: 1920,
+      viewportHeight: 1080,
+      sourceAspectRatio: 16 / 9
+    };
+    const start = zoomTransformAtFrame({ ...options, frame: 0 });
+    const end = zoomTransformAtFrame({ ...options, frame: 89 });
 
     expect(start.scale).toBeCloseTo(1);
-    expect(start.translateXPercent).toBeCloseTo(0);
-    expect(end.scale).toBeGreaterThanOrEqual(2.4);
-    expect(end.translateXPercent).not.toBe(0);
-    expect(end.translateYPercent).not.toBe(0);
+    expect(start.translateXPixels).toBeCloseTo(0);
+    expect(start.displayWidth).toBeCloseTo(1920);
+    expect(end.scale).toBeGreaterThanOrEqual(1.2);
+    expect(end.scale).toBeLessThanOrEqual(2);
+    expect(end.translateXPixels).not.toBe(0);
+    expect(end.translateYPixels).not.toBe(0);
+  });
+
+  it("centers a portrait focal point after accounting for contain letterboxing", () => {
+    const focalRect = { x: 0.05, y: 0.04, width: 0.35, height: 0.2 };
+    const end = zoomTransformAtFrame({
+      frame: 89,
+      durationFrames: 90,
+      focalRect,
+      viewportWidth: 1920,
+      viewportHeight: 1080,
+      sourceAspectRatio: 1440 / 2302,
+      maxScale: 1.8
+    });
+    const focalCenterX = focalRect.x + focalRect.width / 2;
+    const focalCenterY = focalRect.y + focalRect.height / 2;
+    const finalX =
+      1920 / 2 +
+      (focalCenterX - 0.5) * end.displayWidth * end.scale +
+      end.translateXPixels;
+    const finalY =
+      1080 / 2 +
+      (focalCenterY - 0.5) * end.displayHeight * end.scale +
+      end.translateYPixels;
+
+    expect(end.displayWidth).toBeLessThan(700);
+    expect(end.displayHeight).toBeCloseTo(1080);
+    expect(end.scale).toBeCloseTo(1.8);
+    expect(finalX).toBeCloseTo(960, 4);
+    expect(finalY).toBeCloseTo(540, 4);
+  });
+
+  it("honors a conservative per-shot scale cap", () => {
+    const end = zoomTransformAtFrame({
+      frame: 89,
+      durationFrames: 90,
+      focalRect: { x: 0.7, y: 0.75, width: 0.2, height: 0.1 },
+      viewportWidth: 1920,
+      viewportHeight: 1080,
+      sourceAspectRatio: 16 / 9,
+      maxScale: 1.35
+    });
+
+    expect(end.scale).toBeCloseTo(1.35);
   });
 
   it("rejects invalid crop geometry", () => {
@@ -70,9 +122,23 @@ describe("newsroom evidence motion", () => {
       zoomTransformAtFrame({
         frame: 10,
         durationFrames: 90,
-        focalRect: { x: 0.8, y: 0.2, width: 0.4, height: 0.2 }
+        focalRect: { x: 0.8, y: 0.2, width: 0.4, height: 0.2 },
+        viewportWidth: 1920,
+        viewportHeight: 1080,
+        sourceAspectRatio: 16 / 9
       })
     ).toThrow(/inside the source/);
+    expect(() =>
+      zoomTransformAtFrame({
+        frame: 10,
+        durationFrames: 90,
+        focalRect: { x: 0.2, y: 0.2, width: 0.4, height: 0.2 },
+        viewportWidth: 1920,
+        viewportHeight: 1080,
+        sourceAspectRatio: 16 / 9,
+        maxScale: 0.9
+      })
+    ).toThrow(/maxScale/);
   });
 
   it("warns only for static holds longer than the pacing threshold", () => {

@@ -22,4 +22,4 @@ Every candidate must record its decision and a short materiality rationale. Sele
 
 ## Primary-page media
 
-The primary article is audited for videos, video sources, iframes, interactive demos, tabbed embeds, galleries, and static text evidence before shot selection. Motion and interactive media are evaluated as evidence, not decoration. If discovered media is rejected, the media manifest records why.
+The primary article is audited for videos, video sources, iframes, interactive demos, tabbed embeds, galleries, and static text evidence before shot selection. Every discovered video is watched and every interactive is operated before a selection decision. The manifest records review status and notes for both selected and rejected items, and validation blocks scripting or rendering when that review is missing. Motion and interactive media are evaluated as evidence, not decoration. Inclusion is materiality-based: if reviewed media does not add evidence, consequence, limitation, or a useful example, the manifest records why it was rejected.

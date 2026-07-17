@@ -5,9 +5,7 @@ import { fileURLToPath } from "node:url";
 import { bundle } from "@remotion/bundler";
 import { renderMedia, selectComposition } from "@remotion/renderer";
 import { loadEnvSnapshotFromFiles } from "../config/env";
-import { validateArticleEditorialGate } from "../editorial/articleEditorialGate";
-import type { ResearchManifest } from "../editorial/researchManifest";
-import type { MediaManifest } from "../capture/mediaManifest";
+import { validateArticleEpisodePreflight } from "../editorial/articleEpisodePreflight";
 import { buildCaptionsSrt } from "../render/captions";
 import { selectEpisodeOutroPath } from "../render/outroMusic";
 import { ffprobeDurationSeconds, runCommand } from "../render/process";
@@ -29,6 +27,7 @@ import type {
 } from "./newsroom/motion/types";
 import { findLongStaticHolds } from "./newsroom/motion/timing";
 import { inspectMediaFile } from "./gptLive/mediaInspection";
+import { evaluateMotionCadence, parseMpdecimateFrameCount } from "../qa/motionCadence";
 
 export const SUPPORTED_GPT56_REVISION_COMMANDS = ["voice", "render", "qa", "all"] as const;
 export type Gpt56RevisionCommand = (typeof SUPPORTED_GPT56_REVISION_COMMANDS)[number];
@@ -51,6 +50,8 @@ interface WeightedMotionBeat extends WeightedBeatBase {
 interface WeightedStillBeat extends WeightedBeatBase {
   readonly kind: "source_zoom" | "image";
   readonly focalRect: FocalRect;
+  readonly sourceAspectRatio: number;
+  readonly maxScale?: number;
 }
 
 export type WeightedEvidenceBeat = WeightedMotionBeat | WeightedStillBeat;
@@ -138,7 +139,12 @@ const scriptA: ScriptFile = {
       "a_cost",
       "Developer Simon Willison tested one pelican prompt across GPT-5.6 models and effort settings. The least expensive run cost 0.71 cents; the most expensive cost 48.55 cents. That is nearly a seventy-fold swing before judging the result. The price table is only a starting point. Settings and retries determine the bill.",
       25,
-      ["claim_simon_cost_example"]
+      ["claim_simon_cost_example"],
+      {
+        speechText:
+          "Developer Simon Willison tested one pelican prompt across GPT-5.6 models and effort settings. The least expensive run cost zero point seven one cents; the most expensive cost forty-eight point five five cents. That is nearly a seventy-fold swing before judging the result. The price table is only a starting point. Settings and retries determine the bill.",
+        criticalPhrases: ["48.55 cents"]
+      }
     ),
     paragraph(
       "a_caveat",
@@ -233,7 +239,9 @@ const zoom = (
   sourceLabel: string,
   headline: string,
   focalRect: FocalRect,
-  weight = 1
+  weight = 1,
+  sourceAspectRatio = 1905 / 1072,
+  maxScale = 2
 ): WeightedStillBeat => ({
   id,
   kind: "source_zoom",
@@ -242,6 +250,8 @@ const zoom = (
   sourceLabel,
   headline,
   focalRect,
+  sourceAspectRatio,
+  maxScale,
   fit: "contain"
 });
 
@@ -297,7 +307,9 @@ const scenesA: readonly Gpt56RevisionScene[] = [
         "OpenAI · GPT-5.6 launch",
         "A three-tier family for work",
         { x: 0.27, y: 0.04, width: 0.48, height: 0.16 },
-        3
+        3,
+        1905 / 1072,
+        1.45
       )
     ]
   },
@@ -309,7 +321,10 @@ const scenesA: readonly Gpt56RevisionScene[] = [
         "evidence/02-efficient-default.png",
         "OpenAI · GPT-5.6 launch",
         "The tier is the first routing decision",
-        { x: 0.37, y: 0.1, width: 0.43, height: 0.34 }
+        { x: 0.37, y: 0.1, width: 0.43, height: 0.34 },
+        1,
+        1905 / 1072,
+        1.7
       )
     ]
   },
@@ -321,7 +336,10 @@ const scenesA: readonly Gpt56RevisionScene[] = [
         "evidence/06-max-ultra.png",
         "OpenAI · GPT-5.6 launch",
         "Max thinks longer; ultra uses agents",
-        { x: 0.38, y: 0.62, width: 0.42, height: 0.29 }
+        { x: 0.38, y: 0.62, width: 0.42, height: 0.29 },
+        1,
+        1905 / 1072,
+        1.65
       )
     ]
   },
@@ -334,7 +352,10 @@ const scenesA: readonly Gpt56RevisionScene[] = [
         "evidence/09-coderabbit-hands-on.png",
         "CodeRabbit · hands-on coding test",
         "Measure the cost of a solved task",
-        { x: 0.08, y: 0.42, width: 0.84, height: 0.42 }
+        { x: 0.08, y: 0.42, width: 0.84, height: 0.42 },
+        1,
+        1440 / 1200,
+        1.5
       )
     ]
   },
@@ -343,17 +364,23 @@ const scenesA: readonly Gpt56RevisionScene[] = [
     beats: [
       zoom(
         "simon-low-cost",
-        "evidence/10-simon-willison-cost-example.png",
+        "evidence/10-simon-low-none.png",
         "Simon Willison · GPT-5.6 pelican test",
-        "Luna at no effort: 0.71 cents",
-        { x: 0.05, y: 0.02, width: 0.35, height: 0.21 }
+        "Least expensive: Luna + none · 0.71 cents",
+        { x: 0.02, y: 0.17, width: 0.4, height: 0.45 },
+        1,
+        16 / 9,
+        1.35
       ),
       zoom(
         "simon-high-cost",
-        "evidence/10-simon-willison-cost-example.png",
+        "evidence/10-simon-high-max.png",
         "Simon Willison · GPT-5.6 pelican test",
-        "Sol at max effort: 48.55 cents",
-        { x: 0.59, y: 0.79, width: 0.4, height: 0.2 }
+        "Most expensive: Sol + max · 48.55 cents",
+        { x: 0.66, y: 0.48, width: 0.33, height: 0.43 },
+        1,
+        16 / 9,
+        1.35
       )
     ]
   },
@@ -365,14 +392,20 @@ const scenesA: readonly Gpt56RevisionScene[] = [
         "evidence/08-footnotes.png",
         "OpenAI · launch footnote",
         "Real-world cost and latency can differ",
-        { x: 0.31, y: 0.8, width: 0.46, height: 0.17 }
+        { x: 0.31, y: 0.8, width: 0.46, height: 0.17 },
+        1,
+        1905 / 1072,
+        1.45
       ),
       zoom(
         "system-card",
         "evidence/05-system-card-caveat.png",
         "OpenAI · GPT-5.6 system card",
         "More autonomy needs tighter scope",
-        { x: 0.35, y: 0.08, width: 0.53, height: 0.2 }
+        { x: 0, y: 0, width: 1, height: 1 },
+        1,
+        1695 / 820,
+        1.08
       )
     ]
   },
@@ -384,11 +417,14 @@ const scenesA: readonly Gpt56RevisionScene[] = [
         "evidence/04-availability-pricing.png",
         "OpenAI · GPT-5.6 pricing",
         "Model choice becomes work allocation",
-        { x: 0.38, y: 0.77, width: 0.43, height: 0.2 }
+        { x: 0.34, y: 0.74, width: 0.55, height: 0.25 },
+        1,
+        1905 / 1072,
+        1.35
       )
     ]
   },
-  { narrationId: "a_takeaway", beats: [saltwind(), spirograph()] }
+  { narrationId: "a_takeaway", beats: [hero(), spirograph(2)] }
 ];
 
 const scenesB: readonly Gpt56RevisionScene[] = [
@@ -711,6 +747,19 @@ export function validateGpt56Revision(manifest: Gpt56RevisionManifest): void {
       if (!Number.isFinite(beat.weight) || beat.weight <= 0) {
         throw new Error(`Invalid evidence weight: ${beat.id}`);
       }
+      if (
+        (beat.kind === "source_zoom" || beat.kind === "image") &&
+        (!Number.isFinite(beat.sourceAspectRatio) || beat.sourceAspectRatio <= 0)
+      ) {
+        throw new Error(`Invalid source aspect ratio: ${beat.id}`);
+      }
+      if (
+        (beat.kind === "source_zoom" || beat.kind === "image") &&
+        beat.maxScale !== undefined &&
+        (!Number.isFinite(beat.maxScale) || beat.maxScale < 1)
+      ) {
+        throw new Error(`Invalid zoom scale cap: ${beat.id}`);
+      }
     }
     if (!beats.some((beat) => beat.assetPath.endsWith("openai-hero-excerpt.mp4"))) {
       throw new Error(`Variant ${variant.id} omits the article hero video`);
@@ -768,10 +817,6 @@ const sha256File = async (path: string): Promise<string> =>
   createHash("sha256").update(await readFile(path)).digest("hex");
 
 const validateRevisionEditorialInputs = async (episodeDir: string): Promise<void> => {
-  const [researchManifest, mediaManifest] = await Promise.all([
-    readJson<ResearchManifest>(join(episodeDir, "research-manifest.json")),
-    readJson<MediaManifest>(join(episodeDir, "media-manifest.json"))
-  ]);
   const usedPrimaryMotionAssets = [
     ...new Set(
       GPT56_REVISION.variants.flatMap((variant) =>
@@ -785,9 +830,8 @@ const validateRevisionEditorialInputs = async (episodeDir: string): Promise<void
       )
     )
   ];
-  validateArticleEditorialGate({
-    researchManifest,
-    mediaManifest,
+  await validateArticleEpisodePreflight({
+    episodeDir,
     usedPrimaryMotionAssets
   });
 };
@@ -1213,6 +1257,41 @@ interface MotionProof {
   readonly secondFrame: string;
 }
 
+interface MotionCadenceProof {
+  readonly assetPath: string;
+  readonly meaningfulFrames: number;
+  readonly durationSeconds: number;
+  readonly meaningfulFramesPerSecond: number;
+  readonly minimumFps: number;
+  readonly pass: boolean;
+}
+
+const motionCadenceForAsset = async (options: {
+  readonly ffmpeg: string;
+  readonly ffprobe: string;
+  readonly episodeDir: string;
+  readonly assetPath: string;
+}): Promise<MotionCadenceProof> => {
+  const file = join(options.episodeDir, options.assetPath);
+  const durationSeconds = await ffprobeDurationSeconds(options.ffprobe, file);
+  const result = await runCommand(options.ffmpeg, [
+    "-hide_banner",
+    "-i",
+    file,
+    "-vf",
+    "mpdecimate",
+    "-an",
+    "-f",
+    "null",
+    "-"
+  ]);
+  const meaningfulFrames = parseMpdecimateFrameCount(`${result.stdout}\n${result.stderr}`);
+  return {
+    assetPath: options.assetPath,
+    ...evaluateMotionCadence({ meaningfulFrames, durationSeconds, minimumFps: 8 })
+  };
+};
+
 const motionProofForBeat = async (options: {
   readonly ffmpeg: string;
   readonly finalVideoPath: string;
@@ -1367,6 +1446,20 @@ export async function runGpt56RevisionQa(
       frameCount: frames.length
     });
     const allBeats = windows.flatMap((window) => window.beats);
+    const interactiveAssets = [
+      ...new Set(
+        variant.scenes.flatMap((scene) =>
+          scene.beats.flatMap((beat) =>
+            beat.kind === "interactive_capture" ? [beat.assetPath] : []
+          )
+        )
+      )
+    ];
+    const motionCadenceProofs = await Promise.all(
+      interactiveAssets.map((assetPath) =>
+        motionCadenceForAsset({ ffmpeg, ffprobe, episodeDir, assetPath })
+      )
+    );
     const requiredMotion = ["openai-top-hero", "saltwind-gameplay", "spirograph-build"];
     const motionProofs = await Promise.all(
       requiredMotion.map(async (beatId) => {
@@ -1468,6 +1561,13 @@ export async function runGpt56RevisionQa(
         detail: motionProofs.map((proof) => `${proof.beatId} ssim=${proof.ssim.toFixed(4)}`).join(", ")
       },
       {
+        name: "interactive_motion_cadence",
+        pass: motionCadenceProofs.length > 0 && motionCadenceProofs.every((proof) => proof.pass),
+        detail: motionCadenceProofs
+          .map((proof) => `${proof.assetPath} meaningful=${proof.meaningfulFramesPerSecond.toFixed(2)}fps`)
+          .join(", ")
+      },
+      {
         name: "pacing",
         pass: longStaticHolds.length === 0,
         detail: longStaticHolds.length === 0 ? "no unacknowledged static hold exceeds 12s" : JSON.stringify(longStaticHolds)
@@ -1511,6 +1611,7 @@ export async function runGpt56RevisionQa(
       media: inspection,
       frames,
       motionProofs,
+      motionCadenceProofs,
       audio: { meanVolume, maxVolume, stream: audioStream, tailAudioPath },
       longStaticHolds
     });
